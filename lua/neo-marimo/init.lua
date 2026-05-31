@@ -91,14 +91,18 @@ function M.attach(source_bufnr)
   local nb_bufnr_ref = nil  -- filled in after buffer creation below
   nb._on_ws_message = function(msg)
     local op = msg.op or msg.name
+    -- Marimo's wire format wraps everything: {"op": "...", "data": {...}}
+    -- Our own ws_client.py status messages (neo_marimo_*) are flat.
+    local payload = (type(msg.data) == "table" and msg.data) or msg
+
     if op == "cell-op" then
       if nb_bufnr_ref and vim.api.nvim_buf_is_valid(nb_bufnr_ref) then
-        output.handle_cell_op(nb_bufnr_ref, nb, msg)
+        output.handle_cell_op(nb_bufnr_ref, nb, payload)
       end
     elseif op == "kernel-ready" then
       -- Server sent kernel-ready: update our cell ID mapping from server's order
-      if msg.cell_ids then
-        for i, srv_id in ipairs(msg.cell_ids) do
+      if payload.cell_ids then
+        for i, srv_id in ipairs(payload.cell_ids) do
           local cell = nb.cells[i]
           if cell and srv_id ~= cell.id then
             -- Re-key the cell with the server's authoritative ID
