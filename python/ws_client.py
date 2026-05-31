@@ -19,12 +19,14 @@ def emit(msg: dict) -> None:
     print(json.dumps(msg), flush=True)
 
 
-async def main(port: int, session_id: str, filepath: str = "") -> None:
+async def main(port: int, session_id: str, filepath: str = "", access_token: str = "") -> None:
     import websockets
 
     params: dict[str, str] = {"session_id": session_id}
     if filepath:
         params["file"] = filepath
+    if access_token:
+        params["access_token"] = access_token
     query = urllib.parse.urlencode(params)
     url = f"ws://127.0.0.1:{port}/ws?{query}"
 
@@ -66,5 +68,6 @@ if __name__ == "__main__":
     port = int(sys.argv[1])
     session_id = sys.argv[2]
     filepath = sys.argv[3] if len(sys.argv) > 3 else ""
+    access_token = sys.argv[4] if len(sys.argv) > 4 else ""
 
-    asyncio.run(main(port, session_id, filepath))
+    asyncio.run(main(port, session_id, filepath, access_token))

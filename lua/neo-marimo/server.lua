@@ -10,12 +10,14 @@ local M = {}
 
 -- module-level table: filepath -> server state
 -- {
---   job_id      = number,   marimo server job
---   ws_job_id   = number,   ws_client.py job
---   port        = number,
---   session_id  = string,   UUID used in HTTP headers + WS URL
+--   job_id       = number,   marimo server job
+--   ws_job_id    = number,   ws_client.py job
+--   port         = number,
+--   session_id   = string,   UUID used in HTTP headers + WS URL
+--   access_token = string|nil, token parsed from marimo's startup URL
+--   browser_url  = string,   the full URL marimo printed (may include token)
 --   instantiated = bool,
---   on_message  = function, callback for WS messages (set by caller)
+--   on_message   = function, callback for WS messages
 -- }
 M._servers = {}
 
@@ -23,8 +25,12 @@ local ws_client_path = utils.plugin_root() .. "/python/ws_client.py"
 
 -- ── helpers ────────────────────────────────────────────────────────────────
 
-local function base_url(port)
-  return "http://127.0.0.1:" .. tostring(port)
+local function api_url(srv, path)
+  local base = "http://127.0.0.1:" .. tostring(srv.port) .. path
+  if srv.access_token then
+    base = base .. "?access_token=" .. srv.access_token
+  end
+  return base
 end
 
 -- Synchronous HTTP GET. Returns body string or nil on error.
@@ -34,7 +40,7 @@ local function http_get(url)
   return r.stdout
 end
 
--- Synchronous HTTP POST with JSON body and optional Marimo-Session-Id header.
+-- Synchronous HTTP POST with JSON body.
 -- Returns decoded body table or nil on error.
 local function http_post(url, body, session_id)
   local json_body, err = utils.json_encode(body)
@@ -64,9 +70,25 @@ local function http_post(url, body, session_id)
   return data
 end
 
+-- Parse the URL from a line of marimo's startup output.
+-- Marimo prints: "  ➜  URL: http://localhost:PORT?access_token=XXX"
+local function parse_startup_url(line)
+  -- Strip ANSI escape codes first
+  local clean = line:gsub("\27%[[%d;]*m", "")
+  local url = clean:match("URL:%s*(https?://%S+)")
+  if not url then return nil, nil, nil end
+
+  -- Normalise localhost -> 127.0.0.1
+  url = url:gsub("^http://localhost:", "http://127.0.0.1:")
+
+  local port = tonumber(url:match(":(%d+)"))
+  local token = url:match("[?&]access_token=([^&%s]+)")
+  return url, port, token
+end
+
 -- Poll the server health endpoint until it responds or timeout (ms).
 local function wait_for_server(port, timeout_ms)
-  local url = base_url(port) .. "/health"
+  local url = "http://127.0.0.1:" .. tostring(port) .. "/health"
   local elapsed = 0
   local interval = 200
 
@@ -81,7 +103,7 @@ local function wait_for_server(port, timeout_ms)
   return false
 end
 
--- Generate a simple UUID v4-like string for session IDs.
+-- Generate a UUID v4-like string for session IDs.
 local function new_session_id()
   local template = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx"
   return template:gsub("[xy]", function(c)
@@ -92,11 +114,10 @@ end
 
 -- ── public API ─────────────────────────────────────────────────────────────
 
--- Check whether a server is currently tracked (and its process is alive).
+-- Check whether a server tracked by us is currently alive.
 function M.is_running(filepath)
   local srv = M._servers[filepath]
   if not srv then return false end
-  -- jobwait with 0 timeout: returns -1 if still running
   local status = vim.fn.jobwait({ srv.job_id }, 0)
   return status[1] == -1
 end
@@ -106,45 +127,68 @@ end
 function M.start(filepath, port, on_message)
   port = port or config.options.server.port or 2718
   local marimo_cmd = config.options.marimo_cmd or "marimo"
-  local python_path = config.options.python_path or "python3"
 
-  -- If already running on this port just return existing state
   if M.is_running(filepath) then
     return M._servers[filepath]
   end
 
-  -- Start the marimo server in headless mode (no browser, no auth token)
-  local job_id = vim.fn.jobstart(
-    { marimo_cmd, "edit", "--headless", "--no-token", "--port", tostring(port), filepath },
-    {
-      on_exit = function(_, code)
-        -- Clean up state when the server exits
-        if M._servers[filepath] and M._servers[filepath].job_id == job_id then
-          M._servers[filepath] = nil
-        end
-      end,
-      -- Suppress marimo's own log output from polluting :messages
-      on_stdout = function() end,
-      on_stderr = function() end,
-    }
-  )
-
-  if job_id <= 0 then
-    utils.error("Failed to start marimo server. Is '" .. marimo_cmd .. "' on PATH?")
-    return nil
-  end
-
   local session_id = new_session_id()
 
+  -- srv is created early so the on_stdout closure can write to it
   local srv = {
-    job_id = job_id,
+    job_id = nil,
     ws_job_id = nil,
     port = port,
     session_id = session_id,
+    access_token = nil,
+    browser_url = nil,
     instantiated = false,
     on_message = on_message,
   }
   M._servers[filepath] = srv
+
+  -- Start marimo in headless mode. We intentionally do NOT pass --no-token so
+  -- that if marimo requires auth, we capture the token from its startup output
+  -- and use it for every subsequent request.
+  local job_id = vim.fn.jobstart(
+    { marimo_cmd, "edit", "--headless", "--port", tostring(port), filepath },
+    {
+      -- Capture both streams to find the startup URL marimo prints
+      on_stdout = function(_, data)
+        for _, line in ipairs(data) do
+          local url, parsed_port, token = parse_startup_url(line)
+          if url and not srv.browser_url then
+            srv.browser_url = url
+            if parsed_port then srv.port = parsed_port end
+            srv.access_token = token  -- nil when --no-token was used
+          end
+        end
+      end,
+      on_stderr = function(_, data)
+        for _, line in ipairs(data) do
+          local url, parsed_port, token = parse_startup_url(line)
+          if url and not srv.browser_url then
+            srv.browser_url = url
+            if parsed_port then srv.port = parsed_port end
+            srv.access_token = token
+          end
+        end
+      end,
+      on_exit = function(_, code)
+        if M._servers[filepath] and M._servers[filepath].job_id == job_id then
+          M._servers[filepath] = nil
+        end
+      end,
+    }
+  )
+
+  if job_id <= 0 then
+    M._servers[filepath] = nil
+    utils.error("Failed to start marimo server. Is '" .. marimo_cmd .. "' on PATH?")
+    return nil
+  end
+
+  srv.job_id = job_id
   return srv
 end
 
@@ -156,13 +200,11 @@ function M.stop(filepath)
     return
   end
 
-  -- Kill WS client first (it's a child of the server effectively)
   if srv.ws_job_id then
     pcall(vim.fn.jobstop, srv.ws_job_id)
     srv.ws_job_id = nil
   end
 
-  -- Kill the marimo server
   pcall(vim.fn.jobstop, srv.job_id)
   M._servers[filepath] = nil
 
@@ -170,7 +212,6 @@ function M.stop(filepath)
 end
 
 -- Connect a WebSocket client to the running server.
--- `on_message(msg_table)` is called for each message received.
 function M.connect_ws(filepath, on_message)
   local srv = M._servers[filepath]
   if not srv then
@@ -180,42 +221,43 @@ function M.connect_ws(filepath, on_message)
 
   local python_path = config.options.python_path or "python3"
 
-  local ws_job_id = vim.fn.jobstart(
-    { python_path, ws_client_path, tostring(srv.port), srv.session_id, filepath },
-    {
-      on_stdout = function(_, data)
-        for _, line in ipairs(data) do
-          if line ~= "" then
-            local msg, err = utils.json_decode(line)
-            if not err and msg then
-              vim.schedule(function()
-                local current_on_message = (M._servers[filepath] or {}).on_message
-                if current_on_message then
-                  current_on_message(msg)
-                end
-              end)
-            end
-          end
-        end
-      end,
-      on_stderr = function(_, data)
-        for _, line in ipairs(data) do
-          if line ~= "" then
+  -- Pass the access token to ws_client.py so it can include it in the WS URL
+  local ws_args = { python_path, ws_client_path, tostring(srv.port), srv.session_id, filepath }
+  if srv.access_token then
+    table.insert(ws_args, srv.access_token)
+  end
+
+  local ws_job_id = vim.fn.jobstart(ws_args, {
+    on_stdout = function(_, data)
+      for _, line in ipairs(data) do
+        if line ~= "" then
+          local msg, err = utils.json_decode(line)
+          if not err and msg then
             vim.schedule(function()
-              utils.warn("ws_client: " .. line)
+              local current_srv = M._servers[filepath]
+              if current_srv and current_srv.on_message then
+                current_srv.on_message(msg)
+              end
             end)
           end
         end
-      end,
-      on_exit = function(_, code)
-        if code ~= 0 then
-          vim.schedule(function()
-            utils.warn("WebSocket client exited with code " .. tostring(code))
-          end)
+      end
+    end,
+    on_stderr = function(_, data)
+      for _, line in ipairs(data) do
+        if line ~= "" then
+          vim.schedule(function() utils.warn("ws_client: " .. line) end)
         end
-      end,
-    }
-  )
+      end
+    end,
+    on_exit = function(_, code)
+      if code ~= 0 then
+        vim.schedule(function()
+          utils.warn("WebSocket client exited (code " .. tostring(code) .. ")")
+        end)
+      end
+    end,
+  })
 
   if ws_job_id <= 0 then
     utils.error("Failed to start WebSocket client")
@@ -223,19 +265,17 @@ function M.connect_ws(filepath, on_message)
   end
 
   srv.ws_job_id = ws_job_id
-  if on_message then
-    srv.on_message = on_message
-  end
+  if on_message then srv.on_message = on_message end
   return true
 end
 
--- Send HTTP POST /api/kernel/instantiate to start cell execution.
+-- Send HTTP POST /api/kernel/instantiate.
 function M.instantiate(filepath)
   local srv = M._servers[filepath]
   if not srv then return false end
 
   local result = http_post(
-    base_url(srv.port) .. "/api/kernel/instantiate",
+    api_url(srv, "/api/kernel/instantiate"),
     { objectIds = {}, values = {}, autoRun = true },
     srv.session_id
   )
@@ -248,7 +288,6 @@ function M.instantiate(filepath)
 end
 
 -- Send HTTP POST /api/kernel/run for one or more cells.
--- `cell_ids` and `codes` are parallel lists.
 function M.run_cells(filepath, cell_ids, codes)
   local srv = M._servers[filepath]
   if not srv then
@@ -257,7 +296,7 @@ function M.run_cells(filepath, cell_ids, codes)
   end
 
   local result = http_post(
-    base_url(srv.port) .. "/api/kernel/run",
+    api_url(srv, "/api/kernel/run"),
     { cellIds = cell_ids, codes = codes },
     srv.session_id
   )
@@ -265,25 +304,25 @@ function M.run_cells(filepath, cell_ids, codes)
   return result ~= nil and result.success == true
 end
 
--- Open the browser pointing at the running server.
+-- Open the browser using the exact URL marimo printed on startup.
 function M.open_browser(filepath)
   local srv = M._servers[filepath]
   if not srv then return end
-  local url = "http://127.0.0.1:" .. tostring(srv.port)
+
+  -- Use the URL marimo gave us (which already has the token if auth is on).
+  -- Fall back to bare URL only if we somehow never got the startup output.
+  local url = srv.browser_url or ("http://127.0.0.1:" .. tostring(srv.port))
   vim.fn.jobstart({ "open", url }, { detach = true })
-  vim.notify("[neo-marimo] Opening " .. url .. " ...", vim.log.levels.INFO)
+  vim.notify("[neo-marimo] Opening " .. url:gsub("%?.*", "") .. " ...", vim.log.levels.INFO)
 end
 
--- Full start-and-open flow: start server if needed, wait for it, connect WS,
--- instantiate kernel, then open browser. Calls `on_message` for WS messages.
--- `nb` is the notebook state table; `on_message` is a function(msg).
+-- Full start-and-open flow: start server if needed, wait for ready, connect
+-- WS, instantiate kernel, then open browser.
 function M.start_and_open(nb, on_message)
   local filepath = nb.filepath
   local port = config.options.server.port or 2718
-  local python_path = config.options.python_path or "python3"
 
   if M.is_running(filepath) then
-    -- Server already up — just open browser
     M.open_browser(filepath)
     return
   end
@@ -293,9 +332,8 @@ function M.start_and_open(nb, on_message)
   local srv = M.start(filepath, port, on_message)
   if not srv then return end
 
-  -- Poll in background (can't block the UI)
   vim.defer_fn(function()
-    local ready = wait_for_server(port, 10000)  -- 10 second timeout
+    local ready = wait_for_server(port, 10000)
     if not ready then
       utils.error("Marimo server did not start within 10 seconds.")
       M.stop(filepath)
@@ -304,10 +342,8 @@ function M.start_and_open(nb, on_message)
 
     vim.notify("[neo-marimo] Server ready. Connecting...", vim.log.levels.INFO)
 
-    -- Connect WebSocket
     M.connect_ws(filepath, on_message)
 
-    -- Give WS a moment to connect before instantiating
     vim.defer_fn(function()
       M.instantiate(filepath)
       M.open_browser(filepath)
