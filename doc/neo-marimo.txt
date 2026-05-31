@@ -1,0 +1,131 @@
+*neo-marimo.txt*  Neovim plugin for editing Marimo notebooks
+
+==============================================================================
+CONTENTS                                                    *neo-marimo-contents*
+
+  1. Introduction .............. |neo-marimo-intro|
+  2. Setup ...................... |neo-marimo-setup|
+  3. Usage ...................... |neo-marimo-usage|
+  4. Keymaps .................... |neo-marimo-keymaps|
+  5. Commands ................... |neo-marimo-commands|
+  6. Configuration .............. |neo-marimo-config|
+  7. Health check ............... |neo-marimo-health|
+
+==============================================================================
+1. INTRODUCTION                                              *neo-marimo-intro*
+
+neo-marimo lets you edit Marimo notebooks (*.py files) in Neovim with a
+notebook-like visual experience. Cells are displayed as visually distinct
+regions with colored borders. Cell types (Python, Markdown, SQL) receive
+correct syntax highlighting.
+
+Marimo notebooks are saved as pure Python files, so neo-marimo works by
+parsing the @app.cell decorated functions and presenting them as editable
+cells, then writing them back as valid Marimo Python when you save.
+
+==============================================================================
+2. SETUP                                                     *neo-marimo-setup*
+
+Add to your Neovim config (vim.pack): >lua
+  vim.pack.add("https://github.com/YOUR_USERNAME/neo-marimo")
+<
+Then configure: >lua
+  require("neo-marimo").setup({
+    -- Python interpreter with marimo installed
+    python_path = "/path/to/venv/bin/python",
+    -- marimo CLI command
+    marimo_cmd = "marimo",
+  })
+<
+The setup() call is optional — the plugin auto-detects marimo notebooks
+with default settings. However, you MUST set python_path if marimo is not
+in your default python3.
+
+==============================================================================
+3. USAGE                                                     *neo-marimo-usage*
+
+Simply open any Marimo notebook file: >
+  nvim my_notebook.py
+<
+The plugin automatically detects the file as a Marimo notebook and switches
+to the notebook view, showing each cell with colored borders.
+
+- Python cells have blue borders
+- Markdown cells have green borders
+- SQL cells have purple borders
+
+Edits you make are saved back to the original .py file on :w
+
+==============================================================================
+4. KEYMAPS                                                  *neo-marimo-keymaps*
+
+Default keymaps (all buffer-local, only active in notebook buffers):
+
+  ]m              Next cell
+  [m              Previous cell
+  <leader>mn      New cell below cursor
+  <leader>mN      New cell above cursor
+  <leader>md      Delete cell under cursor
+  <leader>mJ      Move cell down
+  <leader>mK      Move cell up
+  <leader>mo      Open notebook in marimo browser editor
+
+Phase 2 keymaps (when server integration is added):
+  <leader>mr      Run cell under cursor
+  <leader>mR      Run all cells
+  <leader>mt      Toggle cell output display
+
+All keymaps can be customized in setup() under the keymaps table.
+Set any keymap to false to disable it.
+
+==============================================================================
+5. COMMANDS                                                *neo-marimo-commands*
+
+:MarimoOpen     Open the current notebook in the marimo browser editor
+:MarimoReload   Reload the notebook buffer from the .py file on disk
+:MarimoAttach   Manually attach neo-marimo to the current Python buffer
+
+==============================================================================
+6. CONFIGURATION                                            *neo-marimo-config*
+
+Full configuration with defaults: >lua
+  require("neo-marimo").setup({
+    python_path = "python3",    -- Python with marimo installed
+    marimo_cmd  = "marimo",     -- marimo CLI binary
+
+    server = {
+      host = "localhost",
+      port = 2718,
+      auto_start = true,
+    },
+
+    ui = {
+      border_style   = "rounded",  -- "rounded", "simple", or "none"
+      show_cell_name = true,        -- show function name in border
+      show_cell_index = true,       -- show cell number (#1, #2, ...)
+    },
+
+    keymaps = {
+      next_cell       = "]m",
+      prev_cell       = "[m",
+      new_cell_below  = "<leader>mn",
+      new_cell_above  = "<leader>mN",
+      delete_cell     = "<leader>md",
+      move_cell_down  = "<leader>mJ",
+      move_cell_up    = "<leader>mK",
+      open_in_browser = "<leader>mo",
+      run_cell        = "<leader>mr",
+      run_all         = "<leader>mR",
+      toggle_output   = "<leader>mt",
+    },
+  })
+<
+
+==============================================================================
+7. HEALTH CHECK                                             *neo-marimo-health*
+
+Run :checkhealth neo-marimo to verify your setup. This checks:
+- Whether the Python bridge can run
+- Whether marimo is importable from python_path
+
+vim:ft=help:ts=8:sw=4:et:tw=78:norl:
