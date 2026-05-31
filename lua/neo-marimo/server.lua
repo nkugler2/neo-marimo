@@ -53,7 +53,7 @@ end
 
 -- Synchronous HTTP POST with JSON body.
 -- Always sends Marimo-Session-Id + Marimo-Server-Token headers when present.
--- Returns decoded body table or nil on error.
+-- Returns decoded body table or nil on error (warns to :messages on failure).
 local function http_post(srv, path, body)
   local json_body, err = utils.json_encode(body)
   if err then
@@ -61,8 +61,12 @@ local function http_post(srv, path, body)
     return nil
   end
 
+  -- -w "\n%{http_code}" puts the HTTP status code on its own trailing line so
+  -- we can surface non-2xx responses (otherwise curl silently returns an
+  -- error body and we'd think the request succeeded).
   local args = {
     "curl", "-s", "--max-time", "10",
+    "-w", "\n%{http_code}",
     "-X", "POST",
     "-H", "Content-Type: application/json",
     "-H", "Marimo-Session-Id: " .. srv.session_id,
@@ -76,9 +80,23 @@ local function http_post(srv, path, body)
   table.insert(args, api_url(srv, path))
 
   local r = vim.system(args, { text = true }):wait()
-  if r.code ~= 0 then return nil end
+  if r.code ~= 0 then
+    utils.warn("POST " .. path .. " failed: curl exit " .. tostring(r.code))
+    return nil
+  end
 
-  local data, decode_err = utils.json_decode(r.stdout)
+  local body_str, status = r.stdout:match("^(.*)\n(%d+)%s*$")
+  if not status then
+    body_str = r.stdout
+    status = "?"
+  end
+
+  if status ~= "200" then
+    utils.warn("POST " .. path .. " → HTTP " .. status .. ": " .. (body_str or ""))
+    return nil
+  end
+
+  local data, decode_err = utils.json_decode(body_str)
   if decode_err then return nil end
   return data
 end

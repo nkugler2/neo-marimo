@@ -236,7 +236,21 @@ function M.handle_cell_op(bufnr, nb, msg)
   -- Find the cell by its server-assigned ID (nb.cell_by_id) or by scanning
   local cell = nb.cell_by_id[cell_id]
   if not cell then
-    -- Cell might not be in our map yet (new cell added from browser side)
+    -- Unknown cell IDs almost always mean our ID mapping is out of sync with
+    -- the server's (kernel-ready didn't re-key, or marimo registered cells
+    -- under different IDs at /run time). Warn once per ID so the user can
+    -- see what's happening instead of just watching "queued" forever.
+    nb._unknown_cell_ids = nb._unknown_cell_ids or {}
+    if not nb._unknown_cell_ids[cell_id] then
+      nb._unknown_cell_ids[cell_id] = true
+      local known = {}
+      for id, _ in pairs(nb.cell_by_id) do table.insert(known, id) end
+      vim.notify(
+        "[neo-marimo] cell-op for unknown cell '" .. cell_id
+          .. "'. Known: " .. table.concat(known, ", "),
+        vim.log.levels.WARN
+      )
+    end
     return
   end
 

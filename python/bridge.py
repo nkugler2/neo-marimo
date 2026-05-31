@@ -72,9 +72,16 @@ def cmd_generate() -> None:
     cells = data["cells"]
     filepath = data.get("filepath", "notebook.py")
 
+    # Lua's empty {} round-trips through vim.json.encode as JSON [] (array),
+    # so c["options"] can arrive as a list when the cell has no options.
+    # Treat anything that isn't a dict as an empty config.
+    def _opts(c: dict) -> dict:
+        v = c.get("options")
+        return v if isinstance(v, dict) else {}
+
     codes = [c["code"] for c in cells]
     names = [c.get("name", "_") for c in cells]
-    cell_configs = [CellConfig.from_dict(c.get("options", {}), warn=False) for c in cells]
+    cell_configs = [CellConfig.from_dict(_opts(c), warn=False) for c in cells]
 
     header_comments = get_header_comments(filepath)
 
