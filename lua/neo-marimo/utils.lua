@@ -34,12 +34,15 @@ function M.json_encode(t)
   return result, nil
 end
 
--- Safe JSON decode with error handling
+-- Safe JSON decode with error handling.
+-- luanil = { object = true, array = true } makes JSON `null` decode to Lua nil
+-- instead of vim.NIL (userdata). vim.NIL is truthy and breaks `if value then`
+-- guards on optional fields like cell_op.output.
 function M.json_decode(s)
   if not s or s == "" then
     return nil, "empty string"
   end
-  local ok, result = pcall(vim.json.decode, s)
+  local ok, result = pcall(vim.json.decode, s, { luanil = { object = true, array = true } })
   if not ok then
     return nil, result
   end
