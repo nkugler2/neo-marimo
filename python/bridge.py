@@ -14,19 +14,24 @@ from pathlib import Path
 
 def cmd_check() -> None:
     import platform
+    error = None
     try:
         import marimo
         marimo_version = marimo.__version__
         ok = True
-    except ImportError:
+    except ImportError as e:
         marimo_version = None
         ok = False
+        error = f"marimo not importable from this Python: {e}"
 
-    json.dump({
+    result = {
         "ok": ok,
         "python_version": platform.python_version(),
         "marimo_version": marimo_version,
-    }, sys.stdout)
+    }
+    if error:
+        result["error"] = error
+    json.dump(result, sys.stdout)
 
 
 def cmd_parse(filepath: str) -> None:

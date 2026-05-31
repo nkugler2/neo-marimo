@@ -16,15 +16,28 @@ function M.check()
       "Python bridge OK (Python " .. result.python_version
       .. ", marimo " .. (result.marimo_version or "?") .. ")"
     )
-  else
+  elseif result.python_version then
+    -- Bridge ran but marimo wasn't importable
     vim.health.error(
-      "Python bridge FAILED: " .. (result.error or "unknown error")
+      "marimo not found in this Python (Python " .. result.python_version .. "): "
+      .. (result.error or "marimo not importable")
+    )
+    vim.health.info("python_path is: " .. python_path)
+    vim.health.info(
+      "Fix: set python_path in setup() to the Python that has marimo installed."
     )
     vim.health.info(
-      "Fix: set python_path in setup() to a Python with marimo installed."
+      "  Example: require('neo-marimo').setup({ python_path = '/Users/noahkugler/.pyenv/versions/MyMainTestingPython/bin/python' })"
     )
+    return
+  else
+    -- Bridge itself failed to run
+    vim.health.error(
+      "Python bridge failed to run: " .. (result.error or "could not execute python")
+    )
+    vim.health.info("python_path is: " .. python_path)
     vim.health.info(
-      "Example: require('neo-marimo').setup({ python_path = '/path/to/venv/bin/python' })"
+      "Make sure '" .. python_path .. "' is a valid Python 3 interpreter."
     )
     return
   end
