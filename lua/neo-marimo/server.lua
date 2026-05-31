@@ -245,6 +245,15 @@ function M.connect_ws(filepath, on_message)
         if line ~= "" then
           local msg, err = utils.json_decode(line)
           if not err and msg then
+            -- Mark the WS as live the moment we see our own
+            -- neo_marimo_connected sentinel. start_and_open waits on this
+            -- flag before opening the browser, otherwise the browser races
+            -- our ws_client.py for the single allowed EDIT-mode connection
+            -- and our session never gets created (HTTP 500 "Invalid session id").
+            if msg.op == "neo_marimo_connected" then
+              local current_srv = M._servers[filepath]
+              if current_srv then current_srv.ws_connected = true end
+            end
             vim.schedule(function()
               local current_srv = M._servers[filepath]
               if current_srv and current_srv.on_message then
@@ -357,12 +366,24 @@ function M.start_and_open(nb, on_message)
 
     vim.notify("[neo-marimo] Server ready. Connecting...", vim.log.levels.INFO)
 
+    srv.ws_connected = false
     M.connect_ws(filepath, on_message)
 
-    vim.defer_fn(function()
-      M.instantiate(filepath)
-      M.open_browser(filepath)
-    end, 500)
+    -- Block until ws_client.py has actually completed its handshake.
+    -- vim.wait yields to the event loop so on_stdout can set ws_connected.
+    -- If we open the browser before this, the browser's WS wins the single
+    -- EDIT-mode connection slot and our HTTP requests 500 with
+    -- "Invalid session id" because no session was ever created for us.
+    local connected = vim.wait(5000, function()
+      return srv.ws_connected == true
+    end, 50)
+
+    if not connected then
+      utils.warn("WebSocket client didn't connect within 5s; opening browser anyway.")
+    end
+
+    M.instantiate(filepath)
+    M.open_browser(filepath)
   end, 0)
 end
 
