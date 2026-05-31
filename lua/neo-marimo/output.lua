@@ -119,11 +119,20 @@ local function output_to_virt_lines(output)
   local mimetype = output.mimetype or "text/plain"
   local data = output.data
 
+  -- Marimo sends `output: {mimetype: "text/plain", data: ""}` for cells
+  -- with no return value (assignments, prints, defs). Treat empty string
+  -- payloads as "no output" so we don't render a blank line.
+  if type(data) == "string" and data == "" then
+    return {}
+  end
+
   if mimetype == "text/plain" then
     return render_text_plain(data)
   elseif mimetype == "application/vnd.marimo+error" then
     return render_error(data)
-  elseif mimetype == "text/html" then
+  -- Marimo renders mo.md() to HTML and sends it with the text/markdown
+  -- mimetype, so this is just the HTML strip path under a different name.
+  elseif mimetype == "text/html" or mimetype == "text/markdown" then
     return render_html(data)
   elseif mimetype == "application/vnd.dataresource+json" then
     return render_dataresource(data)
@@ -271,18 +280,25 @@ function M.handle_cell_op(bufnr, nb, msg)
     cell.output = msg.output
   end
 
-  -- Accumulate console output (list = replace, single = append)
+  -- Accumulate console output. The shape varies:
+  --   * `[]`                       → clear console
+  --   * `[CellOutput, ...]`        → replace console list
+  --   * `CellOutput` (object)      → append to console list
+  --
+  -- The first two have to be distinguished from the third by structure, not
+  -- by `#`: a single CellOutput is a table with named keys (channel/mimetype/
+  -- data), so `#msg.console == 0` is true for it too. `next(t) == nil` is
+  -- the only reliable "truly empty table" check.
   if msg.console then
-    if type(msg.console) == "table" and #msg.console == 0 then
-      -- Empty list = clear console
-      cell.console = nil
-    elseif type(msg.console) == "table" and msg.console[1] and msg.console[1].channel then
-      -- It's already a list of CellOutput objects
-      cell.console = msg.console
-    else
-      -- Single CellOutput
-      cell.console = cell.console or {}
-      table.insert(cell.console, msg.console)
+    if type(msg.console) == "table" then
+      if next(msg.console) == nil then
+        cell.console = nil
+      elseif msg.console[1] and msg.console[1].channel then
+        cell.console = msg.console
+      elseif msg.console.channel then
+        cell.console = cell.console or {}
+        table.insert(cell.console, msg.console)
+      end
     end
   end
 
