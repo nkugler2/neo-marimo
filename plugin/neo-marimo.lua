@@ -73,3 +73,19 @@ vim.api.nvim_create_user_command("MarimoAttach", function()
   local bufnr = vim.api.nvim_get_current_buf()
   require("neo-marimo").attach(bufnr)
 end, { desc = "Attach neo-marimo to current Python buffer" })
+
+vim.api.nvim_create_user_command("MarimoWsDebug", function(opts)
+  -- Toggle WS message logging. Without args: toggles on/off using a default
+  -- path. With an arg: enables logging to that path. Use "off" to disable.
+  if opts.args == "off" then
+    _G.neo_marimo_ws_log = nil
+    vim.notify("[neo-marimo] WS debug logging disabled", vim.log.levels.INFO)
+    return
+  end
+  local path = (opts.args ~= "" and opts.args) or "/tmp/neo-marimo-ws.log"
+  _G.neo_marimo_ws_log = path
+  -- Truncate so each session starts fresh
+  local f = io.open(path, "w")
+  if f then f:close() end
+  vim.notify("[neo-marimo] WS debug logging → " .. path, vim.log.levels.INFO)
+end, { nargs = "?", desc = "Toggle WebSocket message logging (path or 'off')" })

@@ -95,6 +95,17 @@ function M.attach(source_bufnr)
     -- Our own ws_client.py status messages (neo_marimo_*) are flat.
     local payload = (type(msg.data) == "table" and msg.data) or msg
 
+    -- Debug logging: when enabled, append every message to a log file so we
+    -- can see exactly what marimo is sending. Toggle with :MarimoWsDebug.
+    if _G.neo_marimo_ws_log then
+      local f = io.open(_G.neo_marimo_ws_log, "a")
+      if f then
+        f:write(os.date("[%H:%M:%S] ") .. (op or "?") .. " "
+          .. vim.json.encode(payload) .. "\n")
+        f:close()
+      end
+    end
+
     if op == "cell-op" then
       if nb_bufnr_ref and vim.api.nvim_buf_is_valid(nb_bufnr_ref) then
         output.handle_cell_op(nb_bufnr_ref, nb, payload)

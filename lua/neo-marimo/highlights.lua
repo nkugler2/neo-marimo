@@ -17,6 +17,7 @@ function M.setup()
   -- Status indicators
   vim.api.nvim_set_hl(0, "MarimoStatusRunning", { fg = "#FFA066", bold = true })
   vim.api.nvim_set_hl(0, "MarimoStatusError", { fg = "#E82424", bold = true })
+  vim.api.nvim_set_hl(0, "MarimoStatusOk", { fg = "#76946A", bold = true })
   vim.api.nvim_set_hl(0, "MarimoStatusIdle", { link = "Comment" })
 
   -- Output text

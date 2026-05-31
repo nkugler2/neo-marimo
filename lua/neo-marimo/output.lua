@@ -142,16 +142,19 @@ local function output_to_virt_lines(output)
 end
 
 -- Status indicator line at the top of each cell's output area.
-local function status_virt_line(status)
-  local icons = {
-    running = { "  ⟳ running", "MarimoStatusRunning" },
-    queued  = { "  ⟳ queued",  "MarimoStatusRunning" },
-    idle    = nil,  -- don't show idle status (it's the default)
-    error   = { "  ✖ error",   "MarimoStatusError" },
-  }
-  local entry = icons[status or "idle"]
-  if not entry then return nil end
-  return { entry }
+-- `has_run` lets us distinguish "never executed" (no indicator) from
+-- "executed successfully but produced no output" (✓ ran).
+local function status_virt_line(status, has_run)
+  if status == "running" then
+    return { { "  ⟳ running", "MarimoStatusRunning" } }
+  elseif status == "queued" then
+    return { { "  ⟳ queued", "MarimoStatusRunning" } }
+  elseif status == "error" then
+    return { { "  ✖ error", "MarimoStatusError" } }
+  elseif status == "idle" and has_run then
+    return { { "  ✓ ran", "MarimoStatusOk" } }
+  end
+  return nil
 end
 
 -- ── Public API ──────────────────────────────────────────────────────────────
@@ -169,8 +172,8 @@ function M.render(bufnr, cell)
 
   local virt_lines = {}
 
-  -- Status line (only for non-idle)
-  local status_line = status_virt_line(cell.status)
+  -- Status line (idle only shown once cell has actually been executed)
+  local status_line = status_virt_line(cell.status, cell._has_run)
   if status_line then
     table.insert(virt_lines, status_line)
   end
@@ -254,9 +257,13 @@ function M.handle_cell_op(bufnr, nb, msg)
     return
   end
 
-  -- Update status
+  -- Update status. Mark the cell as having been executed once we see it
+  -- finish (idle) or fail (error) — this is what gates the "✓ ran" indicator.
   if msg.status then
     cell.status = msg.status
+    if msg.status == "idle" or msg.status == "error" then
+      cell._has_run = true
+    end
   end
 
   -- Update output (only replace if a new output is provided)
