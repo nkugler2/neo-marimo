@@ -46,6 +46,17 @@ vim.api.nvim_create_user_command("MarimoOpen", function()
   vim.notify("[neo-marimo] Opening " .. vim.fn.fnamemodify(nb.filepath, ":t") .. " in browser...", vim.log.levels.INFO)
 end, { desc = "Open current marimo notebook in browser" })
 
+vim.api.nvim_create_user_command("MarimoStop", function()
+  local marimo = require("neo-marimo")
+  local nb = marimo.current_notebook()
+  if not nb then
+    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    return
+  end
+  require("neo-marimo.server").stop(nb.filepath)
+  require("neo-marimo.output").clear_all(nb.bufnr)
+end, { desc = "Stop the marimo server for the current notebook" })
+
 vim.api.nvim_create_user_command("MarimoReload", function()
   local marimo = require("neo-marimo")
   local nb = marimo.current_notebook()

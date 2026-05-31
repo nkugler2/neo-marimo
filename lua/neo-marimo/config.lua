@@ -36,6 +36,7 @@ M.defaults = {
     move_cell_down = "<leader>mJ",
     move_cell_up = "<leader>mK",
     open_in_browser = "<leader>mo",
+    stop_server = "<leader>mx",
     run_cell = "<leader>mr",
     run_all = "<leader>mR",
     toggle_output = "<leader>mt",

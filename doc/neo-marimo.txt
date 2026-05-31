@@ -68,9 +68,8 @@ Default keymaps (all buffer-local, only active in notebook buffers):
   <leader>md      Delete cell under cursor
   <leader>mJ      Move cell down
   <leader>mK      Move cell up
-  <leader>mo      Open notebook in marimo browser editor
-
-Phase 2 keymaps (when server integration is added):
+  <leader>mo      Start server (if not running) and open in browser
+  <leader>mx      Stop the marimo server
   <leader>mr      Run cell under cursor
   <leader>mR      Run all cells
   <leader>mt      Toggle cell output display
@@ -81,7 +80,8 @@ Set any keymap to false to disable it.
 ==============================================================================
 5. COMMANDS                                                *neo-marimo-commands*
 
-:MarimoOpen     Open the current notebook in the marimo browser editor
+:MarimoOpen     Start server (if needed) and open notebook in browser
+:MarimoStop     Stop the marimo server for the current notebook
 :MarimoReload   Reload the notebook buffer from the .py file on disk
 :MarimoAttach   Manually attach neo-marimo to the current Python buffer
 

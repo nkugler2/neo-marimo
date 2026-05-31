@@ -5,6 +5,8 @@ local buffer = require("neo-marimo.buffer")
 local sync = require("neo-marimo.sync")
 local keymaps = require("neo-marimo.keymaps")
 local highlights = require("neo-marimo.highlights")
+local output = require("neo-marimo.output")
+local server = require("neo-marimo.server")
 local utils = require("neo-marimo.utils")
 
 local M = {}
@@ -84,8 +86,38 @@ function M.attach(source_bufnr)
   -- Build notebook state
   local nb = notebook.new(filepath, data)
 
+  -- Build the WS message handler closure. Stored on nb so keymaps can pass it
+  -- to server.start_and_open without needing to re-create it each time.
+  local nb_bufnr_ref = nil  -- filled in after buffer creation below
+  nb._on_ws_message = function(msg)
+    local op = msg.op or msg.name
+    if op == "cell-op" then
+      if nb_bufnr_ref and vim.api.nvim_buf_is_valid(nb_bufnr_ref) then
+        output.handle_cell_op(nb_bufnr_ref, nb, msg)
+      end
+    elseif op == "kernel-ready" then
+      -- Server sent kernel-ready: update our cell ID mapping from server's order
+      if msg.cell_ids then
+        for i, srv_id in ipairs(msg.cell_ids) do
+          local cell = nb.cells[i]
+          if cell and srv_id ~= cell.id then
+            -- Re-key the cell with the server's authoritative ID
+            nb.cell_by_id[cell.id] = nil
+            cell.id = srv_id
+            nb.cell_by_id[srv_id] = cell
+          end
+        end
+      end
+    elseif op == "neo_marimo_connected" then
+      vim.notify("[neo-marimo] WebSocket connected.", vim.log.levels.INFO)
+    elseif op == "neo_marimo_error" then
+      utils.warn("WebSocket error: " .. (msg.message or "unknown"))
+    end
+  end
+
   -- Create the visual notebook buffer
   local nb_bufnr = buffer.create(nb, source_bufnr)
+  nb_bufnr_ref = nb_bufnr  -- close over the real bufnr
 
   -- Store notebook state on the buffer (Lua value; cleared when buffer is wiped)
   -- We store it in our module-level table since vim.b can't hold Lua objects directly
@@ -117,6 +149,10 @@ function M.attach(source_bufnr)
     once = true,
     callback = function()
       _attached[filepath] = nil
+      -- Stop the server if we started it
+      if server.is_running(filepath) then
+        server.stop(filepath)
+      end
     end,
   })
 

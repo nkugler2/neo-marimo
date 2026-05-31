@@ -2,6 +2,8 @@ local config = require("neo-marimo.config")
 local notebook = require("neo-marimo.notebook")
 local buffer = require("neo-marimo.buffer")
 local sync = require("neo-marimo.sync")
+local server = require("neo-marimo.server")
+local output = require("neo-marimo.output")
 local utils = require("neo-marimo.utils")
 
 local M = {}
@@ -209,26 +211,80 @@ function M.setup(bufnr, nb)
     end, o("Marimo: move cell up"))
   end
 
-  -- Open in browser
+  -- Open in browser (starts server if needed)
   if km.open_in_browser then
     vim.keymap.set("n", km.open_in_browser, function()
-      local marimo_cmd = config.options.marimo_cmd or "marimo"
-      vim.fn.jobstart({ marimo_cmd, "edit", nb.filepath }, { detach = true })
-      vim.notify("[neo-marimo] Opening in marimo browser...", vim.log.levels.INFO)
-    end, o("Marimo: open in browser"))
+      local on_message = nb._on_ws_message
+      server.start_and_open(nb, on_message)
+    end, o("Marimo: start server and open in browser"))
   end
 
-  -- Placeholder keymaps for Phase 2 (server execution)
+  -- Stop server
+  if km.stop_server then
+    vim.keymap.set("n", km.stop_server, function()
+      server.stop(nb.filepath)
+      output.clear_all(bufnr)
+    end, o("Marimo: stop server"))
+  end
+
+  -- Run cell under cursor
   if km.run_cell then
     vim.keymap.set("n", km.run_cell, function()
-      vim.notify("[neo-marimo] Cell execution requires server connection (Phase 2)", vim.log.levels.WARN)
+      if not server.is_running(nb.filepath) then
+        vim.notify("[neo-marimo] No server running. Press <leader>mo to start.", vim.log.levels.WARN)
+        return
+      end
+      -- Sync cell code from buffer first
+      buffer.sync_cells_from_buffer(nb)
+      local row = vim.api.nvim_win_get_cursor(0)[1] - 1
+      local cell = notebook.get_cell_at_row(nb, row)
+      if not cell then return end
+
+      cell.status = "queued"
+      output.render(bufnr, cell)
+
+      server.run_cells(nb.filepath, { cell.id }, { cell.code })
     end, o("Marimo: run cell"))
   end
 
+  -- Run all cells
   if km.run_all then
     vim.keymap.set("n", km.run_all, function()
-      vim.notify("[neo-marimo] Run all requires server connection (Phase 2)", vim.log.levels.WARN)
+      if not server.is_running(nb.filepath) then
+        vim.notify("[neo-marimo] No server running. Press <leader>mo to start.", vim.log.levels.WARN)
+        return
+      end
+      buffer.sync_cells_from_buffer(nb)
+
+      local cell_ids = {}
+      local codes = {}
+      for _, cell in ipairs(nb.cells) do
+        table.insert(cell_ids, cell.id)
+        table.insert(codes, cell.code)
+        cell.status = "queued"
+        output.render(bufnr, cell)
+      end
+
+      server.run_cells(nb.filepath, cell_ids, codes)
     end, o("Marimo: run all cells"))
+  end
+
+  -- Toggle output visibility
+  if km.toggle_output then
+    vim.keymap.set("n", km.toggle_output, function()
+      local row = vim.api.nvim_win_get_cursor(0)[1] - 1
+      local cell = notebook.get_cell_at_row(nb, row)
+      if not cell then return end
+
+      if cell._output_hidden then
+        cell._output_hidden = false
+        output.render(bufnr, cell)
+      else
+        cell._output_hidden = true
+        vim.api.nvim_buf_clear_namespace(bufnr, require("neo-marimo.highlights").ns_output,
+          cell.start_row, cell.end_row + 1)
+      end
+    end, o("Marimo: toggle cell output"))
   end
 end
 
