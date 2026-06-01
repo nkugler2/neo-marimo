@@ -89,3 +89,55 @@ vim.api.nvim_create_user_command("MarimoWsDebug", function(opts)
   if f then f:close() end
   vim.notify("[neo-marimo] WS debug logging → " .. path, vim.log.levels.INFO)
 end, { nargs = "?", desc = "Toggle WebSocket message logging (path or 'off')" })
+
+vim.api.nvim_create_user_command("MarimoNew", function(opts)
+  local filepath = opts.args ~= "" and opts.args
+    or vim.fn.input("New notebook path: ", vim.fn.getcwd() .. "/", "file")
+  if not filepath or filepath == "" then return end
+
+  -- Expand ~ and make absolute
+  filepath = vim.fn.expand(filepath)
+  if not filepath:match("%.py$") then
+    filepath = filepath .. ".py"
+  end
+
+  -- Refuse to overwrite an existing file
+  if vim.fn.filereadable(filepath) == 1 then
+    vim.notify("[neo-marimo] File already exists: " .. filepath, vim.log.levels.ERROR)
+    return
+  end
+
+  local marimo = require("neo-marimo")
+  local config = require("neo-marimo.config")
+  local parser = require("neo-marimo.parser")
+
+  if not config.options.python_path then
+    marimo.setup({})
+  end
+
+  -- Generate a minimal notebook with one empty cell
+  local python_path = config.options.python_path or "python3"
+  local ok, content = pcall(parser.generate_py, {
+    { name = "_", code = "", options = {} },
+  }, filepath, python_path)
+
+  if not ok then
+    vim.notify("[neo-marimo] Failed to generate notebook: " .. tostring(content), vim.log.levels.ERROR)
+    return
+  end
+
+  -- Write to disk
+  local lines = vim.split(content, "\n", { plain = true })
+  -- writefile appends a trailing newline; drop the last empty string if present
+  if lines[#lines] == "" then table.remove(lines) end
+  local write_ok, write_err = pcall(vim.fn.writefile, lines, filepath)
+  if not write_ok then
+    vim.notify("[neo-marimo] Could not write file: " .. tostring(write_err), vim.log.levels.ERROR)
+    return
+  end
+
+  -- Open the file in a new buffer and attach the plugin
+  vim.cmd.edit(filepath)
+  local bufnr = vim.api.nvim_get_current_buf()
+  marimo.attach(bufnr)
+end, { nargs = "?", complete = "file", desc = "Create a new marimo notebook" })
