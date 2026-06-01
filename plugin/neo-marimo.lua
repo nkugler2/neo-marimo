@@ -74,6 +74,48 @@ vim.api.nvim_create_user_command("MarimoAttach", function()
   require("neo-marimo").attach(bufnr)
 end, { desc = "Attach neo-marimo to current Python buffer" })
 
+vim.api.nvim_create_user_command("MarimoServerList", function()
+  local server = require("neo-marimo.server")
+  local lines = { "## neo-marimo managed servers" }
+
+  local managed = server.list_servers()
+  if #managed == 0 then
+    table.insert(lines, "  (none)")
+  else
+    for _, s in ipairs(managed) do
+      local age = s.started_at and (os.time() - s.started_at) or 0
+      table.insert(lines, string.format(
+        "  %s\n    port=%d  pid=%s  alive=%s  ws=%s  token=%s  age=%ds",
+        s.filepath, s.port, tostring(s.pid), tostring(s.alive),
+        tostring(s.ws_connected), tostring(s.has_token), age
+      ))
+    end
+  end
+
+  table.insert(lines, "")
+  table.insert(lines, "## All marimo edit processes on system")
+  local procs = server.list_system_marimo_processes()
+  if #procs == 0 then
+    table.insert(lines, "  (none)")
+  else
+    for _, p in ipairs(procs) do
+      local orphan = (p.ppid == 1) and "  [ORPHAN]" or ""
+      table.insert(lines, string.format("  pid=%d ppid=%s%s\n    %s",
+        p.pid, tostring(p.ppid), orphan, p.cmd))
+    end
+    table.insert(lines, "")
+    table.insert(lines, "Run :MarimoKillAll to terminate every marimo edit process.")
+  end
+
+  vim.notify(table.concat(lines, "\n"), vim.log.levels.INFO)
+end, { desc = "List managed marimo servers and orphan marimo processes" })
+
+vim.api.nvim_create_user_command("MarimoKillAll", function()
+  local server = require("neo-marimo.server")
+  local n = server.kill_all_system_marimo()
+  vim.notify("[neo-marimo] Killed " .. n .. " marimo process(es).", vim.log.levels.INFO)
+end, { desc = "Force-kill all marimo edit processes on the system" })
+
 vim.api.nvim_create_user_command("MarimoWsDebug", function(opts)
   -- Toggle WS message logging. Without args: toggles on/off using a default
   -- path. With an arg: enables logging to that path. Use "off" to disable.

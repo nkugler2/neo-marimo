@@ -11,6 +11,15 @@
 --                     <marimo-server-token data-token="...">. We fetch
 --                     the HTML once after the server reports healthy and
 --                     cache the token on the server state.
+--
+-- Port-conflict handling: we never trust the configured port (default 2718)
+-- blindly. Before spawning marimo we probe ports and pick the first free
+-- one starting from the configured port. This prevents the failure mode
+-- where an orphan `marimo edit` (or a different nvim session) already
+-- holds 2718, our --port flag is silently ignored by the OS, /health
+-- passes against the foreign server, and every API call fails with
+-- "Missing server token" because the foreign server has a different token
+-- (or no extractable token at all because its HTML 303s to /auth/login).
 
 local config = require("neo-marimo.config")
 local utils = require("neo-marimo.utils")
@@ -45,10 +54,47 @@ local function url_encode(s)
 end
 
 -- Synchronous HTTP GET. Returns body string or nil on error.
+-- Uses -f so curl exits non-zero on 4xx/5xx (otherwise we'd silently treat a
+-- 303 redirect body, an auth-login page, etc. as a valid response).
 local function http_get(url)
-  local r = vim.system({ "curl", "-s", "--max-time", "3", url }, { text = true }):wait()
+  local r = vim.system({ "curl", "-sf", "--max-time", "3", url }, { text = true }):wait()
   if r.code ~= 0 then return nil end
   return r.stdout
+end
+
+-- Check whether a TCP port is currently being listened on by anything.
+-- Used by find_free_port so we don't end up sharing a port with an orphan
+-- marimo (or any other process), in which case marimo would fail to bind
+-- silently and we'd be talking to whatever is already there.
+local function port_in_use(port)
+  local tcp = vim.uv.new_tcp()
+  if not tcp then return true end
+  local done, in_use = false, false
+  tcp:connect("127.0.0.1", port, function(err)
+    in_use = (err == nil)
+    done = true
+    pcall(function() tcp:close() end)
+  end)
+  -- Bounded wait: anything beyond a few hundred ms is pathological for
+  -- a loopback probe.
+  vim.wait(300, function() return done end, 10)
+  if not done then
+    pcall(function() tcp:close() end)
+    return true  -- conservatively treat unresponsive as in use
+  end
+  return in_use
+end
+
+-- Find a port that is not in use, starting at start_port and scanning up.
+-- Returns the first free port within `attempts` tries, or nil if none.
+local function find_free_port(start_port, attempts)
+  for offset = 0, attempts - 1 do
+    local p = start_port + offset
+    if not port_in_use(p) then
+      return p
+    end
+  end
+  return nil
 end
 
 -- Synchronous HTTP POST with JSON body.
@@ -148,11 +194,30 @@ end
 -- Start a headless marimo server for the given notebook.
 -- Returns the server state table, or nil on failure.
 function M.start(filepath, port, on_message)
-  port = port or config.options.server.port or 2718
+  local start_port = port or config.options.server.port or 2718
   local marimo_cmd = config.options.marimo_cmd or "marimo"
 
   if M.is_running(filepath) then
     return M._servers[filepath]
+  end
+
+  -- Pick a free port up front. Without this an orphan process on the
+  -- configured port silently steals every request: marimo --port fails
+  -- to bind, but /health on that port still passes (against the orphan),
+  -- and all our subsequent API calls 401 with the wrong server's token.
+  local actual_port = find_free_port(start_port, 20)
+  if not actual_port then
+    utils.error(
+      "No free port in range " .. start_port .. ".." .. (start_port + 19) ..
+        ". Run :MarimoServerList to see what is using them."
+    )
+    return nil
+  end
+  if actual_port ~= start_port then
+    vim.notify(
+      "[neo-marimo] Port " .. start_port .. " in use; using " .. actual_port .. ".",
+      vim.log.levels.INFO
+    )
   end
 
   local session_id = new_session_id()
@@ -160,19 +225,22 @@ function M.start(filepath, port, on_message)
   local srv = {
     job_id = nil,
     ws_job_id = nil,
-    port = port,
+    port = actual_port,
+    requested_port = start_port,
     session_id = session_id,
     server_token = nil,
     instantiated = false,
     on_message = on_message,
+    started_at = os.time(),
+    filepath = filepath,
   }
   M._servers[filepath] = srv
 
   -- --no-token disables the browser-auth access_token entirely. We still
-  -- need to capture the actual port marimo picks (it may differ from our
-  -- requested port if there's a conflict), so we tail stdout.
+  -- watch stdout for the URL line in case marimo's bind races with us and
+  -- it has to fall back to a different port.
   local job_id = vim.fn.jobstart(
-    { marimo_cmd, "edit", "--headless", "--no-token", "--port", tostring(port), filepath },
+    { marimo_cmd, "edit", "--headless", "--no-token", "--port", tostring(actual_port), filepath },
     {
       on_stdout = function(_, data)
         for _, line in ipairs(data) do
@@ -208,6 +276,11 @@ function M.start(filepath, port, on_message)
 end
 
 -- Stop the marimo server and WebSocket client for this notebook.
+-- SIGTERM via jobstop is not enough on its own: marimo launches a kernel
+-- subprocess which can survive when the parent dies (becoming a PPID=1
+-- orphan that keeps the port bound). We wait for the job to exit and
+-- then force-kill any leftover children so the port is genuinely free
+-- next time the user restarts.
 function M.stop(filepath)
   local srv = M._servers[filepath]
   if not srv then
@@ -215,13 +288,29 @@ function M.stop(filepath)
     return
   end
 
-  if srv.ws_job_id then
-    pcall(vim.fn.jobstop, srv.ws_job_id)
-    srv.ws_job_id = nil
+  -- Snapshot job IDs + PID and clear M._servers up front. The marimo job's
+  -- on_exit callback also clears the table, so doing it here first avoids a
+  -- TOCTOU window where a concurrent start_and_open could otherwise see a
+  -- half-stopped server and skip its own startup.
+  local job_id = srv.job_id
+  local ws_job_id = srv.ws_job_id
+  local pid = job_id and vim.fn.jobpid(job_id) or nil
+  M._servers[filepath] = nil
+
+  if ws_job_id then pcall(vim.fn.jobstop, ws_job_id) end
+  if job_id then
+    pcall(vim.fn.jobstop, job_id)
+    vim.fn.jobwait({ job_id }, 2000)
   end
 
-  pcall(vim.fn.jobstop, srv.job_id)
-  M._servers[filepath] = nil
+  -- Belt-and-suspenders: SIGKILL the original PID and any direct children.
+  -- pkill -P only reaches direct children; that's enough for marimo's normal
+  -- shape (parent + kernel subprocess) but not deeper trees. If a deeper
+  -- orphan is suspected, :MarimoKillAll is the user-facing escape hatch.
+  if pid and pid > 0 then
+    pcall(function() vim.system({ "pkill", "-9", "-P", tostring(pid) }, {}):wait(1000) end)
+    pcall(function() vim.system({ "kill", "-9", tostring(pid) }, {}):wait(500) end)
+  end
 
   vim.notify("[neo-marimo] Server stopped.", vim.log.levels.INFO)
 end
@@ -358,10 +447,20 @@ function M.start_and_open(nb, on_message)
     end
 
     -- Fetch the skew-protection token before any API call. Without this all
-    -- POSTs would 401 with "Missing server token".
+    -- POSTs would 401 with "Missing server token". This doubles as an
+    -- identity check: if the HTML doesn't contain a token element, we are
+    -- not talking to a --no-token server (probably an orphan that requires
+    -- auth and 303s us to /auth/login). Bail loudly rather than continue
+    -- with a half-broken connection where WS 403s and HTTP 401s.
     srv.server_token = fetch_server_token(srv.port, filepath)
     if not srv.server_token then
-      utils.warn("Could not extract server token from HTML; API calls may fail.")
+      utils.error(
+        "Could not authenticate with marimo server on port " .. srv.port ..
+          ". Most likely an orphan `marimo edit` is holding the port " ..
+          "(`pgrep -fl marimo` to check, then `:MarimoKillAll` to clean up)."
+      )
+      M.stop(filepath)
+      return
     end
 
     vim.notify("[neo-marimo] Server ready. Connecting...", vim.log.levels.INFO)
@@ -385,6 +484,77 @@ function M.start_and_open(nb, on_message)
     M.instantiate(filepath)
     M.open_browser(filepath)
   end, 0)
+end
+
+-- ── introspection ─────────────────────────────────────────────────────────
+
+-- Return an array of {filepath, port, pid, ws_connected, has_token,
+-- started_at} for every server we currently manage. Used by
+-- :MarimoServerList and by statusline integrations (TOCHANGE.md #6).
+function M.list_servers()
+  local result = {}
+  for filepath, srv in pairs(M._servers) do
+    local alive = srv.job_id and vim.fn.jobwait({ srv.job_id }, 0)[1] == -1
+    table.insert(result, {
+      filepath = filepath,
+      port = srv.port,
+      pid = srv.job_id and vim.fn.jobpid(srv.job_id) or nil,
+      ws_connected = srv.ws_connected == true,
+      has_token = srv.server_token ~= nil,
+      alive = alive,
+      started_at = srv.started_at,
+    })
+  end
+  return result
+end
+
+-- True if at least one plugin-managed marimo server is currently alive.
+-- Cheap to call; safe for use from statusline functions.
+function M.is_any_running()
+  for _, srv in pairs(M._servers) do
+    if srv.job_id and vim.fn.jobwait({ srv.job_id }, 0)[1] == -1 then
+      return true
+    end
+  end
+  return false
+end
+
+-- List every marimo edit process on the system (whether or not we started
+-- it). Returns array of {pid, ppid, cmd}. Used by :MarimoServerList to
+-- surface orphans that the plugin can't see in its own state.
+function M.list_system_marimo_processes()
+  -- pgrep -fl: full command line. -d \n is the default.
+  local r = vim.system({ "pgrep", "-fl", "marimo edit" }, { text = true }):wait()
+  if r.code ~= 0 or not r.stdout or r.stdout == "" then return {} end
+
+  local procs = {}
+  for line in r.stdout:gmatch("[^\n]+") do
+    local pid, cmd = line:match("^(%d+)%s+(.+)$")
+    if pid then
+      pid = tonumber(pid)
+      local ppid_r = vim.system({ "ps", "-o", "ppid=", "-p", tostring(pid) }, { text = true }):wait()
+      local ppid = ppid_r.code == 0 and tonumber((ppid_r.stdout:gsub("%s+", ""))) or nil
+      table.insert(procs, { pid = pid, ppid = ppid, cmd = cmd })
+    end
+  end
+  return procs
+end
+
+-- Force-kill every marimo edit process on the system, plugin-managed or not.
+-- Returns the number of PIDs we attempted to kill. Used by :MarimoKillAll
+-- as the nuclear-option recovery when the start_and_open identity check
+-- fails because an orphan is holding the port.
+function M.kill_all_system_marimo()
+  -- Clean up our own state first so subsequent starts don't reuse stale entries.
+  for filepath, _ in pairs(M._servers) do
+    pcall(M.stop, filepath)
+  end
+
+  local procs = M.list_system_marimo_processes()
+  for _, p in ipairs(procs) do
+    pcall(function() vim.system({ "kill", "-9", tostring(p.pid) }, {}):wait(500) end)
+  end
+  return #procs
 end
 
 return M
