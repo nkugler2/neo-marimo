@@ -33,11 +33,24 @@ end
 -- notebook buffer. Idempotent; safe to call from BufWinEnter.
 function M.apply_window_settings(winid)
   local ui = config.options.ui or {}
-  if ui.wrap_cells == false then return end
-  vim.api.nvim_set_option_value("wrap", true, { win = winid })
-  vim.api.nvim_set_option_value("linebreak", true, { win = winid })
-  vim.api.nvim_set_option_value("breakindent", true, { win = winid })
-  vim.api.nvim_set_option_value("showbreak", "↳ ", { win = winid })
+  local wrap_on = ui.wrap_cells ~= false
+  vim.api.nvim_set_option_value("wrap", wrap_on, { win = winid })
+  if wrap_on then
+    vim.api.nvim_set_option_value("linebreak", true, { win = winid })
+    vim.api.nvim_set_option_value("breakindent", true, { win = winid })
+    vim.api.nvim_set_option_value("showbreak", "↳ ", { win = winid })
+  end
+end
+
+-- Suppress on_bytes change tracking while running `fn`. Use this to wrap
+-- any code-driven mutation (insert/delete/swap from actions or sync) so the
+-- buffer-attach hook doesn't queue a delta that we've already accounted for
+-- by hand. Uses a counter so nested calls are safe.
+function M.with_suppressed_bytes(nb, fn)
+  nb._suppress_on_bytes = (nb._suppress_on_bytes or 0) + 1
+  local ok, err = pcall(fn)
+  nb._suppress_on_bytes = nb._suppress_on_bytes - 1
+  if not ok then error(err, 0) end
 end
 
 -- Build the top border virtual line for a cell.

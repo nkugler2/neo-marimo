@@ -87,18 +87,20 @@ function M.setup(bufnr, nb)
       local e = cell.end_row + 1    -- 1-indexed (inclusive)
       local lc = e - s + 1
 
-      -- Remove lines from buffer (0-indexed start, exclusive end)
-      vim.api.nvim_buf_set_lines(bufnr, cell.start_row, cell.end_row + 1, false, {})
+      buffer.with_suppressed_bytes(nb, function()
+        -- Remove lines from buffer (0-indexed start, exclusive end)
+        vim.api.nvim_buf_set_lines(bufnr, cell.start_row, cell.end_row + 1, false, {})
 
-      notebook.delete_cell(nb, idx)
+        notebook.delete_cell(nb, idx)
 
-      -- Shift remaining cells up
-      for i = idx, #nb.cells do
-        nb.cells[i].start_row = nb.cells[i].start_row - lc
-        nb.cells[i].end_row = nb.cells[i].end_row - lc
-      end
+        -- Shift remaining cells up
+        for i = idx, #nb.cells do
+          nb.cells[i].start_row = nb.cells[i].start_row - lc
+          nb.cells[i].end_row = nb.cells[i].end_row - lc
+        end
 
-      buffer.render_all_borders(bufnr, nb)
+        buffer.render_all_borders(bufnr, nb)
+      end)
 
       -- Move cursor to a valid position
       local target_idx = math.min(idx, #nb.cells)
@@ -118,26 +120,28 @@ function M.setup(bufnr, nb)
       local idx = cell.index
       local next_cell = nb.cells[idx + 1]
 
-      -- Swap lines in the buffer
-      local cell_lines = vim.api.nvim_buf_get_lines(bufnr, cell.start_row, cell.end_row + 1, false)
-      local next_lines = vim.api.nvim_buf_get_lines(bufnr, next_cell.start_row, next_cell.end_row + 1, false)
+      buffer.with_suppressed_bytes(nb, function()
+        -- Swap lines in the buffer
+        local cell_lines = vim.api.nvim_buf_get_lines(bufnr, cell.start_row, cell.end_row + 1, false)
+        local next_lines = vim.api.nvim_buf_get_lines(bufnr, next_cell.start_row, next_cell.end_row + 1, false)
 
-      vim.api.nvim_buf_set_lines(bufnr, cell.start_row, next_cell.end_row + 1, false,
-        vim.list_extend(next_lines, cell_lines))
+        vim.api.nvim_buf_set_lines(bufnr, cell.start_row, next_cell.end_row + 1, false,
+          vim.list_extend(next_lines, cell_lines))
 
-      -- Swap in notebook state
-      notebook.move_cell_down(nb, idx)
+        -- Swap in notebook state
+        notebook.move_cell_down(nb, idx)
 
-      -- Fix row offsets: next_cell is now first, cell is second
-      local new_next = nb.cells[idx]   -- was next_cell, now at idx
-      local new_cell = nb.cells[idx + 1] -- was cell, now at idx+1
+        -- Fix row offsets: next_cell is now first, cell is second
+        local new_next = nb.cells[idx]      -- was next_cell, now at idx
+        local new_cell = nb.cells[idx + 1]  -- was cell, now at idx+1
 
-      new_next.start_row = cell.start_row
-      new_next.end_row = cell.start_row + #next_lines - 1
-      new_cell.start_row = new_next.end_row + 1
-      new_cell.end_row = new_cell.start_row + #cell_lines - 1
+        new_next.start_row = cell.start_row
+        new_next.end_row = cell.start_row + #next_lines - 1
+        new_cell.start_row = new_next.end_row + 1
+        new_cell.end_row = new_cell.start_row + #cell_lines - 1
 
-      buffer.render_all_borders(bufnr, nb)
+        buffer.render_all_borders(bufnr, nb)
+      end)
       jump_to_cell(nb.cells[idx + 1])
     end, o("Marimo: move cell down"))
   end
@@ -152,23 +156,25 @@ function M.setup(bufnr, nb)
       local idx = cell.index
       local prev_cell = nb.cells[idx - 1]
 
-      local cell_lines = vim.api.nvim_buf_get_lines(bufnr, cell.start_row, cell.end_row + 1, false)
-      local prev_lines = vim.api.nvim_buf_get_lines(bufnr, prev_cell.start_row, prev_cell.end_row + 1, false)
+      buffer.with_suppressed_bytes(nb, function()
+        local cell_lines = vim.api.nvim_buf_get_lines(bufnr, cell.start_row, cell.end_row + 1, false)
+        local prev_lines = vim.api.nvim_buf_get_lines(bufnr, prev_cell.start_row, prev_cell.end_row + 1, false)
 
-      vim.api.nvim_buf_set_lines(bufnr, prev_cell.start_row, cell.end_row + 1, false,
-        vim.list_extend(cell_lines, prev_lines))
+        vim.api.nvim_buf_set_lines(bufnr, prev_cell.start_row, cell.end_row + 1, false,
+          vim.list_extend(cell_lines, prev_lines))
 
-      notebook.move_cell_up(nb, idx)
+        notebook.move_cell_up(nb, idx)
 
-      local new_cell = nb.cells[idx - 1]
-      local new_prev = nb.cells[idx]
+        local new_cell = nb.cells[idx - 1]
+        local new_prev = nb.cells[idx]
 
-      new_cell.start_row = prev_cell.start_row
-      new_cell.end_row = prev_cell.start_row + #cell_lines - 1
-      new_prev.start_row = new_cell.end_row + 1
-      new_prev.end_row = new_prev.start_row + #prev_lines - 1
+        new_cell.start_row = prev_cell.start_row
+        new_cell.end_row = prev_cell.start_row + #cell_lines - 1
+        new_prev.start_row = new_cell.end_row + 1
+        new_prev.end_row = new_prev.start_row + #prev_lines - 1
 
-      buffer.render_all_borders(bufnr, nb)
+        buffer.render_all_borders(bufnr, nb)
+      end)
       jump_to_cell(nb.cells[idx - 1])
     end, o("Marimo: move cell up"))
   end

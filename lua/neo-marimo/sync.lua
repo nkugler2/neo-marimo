@@ -88,11 +88,13 @@ function M.reload_from_file(nb)
     cell.end_row = #lines - 1
   end
 
-  vim.api.nvim_set_option_value("modifiable", true, { buf = bufnr })
-  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
-  vim.api.nvim_set_option_value("modified", false, { buf = bufnr })
+  buffer.with_suppressed_bytes(nb, function()
+    vim.api.nvim_set_option_value("modifiable", true, { buf = bufnr })
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+    vim.api.nvim_set_option_value("modified", false, { buf = bufnr })
 
-  buffer.render_all_borders(bufnr, nb)
+    buffer.render_all_borders(bufnr, nb)
+  end)
   nb.dirty = false
   return true
 end

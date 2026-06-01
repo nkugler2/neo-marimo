@@ -27,7 +27,8 @@ M.renderer_patterns = {}
 -- ending in `/*` (e.g. "image/*"). Patterns are matched after exact mimetypes.
 function M.register_renderer(mime, fn)
   if mime:sub(-2) == "/*" then
-    table.insert(M.renderer_patterns, { prefix = mime:sub(1, -3), fn = fn })
+    -- strip the trailing "*", keep the "/" so "image/*" stores prefix "image/"
+    table.insert(M.renderer_patterns, { prefix = mime:sub(1, -2), fn = fn })
   else
     M.renderers[mime] = fn
   end
@@ -72,12 +73,23 @@ local function render_error(data)
 end
 
 local function render_html(data)
-  -- Strip HTML tags (best-effort) and show plain text
+  -- Strip HTML tags (best-effort) and show plain text. If the html contains
+  -- an embedded image (e.g. matplotlib's data:image/png base64 payload),
+  -- prepend a placeholder line so the user knows to look at the browser —
+  -- otherwise we'd strip the <img> tag and render nothing visible.
   if type(data) ~= "string" then return {} end
+  local lines = {}
+  if data:find("<img%s") or data:find("<img>") or data:find("<svg%s") or data:find("<svg>") then
+    table.insert(lines, { { "  [image — open in browser to view]", "Comment" } })
+  end
   local stripped = data:gsub("<[^>]+>", ""):gsub("&amp;", "&"):gsub("&lt;", "<"):gsub("&gt;", ">")
-  stripped = stripped:match("^%s*(.-)%s*$")  -- trim
-  if stripped == "" then return {} end
-  return render_text_plain(stripped)
+  stripped = stripped:match("^%s*(.-)%s*$")
+  if stripped ~= "" then
+    for _, vl in ipairs(render_text_plain(stripped)) do
+      table.insert(lines, vl)
+    end
+  end
+  return lines
 end
 
 local function render_dataresource(data)

@@ -150,6 +150,11 @@ function M.attach(source_bufnr)
                         old_end_row, _old_end_col, _old_end_byte,
                         new_end_row, _new_end_col, _new_end_byte)
       if bnr ~= nb_bufnr then return true end  -- detach if buffer mismatch
+      -- Skip changes driven by our own actions (cell insert/delete/swap,
+      -- reload). Those code paths update cell offsets by hand, so letting
+      -- on_bytes also queue a delta would double-count and corrupt the
+      -- offsets ~300ms later when the debounce fires.
+      if (nb._suppress_on_bytes or 0) > 0 then return end
       local delta = new_end_row - old_end_row
       table.insert(pending_changes, { start_row = start_row, delta = delta })
       flush_changes()
@@ -184,14 +189,20 @@ function M.attach(source_bufnr)
     end,
   })
 
-  -- Adaptive border width: re-render on window resize / scroll so the cell
-  -- borders always span the visible width. Debounced so a continuous resize
-  -- drag doesn't thrash extmarks.
+  -- Adaptive border width: re-render on window resize so the cell borders
+  -- always span the visible width. We cache the last rendered width and
+  -- skip re-renders that wouldn't change anything; that lets us run on a
+  -- tight 30ms debounce (smooth during a drag-resize) without thrashing
+  -- extmarks when WinResized fires for unrelated reasons.
+  local last_width = nil
   local redraw_borders = utils.debounce(function()
     if not vim.api.nvim_buf_is_valid(nb_bufnr) then return end
     if #vim.fn.win_findbuf(nb_bufnr) == 0 then return end
+    local w = buffer.border_width(nb_bufnr)
+    if w == last_width then return end
+    last_width = w
     buffer.render_all_borders(nb_bufnr, nb)
-  end, 100)
+  end, 30)
 
   vim.api.nvim_create_autocmd({ "WinResized", "VimResized" }, {
     callback = function()

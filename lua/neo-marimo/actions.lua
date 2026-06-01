@@ -23,46 +23,52 @@ end
 -- notebook if the cursor isn't over any cell). Renders borders and jumps to
 -- the new cell.
 function M.new_cell_below(bufnr, nb)
-  local row = vim.api.nvim_win_get_cursor(0)[1] - 1
-  local cell = notebook.get_cell_at_row(nb, row)
-  local idx = cell and cell.index or #nb.cells
+  local new_cell
+  buffer.with_suppressed_bytes(nb, function()
+    local row = vim.api.nvim_win_get_cursor(0)[1] - 1
+    local cell = notebook.get_cell_at_row(nb, row)
+    local idx = cell and cell.index or #nb.cells
 
-  local insert_row = cell and (cell.end_row + 1) or vim.api.nvim_buf_line_count(bufnr)
-  vim.api.nvim_buf_set_lines(bufnr, insert_row, insert_row, false, { "" })
+    local insert_row = cell and (cell.end_row + 1) or vim.api.nvim_buf_line_count(bufnr)
+    vim.api.nvim_buf_set_lines(bufnr, insert_row, insert_row, false, { "" })
 
-  local new_cell = notebook.insert_cell_after(nb, idx)
-  new_cell.start_row = insert_row
-  new_cell.end_row = insert_row
+    new_cell = notebook.insert_cell_after(nb, idx)
+    new_cell.start_row = insert_row
+    new_cell.end_row = insert_row
 
-  for i = idx + 2, #nb.cells do
-    nb.cells[i].start_row = nb.cells[i].start_row + 1
-    nb.cells[i].end_row = nb.cells[i].end_row + 1
-  end
+    for i = idx + 2, #nb.cells do
+      nb.cells[i].start_row = nb.cells[i].start_row + 1
+      nb.cells[i].end_row = nb.cells[i].end_row + 1
+    end
 
-  buffer.render_all_borders(bufnr, nb)
+    buffer.render_all_borders(bufnr, nb)
+  end)
   jump_to_cell(new_cell)
 end
 
 -- Insert a blank cell before the cell containing the cursor (or at the top
 -- if the cursor isn't over any cell).
 function M.new_cell_above(bufnr, nb)
-  local row = vim.api.nvim_win_get_cursor(0)[1] - 1
-  local cell = notebook.get_cell_at_row(nb, row)
-  local idx = cell and cell.index or 1
+  local new_cell
+  buffer.with_suppressed_bytes(nb, function()
+    local row = vim.api.nvim_win_get_cursor(0)[1] - 1
+    local cell = notebook.get_cell_at_row(nb, row)
+    local idx = cell and cell.index or 1
 
-  local insert_row = cell and cell.start_row or 0
-  vim.api.nvim_buf_set_lines(bufnr, insert_row, insert_row, false, { "" })
+    local insert_row = cell and cell.start_row or 0
+    vim.api.nvim_buf_set_lines(bufnr, insert_row, insert_row, false, { "" })
 
-  local new_cell = notebook.insert_cell_before(nb, idx)
-  new_cell.start_row = insert_row
-  new_cell.end_row = insert_row
+    new_cell = notebook.insert_cell_before(nb, idx)
+    new_cell.start_row = insert_row
+    new_cell.end_row = insert_row
 
-  for i = idx + 1, #nb.cells do
-    nb.cells[i].start_row = nb.cells[i].start_row + 1
-    nb.cells[i].end_row = nb.cells[i].end_row + 1
-  end
+    for i = idx + 1, #nb.cells do
+      nb.cells[i].start_row = nb.cells[i].start_row + 1
+      nb.cells[i].end_row = nb.cells[i].end_row + 1
+    end
 
-  buffer.render_all_borders(bufnr, nb)
+    buffer.render_all_borders(bufnr, nb)
+  end)
   jump_to_cell(new_cell)
 end
 
