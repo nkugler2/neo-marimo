@@ -8,11 +8,13 @@ function M.setup()
   vim.api.nvim_set_hl(0, "MarimoCellPythonBorder", { fg = "#7E9CD8", bold = true })
   vim.api.nvim_set_hl(0, "MarimoCellMarkdownBorder", { fg = "#76946A", bold = true })
   vim.api.nvim_set_hl(0, "MarimoCellSQLBorder", { fg = "#957FB8", bold = true })
+  vim.api.nvim_set_hl(0, "MarimoCellMarimoBorder", { fg = "#E6C384", bold = true })
 
   -- Cell label text inside borders
   vim.api.nvim_set_hl(0, "MarimoCellPythonLabel", { fg = "#7E9CD8" })
   vim.api.nvim_set_hl(0, "MarimoCellMarkdownLabel", { fg = "#76946A" })
   vim.api.nvim_set_hl(0, "MarimoCellSQLLabel", { fg = "#957FB8" })
+  vim.api.nvim_set_hl(0, "MarimoCellMarimoLabel", { fg = "#E6C384" })
 
   -- Status indicators
   vim.api.nvim_set_hl(0, "MarimoStatusRunning", { fg = "#FFA066", bold = true })
@@ -37,6 +39,8 @@ function M.type_hls(cell_type)
     return "MarimoCellMarkdownBorder", "MarimoCellMarkdownLabel"
   elseif cell_type == "sql" then
     return "MarimoCellSQLBorder", "MarimoCellSQLLabel"
+  elseif cell_type == "marimo" then
+    return "MarimoCellMarimoBorder", "MarimoCellMarimoLabel"
   else
     return "MarimoCellPythonBorder", "MarimoCellPythonLabel"
   end

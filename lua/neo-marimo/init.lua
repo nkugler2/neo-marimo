@@ -5,9 +5,9 @@ local buffer = require("neo-marimo.buffer")
 local sync = require("neo-marimo.sync")
 local keymaps = require("neo-marimo.keymaps")
 local highlights = require("neo-marimo.highlights")
-local output = require("neo-marimo.output")
 local server = require("neo-marimo.server")
 local utils = require("neo-marimo.utils")
+local ws_handlers = require("neo-marimo.ws_handlers")
 
 local M = {}
 
@@ -106,28 +106,11 @@ function M.attach(source_bufnr)
       end
     end
 
-    if op == "cell-op" then
-      if nb_bufnr_ref and vim.api.nvim_buf_is_valid(nb_bufnr_ref) then
-        output.handle_cell_op(nb_bufnr_ref, nb, payload)
-      end
-    elseif op == "kernel-ready" then
-      -- Server sent kernel-ready: update our cell ID mapping from server's order
-      if payload.cell_ids then
-        for i, srv_id in ipairs(payload.cell_ids) do
-          local cell = nb.cells[i]
-          if cell and srv_id ~= cell.id then
-            -- Re-key the cell with the server's authoritative ID
-            nb.cell_by_id[cell.id] = nil
-            cell.id = srv_id
-            nb.cell_by_id[srv_id] = cell
-          end
-        end
-      end
-    elseif op == "neo_marimo_connected" then
-      vim.notify("[neo-marimo] WebSocket connected.", vim.log.levels.INFO)
-    elseif op == "neo_marimo_error" then
-      utils.warn("WebSocket error: " .. (msg.message or "unknown"))
-    end
+    ws_handlers.dispatch(op, payload, {
+      nb = nb,
+      bufnr = nb_bufnr_ref,
+      raw = msg,
+    })
   end
 
   -- Create the visual notebook buffer
@@ -146,16 +129,31 @@ function M.attach(source_bufnr)
     end,
   })
 
-  -- Set up TextChanged to track edits (debounced)
-  local on_changed = utils.debounce(function()
-    if vim.api.nvim_buf_is_valid(nb_bufnr) then
-      buffer.on_text_changed(nb_bufnr, nb)
-    end
+  -- Track edits via nvim_buf_attach's on_bytes hook. This gives us the exact
+  -- row where each change happened (start_row, old_end_row, new_end_row),
+  -- so we can attribute line-count deltas to the cell that actually changed
+  -- — not the cell under the cursor. Pressing Enter mid-cell used to misroute
+  -- the delta to the next cell because the cursor moved before the autocmd
+  -- fired; on_bytes fixes that at the source.
+  local pending_changes = {}
+  local flush_changes = utils.debounce(function()
+    if not vim.api.nvim_buf_is_valid(nb_bufnr) then return end
+    if #pending_changes == 0 then return end
+    local changes = pending_changes
+    pending_changes = {}
+    buffer.on_bytes_changed(nb_bufnr, nb, changes)
   end, 300)
 
-  vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
-    buffer = nb_bufnr,
-    callback = on_changed,
+  vim.api.nvim_buf_attach(nb_bufnr, false, {
+    on_bytes = function(_, bnr, _changedtick,
+                        start_row, _start_col, _start_byte,
+                        old_end_row, _old_end_col, _old_end_byte,
+                        new_end_row, _new_end_col, _new_end_byte)
+      if bnr ~= nb_bufnr then return true end  -- detach if buffer mismatch
+      local delta = new_end_row - old_end_row
+      table.insert(pending_changes, { start_row = start_row, delta = delta })
+      flush_changes()
+    end,
   })
 
   -- Clean up when notebook buffer is closed
@@ -173,6 +171,35 @@ function M.attach(source_bufnr)
 
   -- Switch the current window to show the notebook buffer
   vim.api.nvim_win_set_buf(0, nb_bufnr)
+  buffer.apply_window_settings(vim.api.nvim_get_current_win())
+
+  -- Re-apply window settings whenever the buffer enters a new window
+  -- (e.g. user runs :split). Also re-render borders so they pick up the
+  -- new window width.
+  vim.api.nvim_create_autocmd("BufWinEnter", {
+    buffer = nb_bufnr,
+    callback = function()
+      buffer.apply_window_settings(vim.api.nvim_get_current_win())
+      buffer.render_all_borders(nb_bufnr, nb)
+    end,
+  })
+
+  -- Adaptive border width: re-render on window resize / scroll so the cell
+  -- borders always span the visible width. Debounced so a continuous resize
+  -- drag doesn't thrash extmarks.
+  local redraw_borders = utils.debounce(function()
+    if not vim.api.nvim_buf_is_valid(nb_bufnr) then return end
+    if #vim.fn.win_findbuf(nb_bufnr) == 0 then return end
+    buffer.render_all_borders(nb_bufnr, nb)
+  end, 100)
+
+  vim.api.nvim_create_autocmd({ "WinResized", "VimResized" }, {
+    callback = function()
+      if #vim.fn.win_findbuf(nb_bufnr) > 0 then
+        redraw_borders()
+      end
+    end,
+  })
 
   -- Wipe the original source buffer (we no longer need it displayed)
   -- Use schedule to avoid issues with the autocmd still running

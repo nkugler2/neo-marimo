@@ -132,6 +132,65 @@ vim.api.nvim_create_user_command("MarimoWsDebug", function(opts)
   vim.notify("[neo-marimo] WS debug logging → " .. path, vim.log.levels.INFO)
 end, { nargs = "?", desc = "Toggle WebSocket message logging (path or 'off')" })
 
+-- Same as the <leader>mo keymap: start the marimo server (if needed) and
+-- open the notebook in the browser.
+vim.api.nvim_create_user_command("MarimoEdit", function()
+  local marimo = require("neo-marimo")
+  local nb = marimo.current_notebook()
+  if not nb then
+    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    return
+  end
+  require("neo-marimo.actions").open_in_browser(nb)
+end, { desc = "Start marimo server and open notebook in browser" })
+
+-- `:MarimoRun` runs the cell under the cursor.
+-- `:MarimoRun all` runs every cell in the notebook.
+vim.api.nvim_create_user_command("MarimoRun", function(opts)
+  local marimo = require("neo-marimo")
+  local nb = marimo.current_notebook()
+  if not nb then
+    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    return
+  end
+  local actions = require("neo-marimo.actions")
+  if opts.args == "all" then
+    actions.run_all_cells(nb.bufnr, nb)
+  elseif opts.args == "" then
+    actions.run_cell_at_cursor(nb.bufnr, nb)
+  else
+    vim.notify("[neo-marimo] :MarimoRun expects no arg or 'all'", vim.log.levels.WARN)
+  end
+end, {
+  nargs = "?",
+  complete = function() return { "all" } end,
+  desc = "Run cell under cursor (or all cells with 'all')",
+})
+
+-- `:MarimoNewCell` (defaults to below) inserts a new blank cell relative to
+-- the cell under the cursor. Use `above` to put it before.
+vim.api.nvim_create_user_command("MarimoNewCell", function(opts)
+  local marimo = require("neo-marimo")
+  local nb = marimo.current_notebook()
+  if not nb then
+    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    return
+  end
+  local actions = require("neo-marimo.actions")
+  local where = opts.args == "" and "below" or opts.args
+  if where == "below" then
+    actions.new_cell_below(nb.bufnr, nb)
+  elseif where == "above" then
+    actions.new_cell_above(nb.bufnr, nb)
+  else
+    vim.notify("[neo-marimo] :MarimoNewCell expects 'above' or 'below'", vim.log.levels.WARN)
+  end
+end, {
+  nargs = "?",
+  complete = function() return { "above", "below" } end,
+  desc = "Insert a new blank cell above or below the cursor",
+})
+
 vim.api.nvim_create_user_command("MarimoNew", function(opts)
   local filepath = opts.args ~= "" and opts.args
     or vim.fn.input("New notebook path: ", vim.fn.getcwd() .. "/", "file")

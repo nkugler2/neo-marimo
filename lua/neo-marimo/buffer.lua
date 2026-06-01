@@ -4,24 +4,68 @@ local config = require("neo-marimo.config")
 
 local M = {}
 
--- Width used for cell border lines
-local BORDER_WIDTH = 72
+-- Minimum usable border width. Below this we just stop drawing dashes rather
+-- than producing wrapped/broken borders.
+local MIN_BORDER_WIDTH = 40
+
+-- Fallback width used when the buffer isn't displayed in any window yet
+-- (e.g. during initial create before nvim_win_set_buf runs).
+local FALLBACK_BORDER_WIDTH = 72
+
+-- Compute the visible text width for a buffer, accounting for sign column,
+-- number column, and fold column. Returns FALLBACK_BORDER_WIDTH if the buffer
+-- isn't in any window.
+function M.border_width(bufnr)
+  local wins = vim.fn.win_findbuf(bufnr)
+  if #wins == 0 then
+    return FALLBACK_BORDER_WIDTH
+  end
+  local winid = wins[1]
+  local total = vim.api.nvim_win_get_width(winid)
+  local info = vim.fn.getwininfo(winid)[1]
+  local textoff = (info and info.textoff) or 0
+  local width = total - textoff
+  if width < MIN_BORDER_WIDTH then width = MIN_BORDER_WIDTH end
+  return width
+end
+
+-- Apply soft-wrap and related window-local options to a window showing the
+-- notebook buffer. Idempotent; safe to call from BufWinEnter.
+function M.apply_window_settings(winid)
+  local ui = config.options.ui or {}
+  if ui.wrap_cells == false then return end
+  vim.api.nvim_set_option_value("wrap", true, { win = winid })
+  vim.api.nvim_set_option_value("linebreak", true, { win = winid })
+  vim.api.nvim_set_option_value("breakindent", true, { win = winid })
+  vim.api.nvim_set_option_value("showbreak", "↳ ", { win = winid })
+end
 
 -- Build the top border virtual line for a cell.
 -- Returns a list of {text, hl_group} chunks.
-local function make_top_border(cell, border_hl, label_hl, opts)
+local function make_top_border(cell, border_hl, label_hl, opts, width)
   local style = opts.border_style or "rounded"
 
   if style == "none" then
     return {}
   end
 
-  local type_labels = {
-    python = " py ",
-    markdown = " md ",
-    sql = " sql ",
+  -- Cell-type labels. Nerd-font variants when ui.icons is on, plain ASCII
+  -- otherwise. Glyphs: nf-fa-python, nf-md-language_markdown, nf-md-database,
+  -- nf-md-meteor (marimo).
+  local labels_icon = {
+    python   = "  py ",
+    markdown = "  md ",
+    sql      = " 󰆼 sql ",
+    marimo   = " 󰀘 mo ",
   }
-  local type_label = type_labels[cell.type] or " py "
+  local labels_plain = {
+    python   = " py ",
+    markdown = " md ",
+    sql      = " sql ",
+    marimo   = " mo ",
+  }
+  local labels = (opts.icons == false) and labels_plain or labels_icon
+  local type_label = labels[cell.type] or labels.python
 
   -- Build label: "[py] name" or just "[py]"
   local label = type_label
@@ -35,14 +79,14 @@ local function make_top_border(cell, border_hl, label_hl, opts)
     label = label .. "disabled "
   end
 
-  -- Pad label with dashes to fill BORDER_WIDTH
+  -- Pad label with dashes to fill the visible window width
   local corner_l = style == "rounded" and "╭" or "┌"
   local corner_r = style == "rounded" and "╮" or "┐"
   local dash = "─"
 
   local label_len = vim.fn.strwidth(label)
   local prefix_dashes = 1
-  local suffix_len = BORDER_WIDTH - 2 - prefix_dashes - label_len
+  local suffix_len = width - 2 - prefix_dashes - label_len
   if suffix_len < 1 then suffix_len = 1 end
   local suffix_dashes = string.rep(dash, suffix_len)
 
@@ -58,7 +102,7 @@ local function make_top_border(cell, border_hl, label_hl, opts)
 end
 
 -- Build the bottom border virtual line for a cell.
-local function make_bot_border(border_hl, opts)
+local function make_bot_border(border_hl, opts, width)
   local style = opts.border_style or "rounded"
 
   if style == "none" then
@@ -69,7 +113,9 @@ local function make_bot_border(border_hl, opts)
   local corner_r = style == "rounded" and "╯" or "┘"
   local dash = "─"
 
-  local dashes = string.rep(dash, BORDER_WIDTH - 2)
+  local inner = width - 2
+  if inner < 1 then inner = 1 end
+  local dashes = string.rep(dash, inner)
   return {
     { corner_l, border_hl },
     { dashes,   border_hl },
@@ -78,9 +124,10 @@ local function make_bot_border(border_hl, opts)
 end
 
 -- Place extmarks for a single cell's borders.
-local function render_cell_borders(bufnr, cell)
+local function render_cell_borders(bufnr, cell, width)
   local ui = config.options.ui or {}
   local border_hl, label_hl = hl.type_hls(cell.type)
+  width = width or M.border_width(bufnr)
 
   -- Clear old border marks for this cell
   if cell.top_mark_id then
@@ -90,8 +137,8 @@ local function render_cell_borders(bufnr, cell)
     pcall(vim.api.nvim_buf_del_extmark, bufnr, hl.ns_border, cell.bot_mark_id)
   end
 
-  local top_chunks = make_top_border(cell, border_hl, label_hl, ui)
-  local bot_chunks = make_bot_border(border_hl, ui)
+  local top_chunks = make_top_border(cell, border_hl, label_hl, ui, width)
+  local bot_chunks = make_bot_border(border_hl, ui, width)
 
   -- Top border: virtual line ABOVE start_row
   if #top_chunks > 0 then
@@ -117,10 +164,11 @@ function M.render_all_borders(bufnr, nb)
   -- Clear entire border namespace first
   vim.api.nvim_buf_clear_namespace(bufnr, hl.ns_border, 0, -1)
 
+  local width = M.border_width(bufnr)
   for _, cell in ipairs(nb.cells) do
     cell.top_mark_id = nil
     cell.bot_mark_id = nil
-    render_cell_borders(bufnr, cell)
+    render_cell_borders(bufnr, cell, width)
   end
 end
 
@@ -216,54 +264,57 @@ function M.sync_cells_from_buffer(nb)
   return true
 end
 
--- Called from TextChanged autocmd. Figures out which cell changed and
--- updates row offsets accordingly.
--- `bufnr`: the notebook buffer
--- `nb`: notebook state
-function M.on_text_changed(bufnr, nb)
-  local total_lines = vim.api.nvim_buf_line_count(bufnr)
-
-  -- Sum of stored line counts per cell
-  local stored_total = 0
-  local line_counts = {}
+-- Find the 1-based cell index containing `row` (0-indexed). Falls back to
+-- the last cell if `row` sits past the final cell (e.g. trailing-newline
+-- inserts) and the first cell if it sits before the first.
+local function cell_index_at_row(nb, row)
   for i, cell in ipairs(nb.cells) do
-    local lc = cell.end_row - cell.start_row + 1
-    line_counts[i] = lc
-    stored_total = stored_total + lc
+    if row >= cell.start_row and row <= cell.end_row then
+      return i
+    end
   end
+  if #nb.cells == 0 then return nil end
+  if row < nb.cells[1].start_row then return 1 end
+  return #nb.cells
+end
 
-  local delta = total_lines - stored_total
-  if delta == 0 then
-    -- No structural change in line count; update cell types but no reflow needed
-    M.sync_cells_from_buffer(nb)
-    return
-  end
+-- Apply a list of byte-level changes (captured by nvim_buf_attach's
+-- on_bytes hook) to the notebook's cell row offsets, then re-sync code
+-- and re-render borders.
+--
+-- `changes` is an ordered list of { start_row = ..., delta = ... } where
+-- `delta = new_end_row - old_end_row` — i.e. how many rows the change added
+-- (positive) or removed (negative). `start_row` is the row position *before*
+-- the change in 0-indexed buffer coordinates, which is exactly the row whose
+-- containing cell should absorb the delta.
+--
+-- Walking changes in order matters: each delta shifts subsequent cells,
+-- so later changes need to be located against the updated offsets.
+function M.on_bytes_changed(bufnr, nb, changes)
+  if not vim.api.nvim_buf_is_valid(bufnr) then return end
 
-  -- Find the cell containing the cursor
-  local cursor_row = vim.api.nvim_win_get_cursor(0)[1] - 1  -- 0-indexed
-  local changed_idx = 1
-  for i, cell in ipairs(nb.cells) do
-    if cursor_row >= cell.start_row then
-      changed_idx = i
+  for _, change in ipairs(changes) do
+    local delta = change.delta
+    if delta ~= 0 then
+      local idx = cell_index_at_row(nb, change.start_row)
+      if idx then
+        local cell = nb.cells[idx]
+        cell.end_row = cell.end_row + delta
+        if cell.end_row < cell.start_row then
+          cell.end_row = cell.start_row
+        end
+        for j = idx + 1, #nb.cells do
+          nb.cells[j].start_row = nb.cells[j].start_row + delta
+          nb.cells[j].end_row = nb.cells[j].end_row + delta
+        end
+      end
     end
   end
 
-  -- Apply delta to the changed cell and shift all subsequent cells
-  line_counts[changed_idx] = line_counts[changed_idx] + delta
-  if line_counts[changed_idx] < 1 then
-    line_counts[changed_idx] = 1
-  end
+  -- Refresh code text + cell-type detection from the new buffer state.
+  M.sync_cells_from_buffer(nb)
 
-  -- Recompute all offsets from line counts
-  local row = 0
-  for i, cell in ipairs(nb.cells) do
-    local lc = line_counts[i]
-    cell.start_row = row
-    cell.end_row = row + lc - 1
-    row = cell.end_row + 1
-  end
-
-  -- Re-render borders at new positions
+  -- Re-render borders at the new positions.
   M.render_all_borders(bufnr, nb)
   nb.dirty = true
 end

@@ -24,6 +24,10 @@ M.defaults = {
     show_cell_name = true,
     -- Show cell index (1, 2, 3...) in border
     show_cell_index = true,
+    -- Soft-wrap code inside cells so long lines stay visible without horizontal scroll
+    wrap_cells = true,
+    -- Show nerd-font glyphs in the cell label. Disable for non-nerd-font setups.
+    icons = true,
   },
 
   -- Keymaps (set any to false to disable)

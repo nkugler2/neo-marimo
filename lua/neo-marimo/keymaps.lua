@@ -1,10 +1,9 @@
 local config = require("neo-marimo.config")
 local notebook = require("neo-marimo.notebook")
 local buffer = require("neo-marimo.buffer")
-local sync = require("neo-marimo.sync")
 local server = require("neo-marimo.server")
 local output = require("neo-marimo.output")
-local utils = require("neo-marimo.utils")
+local actions = require("neo-marimo.actions")
 
 local M = {}
 
@@ -65,51 +64,14 @@ function M.setup(bufnr, nb)
   -- New cell below
   if km.new_cell_below then
     vim.keymap.set("n", km.new_cell_below, function()
-      local row = vim.api.nvim_win_get_cursor(0)[1] - 1
-      local cell = notebook.get_cell_at_row(nb, row)
-      local idx = cell and cell.index or #nb.cells
-
-      -- Insert blank line in buffer at cell.end_row + 1 (0-indexed → +1 for api)
-      local insert_row = cell and (cell.end_row + 1) or vim.api.nvim_buf_line_count(bufnr)
-      vim.api.nvim_buf_set_lines(bufnr, insert_row, insert_row, false, { "" })
-
-      local new_cell = notebook.insert_cell_after(nb, idx)
-      new_cell.start_row = insert_row
-      new_cell.end_row = insert_row
-
-      -- Shift subsequent cells down
-      for i = idx + 2, #nb.cells do
-        nb.cells[i].start_row = nb.cells[i].start_row + 1
-        nb.cells[i].end_row = nb.cells[i].end_row + 1
-      end
-
-      buffer.render_all_borders(bufnr, nb)
-      jump_to_cell(new_cell)
+      actions.new_cell_below(bufnr, nb)
     end, o("Marimo: new cell below"))
   end
 
   -- New cell above
   if km.new_cell_above then
     vim.keymap.set("n", km.new_cell_above, function()
-      local row = vim.api.nvim_win_get_cursor(0)[1] - 1
-      local cell = notebook.get_cell_at_row(nb, row)
-      local idx = cell and cell.index or 1
-
-      local insert_row = cell and cell.start_row or 0
-      vim.api.nvim_buf_set_lines(bufnr, insert_row, insert_row, false, { "" })
-
-      local new_cell = notebook.insert_cell_before(nb, idx)
-      new_cell.start_row = insert_row
-      new_cell.end_row = insert_row
-
-      -- Shift subsequent cells down (everything from idx onward, which is now idx+1)
-      for i = idx + 1, #nb.cells do
-        nb.cells[i].start_row = nb.cells[i].start_row + 1
-        nb.cells[i].end_row = nb.cells[i].end_row + 1
-      end
-
-      buffer.render_all_borders(bufnr, nb)
-      jump_to_cell(new_cell)
+      actions.new_cell_above(bufnr, nb)
     end, o("Marimo: new cell above"))
   end
 
@@ -214,8 +176,7 @@ function M.setup(bufnr, nb)
   -- Open in browser (starts server if needed)
   if km.open_in_browser then
     vim.keymap.set("n", km.open_in_browser, function()
-      local on_message = nb._on_ws_message
-      server.start_and_open(nb, on_message)
+      actions.open_in_browser(nb)
     end, o("Marimo: start server and open in browser"))
   end
 
@@ -230,42 +191,14 @@ function M.setup(bufnr, nb)
   -- Run cell under cursor
   if km.run_cell then
     vim.keymap.set("n", km.run_cell, function()
-      if not server.is_running(nb.filepath) then
-        vim.notify("[neo-marimo] No server running. Press <leader>mo to start.", vim.log.levels.WARN)
-        return
-      end
-      -- Sync cell code from buffer first
-      buffer.sync_cells_from_buffer(nb)
-      local row = vim.api.nvim_win_get_cursor(0)[1] - 1
-      local cell = notebook.get_cell_at_row(nb, row)
-      if not cell then return end
-
-      cell.status = "queued"
-      output.render(bufnr, cell)
-
-      server.run_cells(nb.filepath, { cell.id }, { cell.code })
+      actions.run_cell_at_cursor(bufnr, nb)
     end, o("Marimo: run cell"))
   end
 
   -- Run all cells
   if km.run_all then
     vim.keymap.set("n", km.run_all, function()
-      if not server.is_running(nb.filepath) then
-        vim.notify("[neo-marimo] No server running. Press <leader>mo to start.", vim.log.levels.WARN)
-        return
-      end
-      buffer.sync_cells_from_buffer(nb)
-
-      local cell_ids = {}
-      local codes = {}
-      for _, cell in ipairs(nb.cells) do
-        table.insert(cell_ids, cell.id)
-        table.insert(codes, cell.code)
-        cell.status = "queued"
-        output.render(bufnr, cell)
-      end
-
-      server.run_cells(nb.filepath, cell_ids, codes)
+      actions.run_all_cells(bufnr, nb)
     end, o("Marimo: run all cells"))
   end
 

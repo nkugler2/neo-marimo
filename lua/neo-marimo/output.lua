@@ -9,7 +9,41 @@ local M = {}
 -- Maximum output lines to show per cell before truncating.
 local MAX_LINES = 30
 
--- ── MIME type rendering ─────────────────────────────────────────────────────
+-- ── Renderer registry ──────────────────────────────────────────────────────
+--
+-- Each renderer takes (data, opts) and returns a list of virt_line chunk lists
+-- (i.e. a list where each element is itself a list of {text, hl_group} pairs).
+-- `data` is the payload from the CellOutput; `opts` is reserved for future
+-- per-call options (e.g. window width). Phase 8 plugs image/widget renderers
+-- in via M.register_renderer at setup time.
+
+M.renderers = {}
+
+-- Lookup order for prefix matches like `image/png` → `image/*`. We try the
+-- exact mimetype first, then any registered prefix patterns in order.
+M.renderer_patterns = {}
+
+-- Register a renderer for an exact mimetype (e.g. "text/plain") or a pattern
+-- ending in `/*` (e.g. "image/*"). Patterns are matched after exact mimetypes.
+function M.register_renderer(mime, fn)
+  if mime:sub(-2) == "/*" then
+    table.insert(M.renderer_patterns, { prefix = mime:sub(1, -3), fn = fn })
+  else
+    M.renderers[mime] = fn
+  end
+end
+
+local function lookup_renderer(mime)
+  if M.renderers[mime] then return M.renderers[mime] end
+  for _, p in ipairs(M.renderer_patterns) do
+    if mime:sub(1, #p.prefix) == p.prefix then
+      return p.fn
+    end
+  end
+  return nil
+end
+
+-- ── Built-in renderers ─────────────────────────────────────────────────────
 
 local function render_text_plain(data)
   if type(data) ~= "string" then
@@ -112,6 +146,25 @@ local function render_dataresource(data)
   return lines
 end
 
+local function render_image_placeholder(_)
+  return { { { "  [image — open in browser to view]", "Comment" } } }
+end
+
+local function render_marimo_mime(_)
+  return { { { "  [marimo widget — open in browser to view]", "Comment" } } }
+end
+
+-- Register built-ins. Marimo renders mo.md() to HTML and sends it with the
+-- text/markdown mimetype, so markdown and html share the same renderer until
+-- Phase 8 replaces text/markdown with a proper treesitter renderer.
+M.register_renderer("text/plain", render_text_plain)
+M.register_renderer("text/html", render_html)
+M.register_renderer("text/markdown", render_html)
+M.register_renderer("application/vnd.dataresource+json", render_dataresource)
+M.register_renderer("application/vnd.marimo+error", render_error)
+M.register_renderer("application/vnd.marimo+mime", render_marimo_mime)
+M.register_renderer("image/*", render_image_placeholder)
+
 -- Convert a CellOutput object (from the WS message) to virt_lines chunks.
 local function output_to_virt_lines(output)
   if not output then return {} end
@@ -126,28 +179,16 @@ local function output_to_virt_lines(output)
     return {}
   end
 
-  if mimetype == "text/plain" then
-    return render_text_plain(data)
-  elseif mimetype == "application/vnd.marimo+error" then
-    return render_error(data)
-  -- Marimo renders mo.md() to HTML and sends it with the text/markdown
-  -- mimetype, so this is just the HTML strip path under a different name.
-  elseif mimetype == "text/html" or mimetype == "text/markdown" then
-    return render_html(data)
-  elseif mimetype == "application/vnd.dataresource+json" then
-    return render_dataresource(data)
-  elseif mimetype:match("^image/") then
-    return { { { "  [image — open in browser to view]", "Comment" } } }
-  elseif mimetype == "application/vnd.marimo+mime" then
-    -- Rich marimo output; show placeholder
-    return { { { "  [marimo widget — open in browser to view]", "Comment" } } }
-  else
-    -- Unknown mime: try to render as text
-    if type(data) == "string" then
-      return render_text_plain(data)
-    end
-    return { { { "  [" .. mimetype .. "]", "Comment" } } }
+  local renderer = lookup_renderer(mimetype)
+  if renderer then
+    return renderer(data, {})
   end
+
+  -- Unknown mime: try to render as text
+  if type(data) == "string" then
+    return render_text_plain(data)
+  end
+  return { { { "  [" .. mimetype .. "]", "Comment" } } }
 end
 
 -- Status indicator line at the top of each cell's output area.
