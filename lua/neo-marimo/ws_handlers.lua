@@ -63,4 +63,42 @@ M.register("neo_marimo_error", function(_, ctx)
   utils.warn("WebSocket error: " .. (ctx.raw and ctx.raw.message or "unknown"))
 end)
 
+-- ── Phase 6: bidirectional sync ────────────────────────────────────────────
+
+-- update-cell-codes: sent by marimo when another client (typically the
+-- browser) edited cells. Payload is { cell_ids = [...], codes = [...],
+-- code_is_stale = bool }. We map codes onto the existing cell list by
+-- position and call apply_remote_changes for a minimal-disturbance patch.
+--
+-- This path can race with the file-watcher (marimo also persists the
+-- change to disk). apply_remote_changes is idempotent — the second
+-- call hits the no-op fast path because the codes already match.
+M.register("update-cell-codes", function(payload, ctx)
+  if not ctx.nb or not ctx.bufnr then return end
+  local codes = payload.codes
+  if type(codes) ~= "table" then return end
+  if #codes ~= #ctx.nb.cells then
+    -- Cell count mismatch — the WS payload doesn't carry names/options,
+    -- so we can't safely synthesize new cells. Defer to the file
+    -- watcher (which has the full parse).
+    return
+  end
+  local new_cells = {}
+  for i, code in ipairs(codes) do
+    table.insert(new_cells, {
+      code = code,
+      name = ctx.nb.cells[i].name,
+      options = ctx.nb.cells[i].options,
+    })
+  end
+  local sync = require("neo-marimo.sync")
+  sync.apply_remote_changes(ctx.nb, new_cells)
+end)
+
+-- completed-run: empty payload. Marimo sends this after every submitted
+-- batch finishes. cell-op already drives the per-cell status indicator,
+-- so this is a no-op slot for now — Phase 8 might use it to drive a
+-- "notebook idle" indicator in the statusline.
+M.register("completed-run", function(_, _) end)
+
 return M

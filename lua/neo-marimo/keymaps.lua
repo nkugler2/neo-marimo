@@ -232,6 +232,15 @@ function M.setup(bufnr, nb)
       require("neo-marimo").toggle(bufnr)
     end, o("Marimo: toggle notebook view"))
   end
+
+  -- Reclaim the WebSocket from the browser. After :MarimoEdit /
+  -- <leader>mo we release the WS so the browser can connect; this
+  -- takes it back so nvim resumes receiving cell-op messages.
+  if km.reclaim_ws then
+    vim.keymap.set("n", km.reclaim_ws, function()
+      server.reclaim_ws(nb.filepath)
+    end, o("Marimo: reclaim WebSocket from browser"))
+  end
 end
 
 return M

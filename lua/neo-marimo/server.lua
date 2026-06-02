@@ -97,10 +97,12 @@ local function find_free_port(start_port, attempts)
   return nil
 end
 
--- Synchronous HTTP POST with JSON body.
+-- Synchronous HTTP POST. Returns {status, body} on completion (regardless
+-- of HTTP code) or nil if curl itself failed. Status is a string ("200")
+-- so callers can compare without parsing.
+--
 -- Always sends Marimo-Session-Id + Marimo-Server-Token headers when present.
--- Returns decoded body table or nil on error (warns to :messages on failure).
-local function http_post(srv, path, body)
+local function http_post_raw(srv, path, body)
   local json_body, err = utils.json_encode(body)
   if err then
     utils.warn("http_post encode error: " .. err)
@@ -136,13 +138,22 @@ local function http_post(srv, path, body)
     body_str = r.stdout
     status = "?"
   end
+  return { status = status, body = body_str or "" }
+end
 
-  if status ~= "200" then
-    utils.warn("POST " .. path .. " → HTTP " .. status .. ": " .. (body_str or ""))
+-- JSON variant. Returns decoded body table or nil on error/non-2xx.
+-- Used for endpoints like /api/kernel/run that respond with JSON; for
+-- endpoints that respond with text/plain (e.g. /api/kernel/save) use
+-- http_post_raw directly so the caller can check status without a
+-- spurious decode failure.
+local function http_post(srv, path, body)
+  local r = http_post_raw(srv, path, body)
+  if not r then return nil end
+  if r.status ~= "200" then
+    utils.warn("POST " .. path .. " → HTTP " .. r.status .. ": " .. r.body)
     return nil
   end
-
-  local data, decode_err = utils.json_decode(body_str)
+  local data, decode_err = utils.json_decode(r.body)
   if decode_err then return nil end
   return data
 end
@@ -379,6 +390,63 @@ function M.connect_ws(filepath, on_message)
   return true
 end
 
+-- Gracefully release our WebSocket connection so another client (browser)
+-- can grab the single EDIT-mode connection slot. Keeps the marimo server
+-- itself running. Sets srv.browser_active = true so the rest of the code
+-- can tell that the WS is intentionally absent rather than crashed.
+function M.release_ws(filepath)
+  local srv = M._servers[filepath]
+  if not srv then return false end
+  if srv.ws_job_id then
+    pcall(vim.fn.jobstop, srv.ws_job_id)
+    srv.ws_job_id = nil
+  end
+  srv.ws_connected = false
+  srv.browser_active = true
+  return true
+end
+
+-- Reclaim the WebSocket connection after it was released to the browser.
+-- Re-runs connect_ws using the cached on_message, blocks briefly until the
+-- handshake lands, and re-instantiates the kernel so cell-op messages start
+-- flowing again. Returns true on success.
+function M.reclaim_ws(filepath)
+  local srv = M._servers[filepath]
+  if not srv then
+    utils.warn("No server running for this notebook.")
+    return false
+  end
+  if srv.ws_connected then
+    vim.notify("[neo-marimo] WebSocket already connected.", vim.log.levels.INFO)
+    return true
+  end
+  if not srv.on_message then
+    utils.warn("No WS message handler cached — cannot reclaim.")
+    return false
+  end
+
+  srv.ws_connected = false
+  local ok = M.connect_ws(filepath, srv.on_message)
+  if not ok then return false end
+
+  local connected = vim.wait(5000, function()
+    return srv.ws_connected == true
+  end, 50)
+
+  if not connected then
+    utils.warn("Reclaim: WebSocket did not connect within 5s.")
+    return false
+  end
+
+  srv.browser_active = false
+  -- Re-instantiate so the kernel re-sends cell-op messages for the
+  -- current state. Without this we'd sit idle until the user pressed
+  -- run again.
+  M.instantiate(filepath)
+  vim.notify("[neo-marimo] WebSocket reclaimed.", vim.log.levels.INFO)
+  return true
+end
+
 -- Send HTTP POST /api/kernel/instantiate.
 function M.instantiate(filepath)
   local srv = M._servers[filepath]
@@ -482,8 +550,67 @@ function M.start_and_open(nb, on_message)
     end
 
     M.instantiate(filepath)
+
+    -- Marimo's EDIT mode allows exactly one WS connection per file. The
+    -- browser we're about to open needs that slot — if we hold on to it,
+    -- the browser tab reports "Network already connected" and never
+    -- becomes usable. Release ours first, then open. The user can press
+    -- <leader>mc (reclaim_ws) when they close the browser tab and want
+    -- nvim to take the slot back.
+    if config.options.server.share_with_browser ~= false then
+      M.release_ws(filepath)
+    end
     M.open_browser(filepath)
   end, 0)
+end
+
+-- Push cell codes to the running marimo server via /api/kernel/save.
+-- Marimo will write the file itself, but we still call this so its
+-- in-memory view of the notebook matches what we just persisted. Without
+-- it, the running server lags behind disk by ~1s while its own file
+-- watcher catches up.
+--
+-- `cells` is an ordered list of cell tables with fields `id`, `name`,
+-- `code`, and `options`. The cell IDs must match what the server
+-- assigned at kernel-ready time, otherwise marimo rejects the request.
+function M.save_cells(filepath, cells)
+  local srv = M._servers[filepath]
+  if not srv then return false end
+
+  local cell_ids = {}
+  local codes = {}
+  local names = {}
+  local configs = {}
+  for _, cell in ipairs(cells) do
+    table.insert(cell_ids, cell.id)
+    table.insert(codes, cell.code or "")
+    table.insert(names, cell.name or "_")
+    -- vim.empty_dict() round-trips as {} rather than [] — required so
+    -- marimo's msgspec decoder accepts CellConfig{} for empty options.
+    local opts = cell.options
+    if type(opts) ~= "table" or next(opts) == nil then
+      opts = vim.empty_dict()
+    end
+    table.insert(configs, opts)
+  end
+
+  -- /api/kernel/save responds with the saved file contents as
+  -- text/plain (not JSON), so we use the raw helper and check the HTTP
+  -- status directly instead of going through http_post's JSON decode.
+  local r = http_post_raw(srv, "/api/kernel/save", {
+    cellIds = cell_ids,
+    codes = codes,
+    names = names,
+    configs = configs,
+    filename = filepath,
+    persist = true,
+  })
+  if not r then return false end
+  if r.status ~= "200" then
+    utils.warn("POST /api/kernel/save → HTTP " .. r.status .. ": " .. r.body)
+    return false
+  end
+  return true
 end
 
 -- ── introspection ─────────────────────────────────────────────────────────

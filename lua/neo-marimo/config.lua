@@ -18,6 +18,20 @@ M.defaults = {
     -- Default false so :MarimoToggle and accidental :bd don't terminate
     -- a running kernel; flip on if you want a strict lifecycle.
     stop_on_close = false,
+    -- Release our WebSocket connection when the user opens the notebook
+    -- in the browser, so the browser can take the single EDIT-mode
+    -- connection slot. Turn off if you'd rather lose the browser than
+    -- give up the nvim live-update stream.
+    share_with_browser = true,
+    -- Watch the .py file for external edits (browser saves, other
+    -- editors). When a change is detected, the notebook view is
+    -- refreshed from disk.
+    watch_file = true,
+    -- After :w in nvim, POST the new cell codes to the running marimo
+    -- server so its in-memory view matches what we just wrote — without
+    -- this, marimo lags behind by up to ~1s while its file watcher
+    -- catches up.
+    push_on_save = true,
   },
 
   -- Visual settings
@@ -52,6 +66,11 @@ M.defaults = {
     -- the underlying .py buffer. Bound on both buffers once the toggle has
     -- been used at least once.
     toggle_view = "<leader>mv",
+    -- Reclaim the WebSocket connection from the browser. After
+    -- <leader>mo / :MarimoEdit we release our WS so the browser can
+    -- connect; press this to take it back (e.g. after closing the
+    -- browser tab) and resume live updates in nvim.
+    reclaim_ws = "<leader>mc",
   },
 }
 

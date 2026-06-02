@@ -8,6 +8,7 @@ local highlights = require("neo-marimo.highlights")
 local server = require("neo-marimo.server")
 local utils = require("neo-marimo.utils")
 local ws_handlers = require("neo-marimo.ws_handlers")
+local watcher = require("neo-marimo.watcher")
 
 local M = {}
 
@@ -180,12 +181,46 @@ function M.attach(source_bufnr)
     once = true,
     callback = function()
       _attached[filepath] = nil
+      watcher.stop(filepath)
       if config.options.server and config.options.server.stop_on_close
           and server.is_running(filepath) then
         server.stop(filepath)
       end
     end,
   })
+
+  -- Watch the .py for external edits (browser saves, other editors).
+  -- Skipped if disabled, or if the file doesn't exist on disk yet
+  -- (rare: an unsaved-buffer case where attach was called manually).
+  local srv_cfg = config.options.server or {}
+  if srv_cfg.watch_file ~= false and vim.uv.fs_stat(filepath) then
+    watcher.start(filepath, function()
+      -- Coalesce with our own save: if this fires inside the
+      -- write-suppress window, the change is ours and we already
+      -- have the buffer state.
+      if sync.is_writing(nb) then return end
+      if not vim.api.nvim_buf_is_valid(nb_bufnr) then return end
+
+      -- Re-parse from disk, then patch the buffer with the delta.
+      local ok, data = pcall(parser.parse_file, filepath, config.options.python_path)
+      if not ok or not data or not data.cells then return end
+
+      -- Don't fight the user: if they have unsaved edits, ask before
+      -- overwriting. The common case (browser is the active editor
+      -- because we released our WS) has no local edits.
+      local modified = vim.api.nvim_get_option_value("modified", { buf = nb_bufnr })
+      if modified then
+        local choice = vim.fn.confirm(
+          "External change to " .. vim.fn.fnamemodify(filepath, ":t")
+            .. " — discard local edits?",
+          "&Yes\n&No", 2
+        )
+        if choice ~= 1 then return end
+      end
+
+      sync.apply_remote_changes(nb, data.cells)
+    end)
+  end
 
   -- Switch the current window to show the notebook buffer
   vim.api.nvim_win_set_buf(0, nb_bufnr)
