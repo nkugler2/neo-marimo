@@ -38,14 +38,15 @@ M.register("cell-op", function(payload, ctx)
   end
 end)
 
-M.register("kernel-ready", function(payload, ctx)
-  -- Server sent kernel-ready: update our cell ID mapping from the server's
-  -- authoritative order. The bridge mints local IDs at parse time, but marimo
-  -- replaces them on connection — we re-key cells so subsequent cell-op
-  -- messages find their target.
-  if not payload.cell_ids then return end
-  local nb = ctx.nb
-  for i, srv_id in ipairs(payload.cell_ids) do
+-- Walk the cells by position and re-key them to whatever cell_ids the
+-- server is announcing. Used by both kernel-ready (initial sync) and
+-- update-cell-ids (every reload). When the cell counts mismatch we
+-- bail — that means the file has structurally diverged and the
+-- file-watcher path will fix things up via apply_remote_changes.
+local function rekey_cells_from_server(nb, cell_ids)
+  if type(cell_ids) ~= "table" then return end
+  if #cell_ids ~= #nb.cells then return end
+  for i, srv_id in ipairs(cell_ids) do
     local cell = nb.cells[i]
     if cell and srv_id ~= cell.id then
       nb.cell_by_id[cell.id] = nil
@@ -53,6 +54,33 @@ M.register("kernel-ready", function(payload, ctx)
       nb.cell_by_id[srv_id] = cell
     end
   end
+end
+
+M.register("kernel-ready", function(payload, ctx)
+  -- Server sent kernel-ready: update our cell ID mapping from the server's
+  -- authoritative order. The bridge mints local IDs at parse time, but marimo
+  -- replaces them on connection — we re-key cells so subsequent cell-op
+  -- messages find their target.
+  if not payload.cell_ids then return end
+  rekey_cells_from_server(ctx.nb, payload.cell_ids)
+end)
+
+-- update-cell-ids: marimo broadcasts the authoritative cell_id list
+-- after every reload (file watcher, save endpoint, etc). New cells we
+-- added in nvim got our locally-generated IDs; this is where marimo's
+-- replacement IDs land. Without this handler we keep using stale IDs
+-- and /api/kernel/run silently registers our IDs as a *second* set of
+-- cells in marimo, which is why the browser would show added cells
+-- but not the run output: the browser only attaches cell-op to cells
+-- it knows about, and our shadow-registered cells aren't in its view.
+M.register("update-cell-ids", function(payload, ctx)
+  if not ctx.nb then return end
+  rekey_cells_from_server(ctx.nb, payload.cell_ids)
+  -- Stamp the moment marimo's reload broadcast reached us. The run
+  -- path waits for this stamp to overtake nb._last_save_at so it
+  -- never POSTs /api/kernel/run with cell IDs that are about to be
+  -- replaced — see actions.flush_pending_edits.
+  ctx.nb._last_cell_ids_at = (vim.uv.hrtime() / 1e6)
 end)
 
 M.register("neo_marimo_connected", function(_, _)

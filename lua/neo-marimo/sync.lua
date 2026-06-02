@@ -79,6 +79,13 @@ function M.write_to_file(nb)
   vim.api.nvim_set_option_value("modified", false, { buf = bufnr })
   nb.dirty = false
 
+  -- Stamp the moment we wrote. The run path (actions.flush_pending_edits)
+  -- compares this against nb._last_cell_ids_at — set by the
+  -- update-cell-ids handler — to wait for marimo's reload to land
+  -- before issuing /api/kernel/run. Without that gate the run uses
+  -- our stale cell IDs and the browser doesn't see the output.
+  nb._last_save_at = (vim.uv.hrtime() / 1e6)
+
   -- We deliberately don't POST /api/kernel/save here. Doing so sets
   -- marimo's `_last_saved_content` to our content, which makes its
   -- file watcher's `file_content_matches_last_save()` guard skip the
