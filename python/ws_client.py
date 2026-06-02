@@ -3,10 +3,15 @@
 neo-marimo WebSocket client.
 Connects to a running marimo server and bridges messages to Neovim via stdio.
 
-Usage: ws_client.py <port> <session_id> [filepath]
+Usage: ws_client.py <port> <session_id> [filepath] [access_token] [--kiosk]
 
 Stdout: newline-delimited JSON messages from the server
 Stderr: diagnostic/error messages
+
+Kiosk mode (--kiosk) connects as a secondary "observer" consumer. Marimo's
+EDIT mode allows exactly one *main* consumer per file, but any number of
+kiosks. That lets nvim sit alongside the browser without kicking it off —
+both editors see the same cell-op stream.
 """
 import asyncio
 import json
@@ -19,7 +24,13 @@ def emit(msg: dict) -> None:
     print(json.dumps(msg), flush=True)
 
 
-async def main(port: int, session_id: str, filepath: str = "", access_token: str = "") -> None:
+async def main(
+    port: int,
+    session_id: str,
+    filepath: str = "",
+    access_token: str = "",
+    kiosk: bool = False,
+) -> None:
     import websockets
 
     params: dict[str, str] = {"session_id": session_id}
@@ -27,6 +38,8 @@ async def main(port: int, session_id: str, filepath: str = "", access_token: str
         params["file"] = filepath
     if access_token:
         params["access_token"] = access_token
+    if kiosk:
+        params["kiosk"] = "true"
     query = urllib.parse.urlencode(params)
     url = f"ws://127.0.0.1:{port}/ws?{query}"
 
@@ -61,13 +74,25 @@ async def main(port: int, session_id: str, filepath: str = "", access_token: str
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print(json.dumps({"op": "neo_marimo_error", "message": "Usage: ws_client.py <port> <session_id> [filepath]"}))
+    argv = sys.argv[1:]
+
+    # --kiosk can appear anywhere; pop it out so positional indexing below
+    # stays simple.
+    kiosk = False
+    if "--kiosk" in argv:
+        kiosk = True
+        argv = [a for a in argv if a != "--kiosk"]
+
+    if len(argv) < 2:
+        print(json.dumps({
+            "op": "neo_marimo_error",
+            "message": "Usage: ws_client.py <port> <session_id> [filepath] [access_token] [--kiosk]",
+        }))
         sys.exit(1)
 
-    port = int(sys.argv[1])
-    session_id = sys.argv[2]
-    filepath = sys.argv[3] if len(sys.argv) > 3 else ""
-    access_token = sys.argv[4] if len(sys.argv) > 4 else ""
+    port = int(argv[0])
+    session_id = argv[1]
+    filepath = argv[2] if len(argv) > 2 else ""
+    access_token = argv[3] if len(argv) > 3 else ""
 
-    asyncio.run(main(port, session_id, filepath, access_token))
+    asyncio.run(main(port, session_id, filepath, access_token, kiosk))

@@ -327,17 +327,31 @@ function M.stop(filepath)
 end
 
 -- Connect a WebSocket client to the running server.
-function M.connect_ws(filepath, on_message)
+--
+-- `opts.kiosk` (default false): connect as a kiosk consumer instead of the
+-- main editor. Marimo's EDIT mode allows exactly one main consumer per
+-- file but any number of kiosks, so kiosk is the right mode whenever we
+-- want to *observe* alongside the browser without kicking it off.
+function M.connect_ws(filepath, on_message, opts)
   local srv = M._servers[filepath]
   if not srv then
     utils.error("No server state for " .. filepath)
     return false
   end
 
+  opts = opts or {}
+  local kiosk = opts.kiosk == true
+
   local python_path = config.options.python_path or "python3"
 
   -- access_token arg is intentionally omitted: --no-token disables it.
-  local ws_args = { python_path, ws_client_path, tostring(srv.port), srv.session_id, filepath }
+  -- ws_client.py expects positional [port, session_id, filepath, access_token]
+  -- with --kiosk as a free-floating flag.
+  local ws_args = {
+    python_path, ws_client_path,
+    tostring(srv.port), srv.session_id, filepath, "",
+  }
+  if kiosk then table.insert(ws_args, "--kiosk") end
 
   local ws_job_id = vim.fn.jobstart(ws_args, {
     on_stdout = function(_, data)
@@ -371,7 +385,18 @@ function M.connect_ws(filepath, on_message)
         end
       end
     end,
-    on_exit = function(_, code)
+    on_exit = function(job_id, code)
+      -- Mark this slot as no longer live so :MarimoServerList and the
+      -- reclaim path don't show stale "ws ✓". Only do this if the job
+      -- exiting is the one currently registered — otherwise an old job's
+      -- delayed exit would clobber a fresh reconnect.
+      vim.schedule(function()
+        local current_srv = M._servers[filepath]
+        if current_srv and current_srv.ws_job_id == job_id then
+          current_srv.ws_connected = false
+          current_srv.ws_job_id = nil
+        end
+      end)
       if code ~= 0 then
         vim.schedule(function()
           utils.warn("WebSocket client exited (code " .. tostring(code) .. ")")
@@ -386,6 +411,7 @@ function M.connect_ws(filepath, on_message)
   end
 
   srv.ws_job_id = ws_job_id
+  srv.ws_kiosk = kiosk
   if on_message then srv.on_message = on_message end
   return true
 end
@@ -406,11 +432,13 @@ function M.release_ws(filepath)
   return true
 end
 
--- Reclaim the WebSocket connection after it was released to the browser.
--- Re-runs connect_ws using the cached on_message, blocks briefly until the
--- handshake lands, and re-instantiates the kernel so cell-op messages start
--- flowing again. Returns true on success.
-function M.reclaim_ws(filepath)
+-- Reclaim the WebSocket connection. By default this connects as a kiosk
+-- consumer (the safe choice — works whether or not the browser is still
+-- holding the main slot, and won't kick the browser off). Pass
+-- `opts.as_main = true` to take over as the primary editor, which only
+-- works when no other client is connected.
+function M.reclaim_ws(filepath, opts)
+  opts = opts or {}
   local srv = M._servers[filepath]
   if not srv then
     utils.warn("No server running for this notebook.")
@@ -426,7 +454,8 @@ function M.reclaim_ws(filepath)
   end
 
   srv.ws_connected = false
-  local ok = M.connect_ws(filepath, srv.on_message)
+  local kiosk = opts.as_main ~= true
+  local ok = M.connect_ws(filepath, srv.on_message, { kiosk = kiosk })
   if not ok then return false end
 
   local connected = vim.wait(5000, function()
@@ -439,11 +468,18 @@ function M.reclaim_ws(filepath)
   end
 
   srv.browser_active = false
-  -- Re-instantiate so the kernel re-sends cell-op messages for the
-  -- current state. Without this we'd sit idle until the user pressed
-  -- run again.
-  M.instantiate(filepath)
-  vim.notify("[neo-marimo] WebSocket reclaimed.", vim.log.levels.INFO)
+  -- Don't re-instantiate when reconnecting as kiosk: marimo replays the
+  -- session view on kiosk connect, which re-emits the existing cell
+  -- outputs. Instantiate would force a re-run of every cell, which is
+  -- almost never what the user wants when they're just plugging back
+  -- in to observe.
+  if not kiosk then
+    M.instantiate(filepath)
+  end
+  vim.notify(
+    "[neo-marimo] WebSocket reclaimed (" .. (kiosk and "kiosk" or "main") .. ").",
+    vim.log.levels.INFO
+  )
   return true
 end
 
@@ -551,16 +587,30 @@ function M.start_and_open(nb, on_message)
 
     M.instantiate(filepath)
 
-    -- Marimo's EDIT mode allows exactly one WS connection per file. The
-    -- browser we're about to open needs that slot — if we hold on to it,
-    -- the browser tab reports "Network already connected" and never
-    -- becomes usable. Release ours first, then open. The user can press
-    -- <leader>mc (reclaim_ws) when they close the browser tab and want
-    -- nvim to take the slot back.
+    -- Marimo's EDIT mode allows exactly one *main* WS consumer per file.
+    -- If we hold the slot when the browser opens, the browser sees
+    -- "Network already connected" and never becomes usable. Release
+    -- ours, let the browser become main, then reconnect ourselves as
+    -- a kiosk consumer — kiosks are unlimited and receive the same
+    -- cell-op / kernel-ready firehose as main, so cell outputs land
+    -- in nvim and the browser simultaneously.
     if config.options.server.share_with_browser ~= false then
       M.release_ws(filepath)
     end
     M.open_browser(filepath)
+
+    -- Schedule the kiosk reconnect after the browser has had a moment to
+    -- grab the main slot. Without this delay we'd often beat the browser
+    -- back to the WS endpoint, end up as main again, and the browser
+    -- would still hit "already connected" on its retry.
+    if config.options.server.share_with_browser ~= false then
+      vim.defer_fn(function()
+        local current_srv = M._servers[filepath]
+        if not current_srv then return end
+        if current_srv.ws_connected then return end  -- user reclaimed already
+        M.connect_ws(filepath, current_srv.on_message, { kiosk = true })
+      end, 1200)
+    end
   end, 0)
 end
 
