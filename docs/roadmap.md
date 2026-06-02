@@ -92,7 +92,7 @@ Borders draw at the _visible_ window width, code wraps within that width. No hor
 - **Icons in label**: change the `type_labels` table in `buffer.lua:19` to:
   ```lua
   python   = "  py ",   -- nf-fa-python
-  markdown = " md ",  -- nf-md-language_markdown
+  markdown = "md ",  -- nf-md-language_markdown
   sql      = " 󰆼 sql ",  -- nf-md-database
   marimo   = " 󰀘 mo ",   -- nf-md-meteor (any nerd-font glyph)
   ```

@@ -356,7 +356,7 @@ Things the plan didn't anticipate that have shipped:
 
 Things the plan called out that are **not yet implemented**:
 
-- ⬜ `:MarimoEdit`, `:MarimoRun`, `:MarimoNew` user commands (functionality is on keymaps instead).
+- [x] ⬜ `:MarimoEdit`, `:MarimoRun`, `:MarimoNew` user commands (functionality is on keymaps instead).
 - ⬜ Handlers for `completed-run` and `update-cell-codes` WS ops (received but ignored — would be needed for proper external-edit sync and run-completion signals).
 - ⬜ `/api/kernel/save` endpoint integration (we save via the Python bridge, which works but means the running server's view can drift from disk after a save).
 - ⬜ Sending commands TO the server over the WS (`send(cmd)`) — everything currently goes via HTTP.
