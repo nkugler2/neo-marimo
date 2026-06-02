@@ -14,6 +14,10 @@ M.defaults = {
     host = "localhost",
     port = 2718,
     auto_start = true,
+    -- Stop the marimo server when the notebook buffer is wiped (:bw).
+    -- Default false so :MarimoToggle and accidental :bd don't terminate
+    -- a running kernel; flip on if you want a strict lifecycle.
+    stop_on_close = false,
   },
 
   -- Visual settings
@@ -44,6 +48,10 @@ M.defaults = {
     run_cell = "<leader>mr",
     run_all = "<leader>mR",
     toggle_output = "<leader>mt",
+    -- Swap the current window between the notebook view (marimo://...) and
+    -- the underlying .py buffer. Bound on both buffers once the toggle has
+    -- been used at least once.
+    toggle_view = "<leader>mv",
   },
 }
 

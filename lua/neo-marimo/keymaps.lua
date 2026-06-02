@@ -225,6 +225,13 @@ function M.setup(bufnr, nb)
       end
     end, o("Marimo: toggle cell output"))
   end
+
+  -- Toggle between notebook view and underlying .py
+  if km.toggle_view then
+    vim.keymap.set("n", km.toggle_view, function()
+      require("neo-marimo").toggle(bufnr)
+    end, o("Marimo: toggle notebook view"))
+  end
 end
 
 return M

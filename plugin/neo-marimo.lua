@@ -22,6 +22,10 @@ vim.api.nvim_create_autocmd("BufReadPost", {
       local bufname = vim.api.nvim_buf_get_name(ev.buf)
       if bufname:match("^marimo://") then return end
 
+      -- :MarimoToggle off explicitly loads the underlying .py buffer; skip
+      -- auto-attach so we don't immediately bounce back into notebook view.
+      if marimo._suppress_attach then return end
+
       if marimo.is_marimo_notebook(ev.buf) then
         -- Auto-setup with defaults if user hasn't called setup()
         if not require("neo-marimo.config").options.python_path then
@@ -74,41 +78,150 @@ vim.api.nvim_create_user_command("MarimoAttach", function()
   require("neo-marimo").attach(bufnr)
 end, { desc = "Attach neo-marimo to current Python buffer" })
 
-vim.api.nvim_create_user_command("MarimoServerList", function()
-  local server = require("neo-marimo.server")
-  local lines = { "## neo-marimo managed servers" }
+vim.api.nvim_create_user_command("MarimoToggle", function()
+  -- Swap the current window between notebook view and the underlying .py.
+  -- The notebook buffer stays loaded in the background, so toggling does
+  -- not stop the marimo server (unless server.stop_on_close is enabled
+  -- and the buffer is later :bw'd).
+  require("neo-marimo").toggle()
+end, { desc = "Toggle between marimo notebook view and the underlying .py" })
 
-  local managed = server.list_servers()
+-- Format a "started N {s,m,h} ago" stamp without bringing in any deps.
+local function format_age(seconds)
+  if not seconds or seconds < 0 then return "?" end
+  if seconds < 60 then return seconds .. "s" end
+  if seconds < 3600 then return math.floor(seconds / 60) .. "m" end
+  return math.floor(seconds / 3600) .. "h"
+end
+
+-- Render the server list inside a floating scratch buffer with one server
+-- per row and a <CR> jump-to-notebook keymap. Replaces the old vim.notify
+-- dump so callers can act on the rows, not just read them.
+local function open_server_list_window()
+  local server = require("neo-marimo.server")
+  local marimo = require("neo-marimo")
+  local statusline = require("neo-marimo.statusline")
+
+  local managed = statusline.servers()  -- enriched with cell_count
+  local procs = server.list_system_marimo_processes()
+
+  -- row_actions: 1-indexed line -> { kind = "switch", filepath = ... }
+  -- Only managed-server lines are actionable; header/footer rows are inert.
+  local lines = {}
+  local row_actions = {}
+
+  table.insert(lines, "neo-marimo servers")
+  table.insert(lines, string.rep("─", 60))
+  table.insert(lines, "Managed (" .. #managed .. "):")
   if #managed == 0 then
-    table.insert(lines, "  (none)")
+    table.insert(lines, "  (none — open a notebook and press <leader>mo)")
   else
     for _, s in ipairs(managed) do
+      local fname = vim.fn.fnamemodify(s.filepath, ":t")
+      local ws = s.ws_connected and "✓" or "✗"
       local age = s.started_at and (os.time() - s.started_at) or 0
       table.insert(lines, string.format(
-        "  %s\n    port=%d  pid=%s  alive=%s  ws=%s  token=%s  age=%ds",
-        s.filepath, s.port, tostring(s.pid), tostring(s.alive),
-        tostring(s.ws_connected), tostring(s.has_token), age
+        "  [ws %s] %-30s port=%d  cells=%d  age=%s",
+        ws, fname, s.port, s.cell_count or 0, format_age(age)
       ))
+      row_actions[#lines] = { kind = "switch", filepath = s.filepath }
     end
   end
 
   table.insert(lines, "")
-  table.insert(lines, "## All marimo edit processes on system")
-  local procs = server.list_system_marimo_processes()
+  table.insert(lines, "System marimo processes:")
   if #procs == 0 then
     table.insert(lines, "  (none)")
   else
     for _, p in ipairs(procs) do
       local orphan = (p.ppid == 1) and "  [ORPHAN]" or ""
-      table.insert(lines, string.format("  pid=%d ppid=%s%s\n    %s",
-        p.pid, tostring(p.ppid), orphan, p.cmd))
+      table.insert(lines, string.format("  pid=%d  ppid=%s%s",
+        p.pid, tostring(p.ppid), orphan))
+      table.insert(lines, "    " .. p.cmd)
     end
-    table.insert(lines, "")
-    table.insert(lines, "Run :MarimoKillAll to terminate every marimo edit process.")
   end
 
-  vim.notify(table.concat(lines, "\n"), vim.log.levels.INFO)
-end, { desc = "List managed marimo servers and orphan marimo processes" })
+  table.insert(lines, "")
+  table.insert(lines, "<CR> switch to notebook · K kill all marimo · q/<Esc> close")
+
+  -- Size the window to the longest line (capped to 90% of the editor width).
+  local content_width = 0
+  for _, l in ipairs(lines) do
+    local w = vim.fn.strdisplaywidth(l)
+    if w > content_width then content_width = w end
+  end
+  local width = math.max(50, math.min(content_width + 4, math.floor(vim.o.columns * 0.9)))
+  local height = math.min(#lines + 1, math.floor(vim.o.lines * 0.8))
+
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
+  vim.api.nvim_set_option_value("buftype", "nofile", { buf = buf })
+  vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
+  vim.api.nvim_set_option_value("filetype", "marimo-server-list", { buf = buf })
+
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative   = "editor",
+    width      = width,
+    height     = height,
+    col        = math.floor((vim.o.columns - width) / 2),
+    row        = math.floor((vim.o.lines - height) / 2),
+    style      = "minimal",
+    border     = "rounded",
+    title      = " marimo servers ",
+    title_pos  = "center",
+  })
+  vim.api.nvim_set_option_value("cursorline", true, { win = win })
+
+  -- Park the cursor on the first actionable row so <CR> Just Works.
+  for line_no, _ in pairs(row_actions) do
+    vim.api.nvim_win_set_cursor(win, { line_no, 0 })
+    break
+  end
+
+  local function close()
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
+  end
+
+  local function open_kmap(lhs, fn, desc)
+    vim.keymap.set("n", lhs, fn, {
+      buffer = buf, silent = true, noremap = true, desc = desc,
+    })
+  end
+
+  open_kmap("<CR>", function()
+    local line = vim.api.nvim_win_get_cursor(0)[1]
+    local action = row_actions[line]
+    if not action then return end
+    if action.kind == "switch" then
+      close()
+      local nb = marimo.attached_for(action.filepath)
+      if nb and nb.bufnr
+          and vim.api.nvim_buf_is_valid(nb.bufnr)
+          and vim.api.nvim_buf_is_loaded(nb.bufnr) then
+        vim.api.nvim_win_set_buf(0, nb.bufnr)
+      else
+        -- Fall back to a normal edit; auto-attach will pick it up.
+        vim.cmd("edit " .. vim.fn.fnameescape(action.filepath))
+      end
+    end
+  end, "Switch to selected marimo notebook")
+
+  open_kmap("q",     close, "Close server list")
+  open_kmap("<Esc>", close, "Close server list")
+
+  open_kmap("K", function()
+    close()
+    local n = server.kill_all_system_marimo()
+    vim.notify("[neo-marimo] Killed " .. n .. " marimo process(es).", vim.log.levels.INFO)
+  end, "Kill every marimo process on the system")
+end
+
+vim.api.nvim_create_user_command("MarimoServerList", function()
+  open_server_list_window()
+end, { desc = "Show managed marimo servers and orphan processes (interactive)" })
 
 vim.api.nvim_create_user_command("MarimoKillAll", function()
   local server = require("neo-marimo.server")

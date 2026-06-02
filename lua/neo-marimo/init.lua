@@ -14,6 +14,12 @@ local M = {}
 -- Track active notebooks by source filepath to avoid double-attaching
 local _attached = {}
 
+-- Set to true around code paths that intentionally load the underlying .py
+-- buffer (e.g. :MarimoToggle off). The BufReadPost autocmd in
+-- plugin/neo-marimo.lua checks this flag and skips its auto-attach so we
+-- don't immediately bounce back into the notebook view.
+M._suppress_attach = false
+
 -- Initialize the plugin with user options.
 -- Call this from your Neovim config:
 --   require("neo-marimo").setup({ python_path = "/path/to/python" })
@@ -50,11 +56,14 @@ end
 function M.attach(source_bufnr)
   local filepath = vim.api.nvim_buf_get_name(source_bufnr)
 
-  -- Avoid double-attaching
+  -- Avoid double-attaching. The buffer must be both valid (not wiped) and
+  -- loaded — a :bd leaves the buffer "valid" but unloaded, in which case
+  -- switching to it would show an empty buffer and lose all state.
   if _attached[filepath] then
-    -- Switch to the existing notebook buffer if it's still valid
     local existing_nb = _attached[filepath]
-    if existing_nb.bufnr and vim.api.nvim_buf_is_valid(existing_nb.bufnr) then
+    if existing_nb.bufnr
+        and vim.api.nvim_buf_is_valid(existing_nb.bufnr)
+        and vim.api.nvim_buf_is_loaded(existing_nb.bufnr) then
       vim.api.nvim_win_set_buf(0, existing_nb.bufnr)
       return
     else
@@ -161,14 +170,18 @@ function M.attach(source_bufnr)
     end,
   })
 
-  -- Clean up when notebook buffer is closed
+  -- Clean up when notebook buffer is explicitly wiped (:bw). With
+  -- bufhidden = "hide", this no longer fires on :q or :MarimoToggle —
+  -- only when the user really discards the buffer. The server keeps
+  -- running unless config.server.stop_on_close opts in to the strict
+  -- lifecycle.
   vim.api.nvim_create_autocmd("BufWipeout", {
     buffer = nb_bufnr,
     once = true,
     callback = function()
       _attached[filepath] = nil
-      -- Stop the server if we started it
-      if server.is_running(filepath) then
+      if config.options.server and config.options.server.stop_on_close
+          and server.is_running(filepath) then
         server.stop(filepath)
       end
     end,
@@ -252,6 +265,105 @@ function M.current_notebook()
     return _attached[filepath]
   end
   return nil
+end
+
+-- Return the notebook state attached to a given source filepath, or nil.
+-- Used by the statusline / server list to look up cell counts for files
+-- that aren't the current buffer.
+function M.attached_for(filepath)
+  return _attached[filepath]
+end
+
+-- Return a list of {filepath, nb} for every currently attached notebook.
+function M.list_attached()
+  local result = {}
+  for fp, nb in pairs(_attached) do
+    table.insert(result, { filepath = fp, nb = nb })
+  end
+  return result
+end
+
+-- Bind the toggle_view keymap onto a plain (.py) buffer. After the user has
+-- toggled off the notebook view at least once, the plain buffer needs the
+-- same `<leader>mv` binding so they can toggle back.
+local function bind_plain_toggle(pbuf)
+  local km = config.options.keymaps or {}
+  local lhs = km.toggle_view
+  if not lhs then return end
+  pcall(vim.keymap.set, "n", lhs, function()
+    M.toggle(pbuf)
+  end, {
+    buffer = pbuf,
+    silent = true,
+    noremap = true,
+    desc = "Marimo: toggle notebook view",
+  })
+end
+
+-- Swap the current window between the notebook view and the underlying .py.
+--
+--   * On a `marimo://<path>` buffer → write any pending edits, load the plain
+--     .py buffer (suppressing auto-attach), and switch the window to it.
+--   * On a plain .py buffer that we've already attached → switch the window
+--     back to the cached notebook buffer.
+--   * On a plain .py buffer we haven't seen → attach it like a fresh open.
+function M.toggle(bufnr)
+  bufnr = (bufnr and bufnr ~= 0) and bufnr or vim.api.nvim_get_current_buf()
+  if not vim.api.nvim_buf_is_valid(bufnr) then return end
+
+  local bufname = vim.api.nvim_buf_get_name(bufnr)
+  local marimo_path = bufname:match("^marimo://(.+)$")
+
+  if marimo_path then
+    -- Notebook → plain. Persist edits first so the plain buffer reflects the
+    -- notebook content; otherwise the on-disk .py is stale relative to what
+    -- the user sees.
+    local nb = _attached[marimo_path]
+    if nb and (nb.dirty or vim.api.nvim_get_option_value("modified", { buf = bufnr })) then
+      sync.write_to_file(nb)
+    end
+
+    local pbuf = vim.fn.bufadd(marimo_path)
+    if pbuf == 0 then
+      utils.warn("Could not open underlying .py buffer for " .. marimo_path)
+      return
+    end
+
+    -- Suppress the BufReadPost auto-attach for this one load. The flag is
+    -- read by the scheduled callback in plugin/neo-marimo.lua; we clear it
+    -- via vim.schedule so the callback (which is also scheduled) sees it
+    -- and bails out, then it's cleared before any future buffer load.
+    M._suppress_attach = true
+    pcall(vim.fn.bufload, pbuf)
+    vim.schedule(function() M._suppress_attach = false end)
+
+    bind_plain_toggle(pbuf)
+    vim.api.nvim_win_set_buf(0, pbuf)
+    return
+  end
+
+  -- We're on a plain .py. Switch to the cached notebook buffer if we have
+  -- one and it's still loaded; otherwise attach fresh.
+  local filepath = bufname
+  if filepath == "" then
+    utils.warn("Buffer has no filename — nothing to toggle.")
+    return
+  end
+
+  local existing = _attached[filepath]
+  if existing
+      and existing.bufnr
+      and vim.api.nvim_buf_is_valid(existing.bufnr)
+      and vim.api.nvim_buf_is_loaded(existing.bufnr) then
+    vim.api.nvim_win_set_buf(0, existing.bufnr)
+    return
+  end
+
+  if M.is_marimo_notebook(bufnr) then
+    M.attach(bufnr)
+  else
+    utils.warn("Not a marimo notebook — cannot toggle.")
+  end
 end
 
 return M

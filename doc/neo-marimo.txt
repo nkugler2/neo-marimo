@@ -8,16 +8,17 @@ CONTENTS                                                    *neo-marimo-contents
   3. Usage ...................... |neo-marimo-usage|
   4. Keymaps .................... |neo-marimo-keymaps|
   5. Commands ................... |neo-marimo-commands|
-  6. Configuration .............. |neo-marimo-config|
-  7. Health check ............... |neo-marimo-health|
+  6. Statusline ................. |neo-marimo-statusline|
+  7. Configuration .............. |neo-marimo-config|
+  8. Health check ............... |neo-marimo-health|
 
 ==============================================================================
 1. INTRODUCTION                                              *neo-marimo-intro*
 
 neo-marimo lets you edit Marimo notebooks (*.py files) in Neovim with a
 notebook-like visual experience. Cells are displayed as visually distinct
-regions with colored borders. Cell types (Python, Markdown, SQL) receive
-correct syntax highlighting.
+regions with colored borders. Cell types (Python, Markdown, SQL, marimo
+widgets) receive correct syntax highlighting and per-type icons.
 
 Marimo notebooks are saved as pure Python files, so neo-marimo works by
 parsing the @app.cell decorated functions and presenting them as editable
@@ -50,11 +51,13 @@ Simply open any Marimo notebook file: >
 The plugin automatically detects the file as a Marimo notebook and switches
 to the notebook view, showing each cell with colored borders.
 
-- Python cells have blue borders
-- Markdown cells have green borders
-- SQL cells have purple borders
+  - Python cells   → blue border, "py" label
+  - Markdown cells → green border, "md" label
+  - SQL cells      → purple border, "sql" label
+  - marimo widgets → warm yellow border, "mo" label (cells whose body is a
+                     single mo.ui.*, mo.hstack, etc. expression)
 
-Edits you make are saved back to the original .py file on :w
+Edits you make are saved back to the original .py file on :w.
 
 ==============================================================================
 4. KEYMAPS                                                  *neo-marimo-keymaps*
@@ -73,6 +76,10 @@ Default keymaps (all buffer-local, only active in notebook buffers):
   <leader>mr      Run cell under cursor
   <leader>mR      Run all cells
   <leader>mt      Toggle cell output display
+  <leader>mv      Toggle between notebook view and underlying .py
+
+`<leader>mv` is also bound on the plain .py buffer the first time you
+toggle off, so the same key swaps you back.
 
 All keymaps can be customized in setup() under the keymaps table.
 Set any keymap to false to disable it.
@@ -80,29 +87,89 @@ Set any keymap to false to disable it.
 ==============================================================================
 5. COMMANDS                                                *neo-marimo-commands*
 
-:MarimoOpen     Start server (if needed) and open notebook in browser
-:MarimoStop     Stop the marimo server for the current notebook
-:MarimoReload   Reload the notebook buffer from the .py file on disk
-:MarimoAttach   Manually attach neo-marimo to the current Python buffer
+Notebook-specific commands (require a marimo notebook buffer):
+
+  :MarimoEdit          Start the marimo server (if needed) and open the
+                       notebook in your browser. Same as `<leader>mo`.
+  :MarimoOpen          Alias for :MarimoEdit (kept for back-compat).
+  :MarimoRun           Run the cell under the cursor.
+  :MarimoRun all       Run every cell in the notebook.
+  :MarimoNewCell       Insert a new blank cell below the cursor.
+  :MarimoNewCell above Insert a new blank cell above the cursor.
+  :MarimoStop          Stop the marimo server for the current notebook.
+  :MarimoReload        Re-read the .py file from disk and rebuild the view.
+  :MarimoToggle        Toggle between notebook view and underlying .py.
+                       Notebook state (outputs, status) is preserved.
+
+Buffer / server management:
+
+  :MarimoAttach        Manually attach neo-marimo to the current Python
+                       buffer (in case auto-detection missed it).
+  :MarimoNew [path]    Create a new marimo notebook (prompts for a path
+                       when none is given) and open it.
+  :MarimoServerList    Open an interactive floating window listing every
+                       managed server (with cell count + ws status) and
+                       every marimo process running on the system. Press
+                       <CR> on a managed row to switch to that notebook,
+                       K to kill every marimo process, q to close.
+  :MarimoKillAll       Force-kill every marimo edit process on the
+                       system. Use this if an orphan is holding the
+                       configured port.
+
+Debug:
+
+  :MarimoWsDebug [path]    Toggle WebSocket message logging. With no arg
+                           logs to /tmp/neo-marimo-ws.log. `off` disables.
 
 ==============================================================================
-6. CONFIGURATION                                            *neo-marimo-config*
+6. STATUSLINE                                            *neo-marimo-statusline*
+
+`neo-marimo.statusline` exposes a small surface for statusline plugins:
+
+  M.component()     One-line status string. Empty when no marimo
+                    activity. Otherwise something like:
+                       󰀘 marimo · 2 servers · py #3/12
+
+  M.servers()       Array of server descriptors, each with
+                    {filepath, port, ws_connected, has_token, alive,
+                     pid, started_at, cell_count}.
+
+  M.current_cell()  "py #3/12" for the cell under the cursor, or nil
+                    when not on a notebook buffer.
+
+Lualine integration: >lua
+  require("lualine").setup({
+    sections = {
+      lualine_x = { require("neo-marimo.statusline").component },
+    },
+  })
+<
+For native statuslines, the component is callable from `statusline`: >vim
+  set statusline+=%{v:lua.require'neo-marimo.statusline'.component()}
+<
+==============================================================================
+7. CONFIGURATION                                            *neo-marimo-config*
 
 Full configuration with defaults: >lua
   require("neo-marimo").setup({
-    python_path = "python3",    -- Python with marimo installed
-    marimo_cmd  = "marimo",     -- marimo CLI binary
+    python_path = "python3",     -- Python with marimo installed
+    marimo_cmd  = "marimo",      -- marimo CLI binary
 
     server = {
-      host = "localhost",
-      port = 2718,
-      auto_start = true,
+      host          = "localhost",
+      port          = 2718,
+      auto_start    = true,
+      -- Stop the marimo server when the notebook buffer is wiped (:bw).
+      -- Default false so :MarimoToggle and :bd don't terminate a kernel.
+      stop_on_close = false,
     },
 
     ui = {
-      border_style   = "rounded",  -- "rounded", "simple", or "none"
-      show_cell_name = true,        -- show function name in border
+      border_style    = "rounded",  -- "rounded", "simple", or "none"
+      show_cell_name  = true,       -- show function name in border
       show_cell_index = true,       -- show cell number (#1, #2, ...)
+      wrap_cells      = true,       -- soft-wrap long lines inside cells
+      icons           = true,       -- nerd-font glyphs in labels/statusline
     },
 
     keymaps = {
@@ -114,15 +181,20 @@ Full configuration with defaults: >lua
       move_cell_down  = "<leader>mJ",
       move_cell_up    = "<leader>mK",
       open_in_browser = "<leader>mo",
+      stop_server     = "<leader>mx",
       run_cell        = "<leader>mr",
       run_all         = "<leader>mR",
       toggle_output   = "<leader>mt",
+      toggle_view     = "<leader>mv",
     },
   })
 <
+Set any keymap to `false` to disable that binding. Disable icons by setting
+`ui.icons = false` (uses plain ASCII labels everywhere — notebook borders,
+statusline, etc.).
 
 ==============================================================================
-7. HEALTH CHECK                                             *neo-marimo-health*
+8. HEALTH CHECK                                             *neo-marimo-health*
 
 Run :checkhealth neo-marimo to verify your setup. This checks:
 - Whether the Python bridge can run

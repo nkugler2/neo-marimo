@@ -216,10 +216,14 @@ end
 function M.create(nb, source_bufnr)
   local bufnr = vim.api.nvim_create_buf(false, true)
 
-  -- Make it look and behave like a real file buffer
+  -- Make it look and behave like a real file buffer.
+  -- bufhidden = "hide" (not "wipe") so :MarimoToggle can swap the window to
+  -- the plain .py and back without losing notebook state (cell outputs,
+  -- statuses, debounced change queue). Explicit :bw still wipes and runs
+  -- the BufWipeout cleanup below.
   vim.api.nvim_set_option_value("buftype", "acwrite", { buf = bufnr })
   vim.api.nvim_set_option_value("filetype", "python", { buf = bufnr })
-  vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = bufnr })
+  vim.api.nvim_set_option_value("bufhidden", "hide", { buf = bufnr })
   vim.api.nvim_set_option_value("swapfile", false, { buf = bufnr })
   vim.api.nvim_set_option_value("modifiable", true, { buf = bufnr })
 
