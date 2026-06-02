@@ -225,6 +225,10 @@ function M.attach(source_bufnr)
   -- Switch the current window to show the notebook buffer
   vim.api.nvim_win_set_buf(0, nb_bufnr)
   buffer.apply_window_settings(vim.api.nvim_get_current_win())
+  -- Borders rendered inside buffer.create() used the fallback width because
+  -- the buffer wasn't in a window yet. Re-render now that we know the real
+  -- window width, otherwise cells stay at fallback size until the first edit.
+  buffer.render_all_borders(nb_bufnr, nb)
 
   -- Re-apply window settings whenever the buffer enters a new window
   -- (e.g. user runs :split). Also re-render borders so they pick up the
