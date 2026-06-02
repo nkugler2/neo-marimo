@@ -247,11 +247,19 @@ function M.start(filepath, port, on_message)
   }
   M._servers[filepath] = srv
 
-  -- --no-token disables the browser-auth access_token entirely. We still
-  -- watch stdout for the URL line in case marimo's bind races with us and
-  -- it has to fall back to a different port.
+  -- --no-token disables the browser-auth access_token entirely.
+  -- --watch enables marimo's own file watcher; without it the server
+  -- never broadcasts update-cell-codes when we save, and the browser
+  -- silently goes stale until the user manually reloads. We still
+  -- watch stdout for the URL line in case marimo's bind races with us
+  -- and it has to fall back to a different port.
   local job_id = vim.fn.jobstart(
-    { marimo_cmd, "edit", "--headless", "--no-token", "--port", tostring(actual_port), filepath },
+    {
+      marimo_cmd, "edit",
+      "--headless", "--no-token", "--watch",
+      "--port", tostring(actual_port),
+      filepath,
+    },
     {
       on_stdout = function(_, data)
         for _, line in ipairs(data) do

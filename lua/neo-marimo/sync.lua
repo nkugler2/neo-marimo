@@ -2,15 +2,19 @@ local buffer = require("neo-marimo.buffer")
 local parser = require("neo-marimo.parser")
 local utils = require("neo-marimo.utils")
 local config = require("neo-marimo.config")
-local server = require("neo-marimo.server")
 
 local M = {}
 
 -- Suppression window (ms) for the file watcher around our own writes.
--- After we writefile() the .py we expect at least one fs_event; we don't
--- want it to cycle back through reload_from_file and clobber the cursor.
--- 750ms covers atomic-save + curl-roundtrip on slow disks.
-local SAVE_SUPPRESS_MS = 750
+-- After we writefile() the .py both our local fs_event AND marimo's
+-- watcher will fire — marimo also broadcasts update-cell-codes over
+-- the WS to all consumers (including us, since we sit as kiosk). We
+-- don't want any of those echoes to round-trip through
+-- reload_from_file / apply_remote_changes and clobber whatever the
+-- user typed *after* :w. 1500ms covers both inotify (~50ms) and
+-- marimo's polling fallback (1s) without being long enough to swallow
+-- a genuinely external edit.
+local SAVE_SUPPRESS_MS = 1500
 
 -- Mark the notebook as "we just wrote this; ignore the next watcher
 -- event". Cleared on a timer so the suppression doesn't outlive the
@@ -75,15 +79,15 @@ function M.write_to_file(nb)
   vim.api.nvim_set_option_value("modified", false, { buf = bufnr })
   nb.dirty = false
 
-  -- Push to the running marimo server so its in-memory view matches
-  -- disk immediately. Without this the server lags ~1s while its own
-  -- file watcher catches up, which causes browser ↔ nvim drift when
-  -- both editors are in play. Best-effort: if the server isn't
-  -- running, or push_on_save is disabled, skip silently.
-  local srv_cfg = config.options.server or {}
-  if srv_cfg.push_on_save ~= false and server.is_running(nb.filepath) then
-    pcall(server.save_cells, nb.filepath, nb.cells)
-  end
+  -- We deliberately don't POST /api/kernel/save here. Doing so sets
+  -- marimo's `_last_saved_content` to our content, which makes its
+  -- file watcher's `file_content_matches_last_save()` guard skip the
+  -- subsequent reload — and that skip is what suppresses the
+  -- `update-cell-codes` broadcast to the browser, leaving the browser
+  -- stale until the user manually reloads. Since `marimo edit` is
+  -- launched with `--watch`, the writefile above is sufficient: the
+  -- watcher reloads, sees content differs from last save, and pushes
+  -- to all consumers (browser + our kiosk).
 
   vim.notify("[neo-marimo] Saved " .. vim.fn.fnamemodify(nb.filepath, ":t"), vim.log.levels.INFO)
   return true

@@ -66,15 +66,21 @@ end)
 -- ── Phase 6: bidirectional sync ────────────────────────────────────────────
 
 -- update-cell-codes: sent by marimo when another client (typically the
--- browser) edited cells. Payload is { cell_ids = [...], codes = [...],
--- code_is_stale = bool }. We map codes onto the existing cell list by
--- position and call apply_remote_changes for a minimal-disturbance patch.
+-- browser) edited cells, or when marimo's --watch picks up a change.
+-- Payload is { cell_ids = [...], codes = [...], code_is_stale = bool }.
+-- We map codes onto the existing cell list by position and call
+-- apply_remote_changes for a minimal-disturbance patch.
 --
--- This path can race with the file-watcher (marimo also persists the
--- change to disk). apply_remote_changes is idempotent — the second
--- call hits the no-op fast path because the codes already match.
+-- Important: marimo broadcasts this to *every* consumer, including
+-- the one whose write triggered it. If the user typed more characters
+-- between :w and the WS echo, those characters would be clobbered by
+-- the older saved version coming back. sync.is_writing(nb) is true
+-- for ~1.5s after our own write; skip in that window. The
+-- file-watcher path uses the same suppression.
 M.register("update-cell-codes", function(payload, ctx)
   if not ctx.nb or not ctx.bufnr then return end
+  local sync = require("neo-marimo.sync")
+  if sync.is_writing(ctx.nb) then return end
   local codes = payload.codes
   if type(codes) ~= "table" then return end
   if #codes ~= #ctx.nb.cells then
@@ -91,7 +97,6 @@ M.register("update-cell-codes", function(payload, ctx)
       options = ctx.nb.cells[i].options,
     })
   end
-  local sync = require("neo-marimo.sync")
   sync.apply_remote_changes(ctx.nb, new_cells)
 end)
 

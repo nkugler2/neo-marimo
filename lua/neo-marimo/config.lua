@@ -27,11 +27,6 @@ M.defaults = {
     -- editors). When a change is detected, the notebook view is
     -- refreshed from disk.
     watch_file = true,
-    -- After :w in nvim, POST the new cell codes to the running marimo
-    -- server so its in-memory view matches what we just wrote — without
-    -- this, marimo lags behind by up to ~1s while its file watcher
-    -- catches up.
-    push_on_save = true,
   },
 
   -- Visual settings
