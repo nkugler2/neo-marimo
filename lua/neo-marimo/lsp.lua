@@ -164,6 +164,25 @@ local function client_has_python_filetype(client)
   return false
 end
 
+-- True if `client` is a python LSP that's actually useful on the shadow
+-- buffer. We deliberately restrict this to clients that serve hover —
+-- the shadow only exists to back K / completion / signature / goto-def,
+-- and a python client without hover (e.g. a pure linter like ruff with
+-- hoverProvider disabled by user config) adds nothing but contributes
+-- to two problems:
+--   1. nvim warns when clients with different positionEncodings are
+--      attached to the same buffer (pyright is utf-16, ruff is utf-8).
+--   2. The shadow is hidden, so ruff's diagnostics are invisible — its
+--      attachment is pure overhead.
+-- We still want pyright/basedpyright/pylsp here, which all advertise
+-- hoverProvider in their server_capabilities.
+local function client_is_useful_for_shadow(client)
+  if not client_has_python_filetype(client) then return false end
+  local caps = client.server_capabilities or {}
+  return caps.hoverProvider == true
+      or (type(caps.hoverProvider) == "table" and not vim.tbl_isempty(caps.hoverProvider))
+end
+
 -- Send `workspace/didChangeWorkspaceFolders` to `client` adding `dir` as
 -- a workspace folder, unless that folder (or a parent of it) is already
 -- known. Returns true if we sent the notification, false if it was a
@@ -200,13 +219,13 @@ local function ensure_lsp_attached(bufnr)
 
   local python_clients = {}
   for _, client in ipairs(vim.lsp.get_clients()) do
-    if client_has_python_filetype(client) then
+    if client_is_useful_for_shadow(client) then
       table.insert(python_clients, client)
     end
   end
 
   if #python_clients == 0 then
-    -- No python LSP is running at all. Fire FileType=python so the user's
+    -- No useful python LSP is running. Fire FileType=python so the user's
     -- autostart (vim.lsp.enable, lspconfig, …) spawns one for the shadow.
     pcall(vim.api.nvim_exec_autocmds, "FileType", {
       buffer = bufnr, modeline = false, pattern = "python",
@@ -236,7 +255,11 @@ local function ensure_lsp_attached(bufnr)
       added = add_workspace_folder(client, buf_dir)
     end
 
-    if added then
+    -- Only detach if we just added a workspace folder AND the buffer
+    -- was already attached. Calling detach on a never-attached client
+    -- produces a "Buffer is not attached to client. Cannot detach"
+    -- message in :messages every notebook open.
+    if added and vim.lsp.buf_is_attached(bufnr, client.id) then
       pcall(vim.lsp.buf_detach_client, bufnr, client.id)
     end
     pcall(vim.lsp.buf_attach_client, bufnr, client.id)
