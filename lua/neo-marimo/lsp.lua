@@ -150,18 +150,31 @@ local function ensure_lsp_attached(bufnr)
   end
 end
 
--- Compute a real filesystem path to use as the shadow buffer's name. Many
--- LSPs (notably pyright) reject custom URI schemes and only respond to
--- file:// — so we use a cache dir under stdpath("cache") with a
--- collision-safe name derived from the source filepath.
+-- Compute the path to use as the shadow buffer's name. The path matters
+-- because:
+--   1. Many LSPs (notably pyright) reject custom URI schemes — only file://.
+--   2. Pyright's analysis is workspace-relative: imports, pythonpath,
+--      pyrightconfig.json, the active virtualenv. If the shadow sits in
+--      stdpath("cache") it lands OUTSIDE the user's project, so pyright
+--      falls back to bundled stubs — `K` shows a thin signature for
+--      `np.array` and `np.<C-x><C-o>` returns nothing useful.
+--
+-- So we put the shadow next to the real notebook in a sibling hidden
+-- directory `.neo-marimo-shadow/`. Same workspace, same env, same numpy.
+-- A .gitignore is dropped on first creation so the dir doesn't show up
+-- in git diffs.
 local function shadow_filepath(filepath)
-  local cache_dir = vim.fn.stdpath("cache") .. "/neo-marimo/shadow"
-  vim.fn.mkdir(cache_dir, "p")
-  -- Replace path separators with underscores so the shadow lives flat
-  -- in the cache dir. The source dirname is included to disambiguate
-  -- notebooks with the same basename across projects.
-  local sanitized = filepath:gsub("[/\\]", "_"):gsub("^_+", "")
-  return cache_dir .. "/" .. sanitized
+  local dir = vim.fn.fnamemodify(filepath, ":h")
+  local basename = vim.fn.fnamemodify(filepath, ":t")
+  local shadow_dir = dir .. "/.neo-marimo-shadow"
+  if not vim.uv.fs_stat(shadow_dir) then
+    vim.fn.mkdir(shadow_dir, "p")
+    pcall(function()
+      local f = io.open(shadow_dir .. "/.gitignore", "w")
+      if f then f:write("*\n!.gitignore\n"); f:close() end
+    end)
+  end
+  return shadow_dir .. "/" .. basename
 end
 
 -- Find or create the shadow buffer for this notebook. The buffer is
@@ -225,18 +238,48 @@ function M.refresh_shadow(nb)
   vim.api.nvim_set_option_value("modifiable", true, { buf = entry.bufnr })
 
   -- nvim_buf_set_lines is blocked under textlock (E565), which fires when
-  -- we're invoked from inside an omnifunc / completion context. Swallow
-  -- that case: the on_bytes debounce keeps the shadow within ~120ms of
-  -- the live notebook outside textlock, so completion still has near-
-  -- current content to work with. We deliberately keep the OLD
-  -- cell_offsets and last_shadow_text in this case so the LSP position
-  -- translation stays consistent with whatever pyright actually has.
+  -- we're invoked from inside an omnifunc / completion context. The
+  -- common case there is: user just typed `np.` and immediately hit
+  -- <C-x><C-o>, so the on_bytes debounce hasn't fired yet — without a
+  -- workaround, pyright would still see `np` (no dot) and answer "no
+  -- completions" while our offsets point past EOL.
+  --
+  -- Workaround: still update cell_offsets to match the intended content,
+  -- and tell the LSP about it via a synthetic textDocument/didChange.
+  -- This keeps in-flight requests consistent with the live notebook
+  -- without touching the buffer. We deliberately leave last_shadow_text
+  -- unset so the next non-textlock refresh actually writes the buffer
+  -- (which lets nvim's internal change tracker take over again).
   local ok = pcall(vim.api.nvim_buf_set_lines, entry.bufnr, 0, -1, false, lines)
-  if not ok then return entry end
+  if not ok then
+    entry.cell_offsets = offsets
+    M._push_didchange(entry.bufnr, text)
+    return entry
+  end
 
   entry.cell_offsets = offsets
   entry.last_shadow_text = text
   return entry
+end
+
+-- Synthesize a `textDocument/didChange` notification for every client
+-- attached to `bufnr` with the given full-document text. Used when we
+-- couldn't write the shadow buffer (textlock) but still want the LSP to
+-- analyze the live content. Version is monotonic in milliseconds so it
+-- won't collide with whatever nvim's internal change tracker is using —
+-- if anything, our number is far ahead, and the next legitimate change
+-- nvim flushes will just re-set the same content.
+function M._push_didchange(bufnr, text)
+  local uri = vim.uri_from_bufnr(bufnr)
+  local version = math.floor(vim.uv.hrtime() / 1e6)
+  for _, client in ipairs(vim.lsp.get_clients({ bufnr = bufnr })) do
+    pcall(function()
+      client:notify("textDocument/didChange", {
+        textDocument = { uri = uri, version = version },
+        contentChanges = { { text = text } },
+      })
+    end)
+  end
 end
 
 -- Convert a notebook (row, col) to the corresponding shadow (row, col).
