@@ -125,48 +125,98 @@ local function build_shadow_text(nb)
   return table.concat(lines, "\n"), offsets
 end
 
--- Best-effort: attach every existing Python LSP client to `bufnr`. Most
--- users have a plugin (or `vim.lsp.enable`) that has already started
--- pyright/basedpyright/pylsp/ruff on some other Python buffer; we piggy-
--- back on that rather than rolling our own start config.
+-- Best-effort: attach every existing Python LSP client to `bufnr` AND
+-- make sure each one has a workspace folder that contains the shadow
+-- path. That second step matters: when the notebook's directory has no
+-- root_markers (no .git, pyproject.toml, etc.), the user's autostart
+-- resolves `root_dir = nil` and pyright runs in single-file mode for
+-- every attached buffer — hover on `np.array` returns "(function)
+-- array: Unknown" instead of the full overload signatures because
+-- pyright skips the project venv's library code without a workspace.
 --
--- We attach ALL matching clients rather than the first one — common
--- setups run multiple language servers concurrently (e.g. pyright for
--- hover/types + ruff for diagnostics). Attaching only the first risks
--- picking the one without the capability we need (ruff without hover,
--- pyright without diagnostics, etc.).
---
--- If nothing is currently running, fire a FileType=python autocmd so the
--- user's autostart machinery (`vim.lsp.enable("pyright")`, lspconfig)
--- gets a chance to spawn one for the shadow buffer.
+-- We fix that by sending `workspace/didChangeWorkspaceFolders` to add
+-- the shadow's directory as a workspace folder on every attached
+-- python client. Pyright accepts the new folder, re-resolves the venv
+-- relative to it, and serves rich type info on subsequent requests.
+local function root_contains_path(root, path)
+  if not root or not path or root == "" then return false end
+  -- Normalize root to end in / so the prefix match doesn't false-match
+  -- "/foo" against "/foobar/baz".
+  local r = root
+  if r:sub(-1) ~= "/" then r = r .. "/" end
+  return path == root or path:sub(1, #r) == r
+end
+
+local function client_has_python_filetype(client)
+  local fts = (client.config and client.config.filetypes) or {}
+  for _, ft in ipairs(fts) do
+    if ft == "python" then return true end
+  end
+  return false
+end
+
+-- Send `workspace/didChangeWorkspaceFolders` to `client` adding `dir` as
+-- a workspace folder, unless that folder (or a parent of it) is already
+-- known. Returns true if we sent the notification, false if it was a
+-- no-op. Best-effort — silently skips if the client doesn't expose the
+-- expected fields (compat with multiple nvim versions).
+local function add_workspace_folder(client, dir)
+  if not dir or dir == "" then return false end
+  local known = client.workspace_folders or {}
+  for _, wf in ipairs(known) do
+    if root_contains_path(wf.name or wf.uri, dir) then return false end
+  end
+  local uri = vim.uri_from_fname(dir)
+  local ok = pcall(function()
+    client:notify("workspace/didChangeWorkspaceFolders", {
+      event = {
+        added = { { uri = uri, name = dir } },
+        removed = {},
+      },
+    })
+  end)
+  if ok then
+    -- Reflect the addition in the local list so subsequent shadow
+    -- attaches don't re-send the same notification.
+    table.insert(known, { uri = uri, name = dir })
+    client.workspace_folders = known
+  end
+  return ok
+end
+
 local function ensure_lsp_attached(bufnr)
   if not vim.api.nvim_buf_is_valid(bufnr) then return end
+  local buf_path = vim.api.nvim_buf_get_name(bufnr)
+  local buf_dir = vim.fn.fnamemodify(buf_path, ":h")
 
-  local attached_any = false
-  local existing = {}
-  for _, c in ipairs(vim.lsp.get_clients({ bufnr = bufnr })) do
-    existing[c.id] = true
-  end
-
+  -- Attach every existing python client (or confirm it's already
+  -- attached). We no longer filter on root_dir here because root_dir
+  -- failing to resolve is the most common case in the wild — we add
+  -- the missing workspace folder below instead.
+  local python_clients = {}
   for _, client in ipairs(vim.lsp.get_clients()) do
-    if not existing[client.id] then
-      local fts = (client.config and client.config.filetypes) or {}
-      for _, ft in ipairs(fts) do
-        if ft == "python" then
-          pcall(vim.lsp.buf_attach_client, bufnr, client.id)
-          attached_any = true
-          break
-        end
-      end
-    else
-      attached_any = true
+    if client_has_python_filetype(client) then
+      table.insert(python_clients, client)
+      pcall(vim.lsp.buf_attach_client, bufnr, client.id)
     end
   end
 
-  if not attached_any then
+  if #python_clients == 0 then
+    -- No python LSP is running at all. Fire FileType=python so the user's
+    -- autostart (vim.lsp.enable, lspconfig, …) spawns one for the shadow.
     pcall(vim.api.nvim_exec_autocmds, "FileType", {
       buffer = bufnr, modeline = false, pattern = "python",
     })
+    return
+  end
+
+  -- Make sure each attached python client has a workspace folder that
+  -- contains the shadow. This is the bit that flips pyright out of
+  -- single-file mode for the shadow URI.
+  for _, client in ipairs(python_clients) do
+    if not root_contains_path(client.config and client.config.root_dir, buf_path) then
+      add_workspace_folder(client, buf_dir)
+    end
   end
 end
 
