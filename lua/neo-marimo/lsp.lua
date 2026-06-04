@@ -156,25 +156,22 @@ end
 --   2. Pyright's analysis is workspace-relative: imports, pythonpath,
 --      pyrightconfig.json, the active virtualenv. If the shadow sits in
 --      stdpath("cache") it lands OUTSIDE the user's project, so pyright
---      falls back to bundled stubs — `K` shows a thin signature for
---      `np.array` and `np.<C-x><C-o>` returns nothing useful.
+--      falls back to bundled stubs and gives thin hover / no completion
+--      content for third-party packages.
 --
--- So we put the shadow next to the real notebook in a sibling hidden
--- directory `.neo-marimo-shadow/`. Same workspace, same env, same numpy.
--- A .gitignore is dropped on first creation so the dir doesn't show up
--- in git diffs.
+-- So we name the shadow as a sibling of the real notebook with a hidden
+-- (leading-dot) basename, e.g. `/foo/bar.py` → `/foo/.bar.marimo-shadow.py`.
+-- Pyright walks up from that URI to find the workspace markers (.git,
+-- pyproject.toml, …) the same way it would from the real file, and
+-- inherits the same env. Nothing is written to disk: the buffer is
+-- `buftype=nofile`, so the shadow lives entirely in memory and the
+-- "parent directory" is just whatever already exists on disk.
 local function shadow_filepath(filepath)
   local dir = vim.fn.fnamemodify(filepath, ":h")
   local basename = vim.fn.fnamemodify(filepath, ":t")
-  local shadow_dir = dir .. "/.neo-marimo-shadow"
-  if not vim.uv.fs_stat(shadow_dir) then
-    vim.fn.mkdir(shadow_dir, "p")
-    pcall(function()
-      local f = io.open(shadow_dir .. "/.gitignore", "w")
-      if f then f:write("*\n!.gitignore\n"); f:close() end
-    end)
-  end
-  return shadow_dir .. "/" .. basename
+  -- Strip the trailing .py if present so we don't end up with `.bar.py.marimo-shadow.py`.
+  local stem = basename:gsub("%.py$", "")
+  return dir .. "/." .. stem .. ".marimo-shadow.py"
 end
 
 -- Find or create the shadow buffer for this notebook. The buffer is
