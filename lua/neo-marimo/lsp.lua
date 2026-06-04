@@ -7,28 +7,31 @@
 -- requests against it.
 --
 -- Shadow buffer shape (built by build_shadow_text):
---   #@cell 0 [py]
---   def __cell_0():
---       <cell-0 code, indented +4>
---
 --   #@cell 1 [py]
---   def __cell_1():
---       <cell-1 code, indented +4>
+--   <cell-1 code at module scope, columns unchanged>
 --
--- Each cell becomes a function so `return` statements (common in marimo
--- cells) parse cleanly. The +4 indent shift is applied when translating
--- cursor positions. Top-level imports inside a cell don't propagate
--- across cell boundaries — that's a known compromise; the alternative
--- (parsing each cell's imports and hoisting them) would mean rebuilding
--- marimo's static-analysis pass in Lua. Hover, signature, and completion
--- for stdlib + already-imported-in-cell symbols all work; only
--- cross-cell goto-def is degraded.
+--   #@cell 2 [py]
+--   <cell-2 code at module scope, columns unchanged>
 --
--- We do *not* try to mirror marimo's exact codegen (decorators,
--- `app._unparsable_cell(...)`, etc.) — that shape is brittle to translate
--- back into notebook coordinates because different cells get wrapped
--- differently. The simpler `def __cell_N():` shape gives a one-to-one
--- cell→row mapping that we can invert reliably.
+-- Every cell lives at module scope. This is critical: a real marimo
+-- notebook puts `import numpy as np` in one cell and uses `np.array`
+-- in many later cells. If each cell were wrapped in its own function
+-- (`def __cell_N():`), `np` would be local to the import cell and
+-- invisible to every other cell — pyright would return
+-- "(function) array: Unknown" and ruff would flag every use as
+-- "undefined name".
+--
+-- The one Python construct that doesn't parse at module scope is a
+-- top-level `return X`. Marimo cells use this to expose a cell's
+-- output. We rewrite `return ` → `_RET = ` (same length, valid
+-- module-scope assignment) and bare `return` → `pass  ` (same length).
+-- Both transforms preserve column positions so the (row, col)
+-- translation between notebook and shadow stays trivial — col_shift
+-- is always 0.
+--
+-- Indented `return` statements (inside nested functions a user writes
+-- in their cell) are left untouched, so nested function return types
+-- are still inferred correctly.
 
 local M = {}
 
@@ -61,35 +64,42 @@ local function trim_empty_lines(lines)
   return out
 end
 
--- Indent each non-empty line in `code` by 4 spaces. Used so cell code
--- nests inside the `def __cell_N():` wrapper without breaking on blank
--- lines (pyright is happy with mixed indentation as long as non-blanks
--- are consistent).
-local function indent4(code)
-  if code == "" then return "" end
+-- Rewrite top-level `return` statements so the cell parses at module
+-- scope. Length-preserving so the (row, col) translation between
+-- notebook and shadow doesn't need to know about the transformation.
+--   "return X"  → "_RET = X"   (both 7 chars before X, both valid)
+--   "return(X)" → "_RET =(X)"
+--   "return"    → "pass  "     (both 6 chars)
+-- Indented `return` (inside a user-defined nested function) is left
+-- alone so pyright can still infer its return type.
+local function transform_returns(code)
   local out = {}
   for line in (code .. "\n"):gmatch("([^\n]*)\n") do
-    if line == "" then
-      table.insert(out, "")
+    -- Only top-level returns (no leading whitespace).
+    if line == "return" then
+      table.insert(out, "pass  ")
+    elseif line:sub(1, 7) == "return " then
+      table.insert(out, "_RET = " .. line:sub(8))
+    elseif line:sub(1, 7) == "return(" then
+      table.insert(out, "_RET =" .. line:sub(7))
     else
-      table.insert(out, "    " .. line)
+      table.insert(out, line)
     end
   end
-  -- Trim the trailing empty string from the gmatch tail.
+  -- Drop the trailing empty string from the gmatch tail on non-\n-ended input.
   if out[#out] == "" then table.remove(out) end
   return table.concat(out, "\n")
 end
 
 -- Build the shadow text and a per-cell offset table from the current
 -- notebook cells. Returns (text, offsets) where offsets[i] is
--- { shadow_start_row = N, col_shift = 4 } — the 0-indexed shadow row where
--- cell i's code begins, and the column adjustment applied to that cell.
+-- { shadow_start_row = N, col_shift = 0 } — the 0-indexed shadow row
+-- where cell i's code begins.
 --
 -- shadow row layout per cell:
 --   row K:     #@cell i [type]    ← marker (for debug grepping)
---   row K+1:   def __cell_i():
---   row K+2..: indented cell code
---   row K+N+2: <blank separator>
+--   row K+1..: cell code at module scope, top-level returns rewritten
+--   row K+N+1: <blank separator>
 local function build_shadow_text(nb)
   local lines = {}
   local offsets = {}
@@ -97,20 +107,19 @@ local function build_shadow_text(nb)
   for i, cell in ipairs(nb.cells) do
     local marker = string.format("#@cell %d [%s]", i, cell.type or "py")
     table.insert(lines, marker)
-    table.insert(lines, string.format("def __cell_%d():", i))
 
     local code_start_row = #lines  -- 0-indexed row of the first cell-code line
     offsets[i] = {
       shadow_start_row = code_start_row,
-      col_shift = 4,
+      col_shift = 0,
     }
 
     local code = cell.code or ""
     if code == "" then
-      table.insert(lines, "    pass")
+      table.insert(lines, "pass")
     else
-      local indented = indent4(code)
-      for line in (indented .. "\n"):gmatch("([^\n]*)\n") do
+      local transformed = transform_returns(code)
+      for line in (transformed .. "\n"):gmatch("([^\n]*)\n") do
         table.insert(lines, line)
       end
       -- Strip the trailing empty produced by the gmatch tail on a final \n.
