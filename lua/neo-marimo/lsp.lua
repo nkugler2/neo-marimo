@@ -189,15 +189,10 @@ local function ensure_lsp_attached(bufnr)
   local buf_path = vim.api.nvim_buf_get_name(bufnr)
   local buf_dir = vim.fn.fnamemodify(buf_path, ":h")
 
-  -- Attach every existing python client (or confirm it's already
-  -- attached). We no longer filter on root_dir here because root_dir
-  -- failing to resolve is the most common case in the wild — we add
-  -- the missing workspace folder below instead.
   local python_clients = {}
   for _, client in ipairs(vim.lsp.get_clients()) do
     if client_has_python_filetype(client) then
       table.insert(python_clients, client)
-      pcall(vim.lsp.buf_attach_client, bufnr, client.id)
     end
   end
 
@@ -210,13 +205,32 @@ local function ensure_lsp_attached(bufnr)
     return
   end
 
-  -- Make sure each attached python client has a workspace folder that
-  -- contains the shadow. This is the bit that flips pyright out of
-  -- single-file mode for the shadow URI.
+  -- For each python client: ensure the shadow's workspace folder is
+  -- registered BEFORE the buffer's didOpen — pyright caches the
+  -- "single-file vs workspace" decision at didOpen time and doesn't
+  -- retroactively re-analyze open buffers when a workspace folder is
+  -- added later. So:
+  --
+  --   1. Add the workspace folder (no-op if already present).
+  --   2. If we just added it AND the buffer was already attached,
+  --      detach (sends didClose) and re-attach (sends a fresh didOpen).
+  --      Pyright now sees the file as in-workspace and serves rich
+  --      type info from the project venv.
+  --   3. Otherwise attach (idempotent if already attached, sends a
+  --      one-time didOpen if not).
   for _, client in ipairs(python_clients) do
-    if not root_contains_path(client.config and client.config.root_dir, buf_path) then
-      add_workspace_folder(client, buf_dir)
+    local needs_workspace = not root_contains_path(
+      client.config and client.config.root_dir, buf_path
+    )
+    local added = false
+    if needs_workspace then
+      added = add_workspace_folder(client, buf_dir)
     end
+
+    if added then
+      pcall(vim.lsp.buf_detach_client, bufnr, client.id)
+    end
+    pcall(vim.lsp.buf_attach_client, bufnr, client.id)
   end
 end
 
