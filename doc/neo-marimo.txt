@@ -90,6 +90,25 @@ notebook view):
 `<leader>mv` is also bound on the plain .py buffer the first time you
 toggle off, so the same key swaps you back.
 
+blink.cmp users: add the neo-marimo source so completion fires inline
+inside notebook cells (no need to hit <C-x><C-o>): >lua
+  require("blink.cmp").setup({
+    sources = {
+      default = { "lsp", "snippets", "buffer", "neo_marimo" },
+      providers = {
+        neo_marimo = {
+          name = "neo-marimo",
+          module = "neo-marimo.blink",
+        },
+      },
+    },
+  })
+<
+The source auto-disables on non-notebook buffers via an `enabled`
+predicate that checks for the `marimo://` buffer-name prefix, so it has
+no effect on completion in regular .py files. Trigger characters are
+`.`, `[`, `"`, `'` — matching pyright's defaults.
+
 All keymaps can be customized in setup() under the keymaps table.
 Set any keymap to false to disable it.
 

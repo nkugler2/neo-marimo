@@ -99,6 +99,23 @@ What was actually clipping in the marimo view: I didn't set `max_height` on `ope
 
 Conclusion: shadow shape is fine, no `def __cell_N():` rework needed. The blink.cmp source (#11–#13) can build on the current shape.
 
+### Phase 7 follow-up: blink.cmp source ✅ SHIPPED (2026-06-04)
+
+`lua/neo-marimo/blink.lua` is a blink.cmp source that wraps the existing shadow LSP path so completion fires inline in notebook cells (no need to hit `<C-x><C-o>`). Items are LSP `CompletionItem` objects passed through unchanged — blink consumes that shape natively.
+
+User opts in via their blink.cmp config:
+```lua
+sources.default = { "lsp", "snippets", "buffer", "neo_marimo" },
+sources.providers.neo_marimo = {
+  name = "neo-marimo",
+  module = "neo-marimo.blink",
+},
+```
+
+Scoping: `:enabled()` checks `^marimo://` on the current buffer name, so the source has no effect on regular `.py` files. Trigger characters mirror pyright's set (`.`, `[`, `"`, `'`).
+
+`:resolve()` routes `completionItem/resolve` back to the same client that served the item (stamped with `client_id` during `:get_completions`) so docstring expansion on hover-in-list goes to pyright, not whatever happens to be the first attached client.
+
 ---
 
 ## Phase 8 — Rich Output (markdown + kitty graphics + widgets) (≈4–5 days)
