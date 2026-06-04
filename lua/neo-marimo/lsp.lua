@@ -420,7 +420,14 @@ function M.hover()
       border = "rounded",
       focus = false,
       focusable = true,
-      max_width = math.min(80, math.floor(vim.o.columns * 0.6)),
+      -- Pyright's hover for an overloaded function (e.g. numpy.array)
+      -- can run 40+ lines of signature alternatives. The default
+      -- max_height (~0.4 * o.lines) clips most of those, making the
+      -- hover look thin compared to other editors that wrap-scroll the
+      -- whole response. Give it most of the screen instead — users can
+      -- close the float with <C-w>w or by moving the cursor.
+      max_width  = math.min(100, math.floor(vim.o.columns * 0.7)),
+      max_height = math.max(10, math.floor(vim.o.lines * 0.7)),
     })
   end, "Hover unavailable: no notebook attached")
 end

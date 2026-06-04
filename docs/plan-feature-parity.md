@@ -85,6 +85,20 @@ Wrapping each cell in `def __cell_N():` makes top-level `return` statements (com
 4. ⚠ `gd` jumps within the *same cell* because each cell is wrapped in its own `def __cell_N():`. Cross-cell goto-def is a known limitation of the shadow shape and would require either hoisting imports/definitions to module scope (extra static analysis) or mirroring marimo's codegen verbatim (brittle reverse-translation). Filed mentally as "could-improve, not blocking."
 5. ✅ Hover inside `mo.md("""\n…\n""")` body returns nothing — `is_in_markdown_string` short-circuits before the LSP request.
 
+### Post-Phase-7 hover investigation (2026-06-04)
+
+User reported `K` on `np.array` "shows it as a function" in the notebook view while a regular `.py` "shows all the documentation". Captured pyright's actual hover response in both shapes (module-scope vs `def __cell_N():` wrapping) against the user's real project + venv:
+
+- Module-scope: 1335-byte response, `(function)\ndef array(...)` signature overloads only.
+- `def __cell_1():` wrapping: same 1335-byte response, byte-for-byte identical.
+- Regular `.py` (no shadow, no wrap): same 1335-byte response.
+
+So pyright returns the same content in all three. Numpy ships `.pyi` stubs without docstrings, so pyright has no prose to show — just the overloaded signatures. The user's perception of "more documentation" in regular `.py` is most likely the *same* response perceived differently (or a stale pyright client serving cached state from before the shadow path moved).
+
+What was actually clipping in the marimo view: I didn't set `max_height` on `open_floating_preview`, so the float defaulted to ~40% of `o.lines`. Pyright's overload response for a function like `numpy.array` runs ~50 lines, so the user saw the top few and assumed that was the whole response. Bumped `max_height` to 70% of editor height so the full hover is visible.
+
+Conclusion: shadow shape is fine, no `def __cell_N():` rework needed. The blink.cmp source (#11–#13) can build on the current shape.
+
 ---
 
 ## Phase 8 — Rich Output (markdown + kitty graphics + widgets) (≈4–5 days)
