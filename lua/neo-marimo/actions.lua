@@ -57,6 +57,7 @@ end
 -- notebook if the cursor isn't over any cell). Renders borders and jumps to
 -- the new cell.
 function M.new_cell_below(bufnr, nb)
+  if nb._flush_pending then nb._flush_pending() end
   local new_cell
   buffer.with_suppressed_bytes(nb, function()
     local row = vim.api.nvim_win_get_cursor(0)[1] - 1
@@ -83,6 +84,7 @@ end
 -- Insert a blank cell before the cell containing the cursor (or at the top
 -- if the cursor isn't over any cell).
 function M.new_cell_above(bufnr, nb)
+  if nb._flush_pending then nb._flush_pending() end
   local new_cell
   buffer.with_suppressed_bytes(nb, function()
     local row = vim.api.nvim_win_get_cursor(0)[1] - 1
@@ -122,6 +124,7 @@ end
 -- Run the cell under the cursor.
 function M.run_cell_at_cursor(bufnr, nb)
   if not require_server(nb) then return end
+  if nb._flush_pending then nb._flush_pending() end
   buffer.sync_cells_from_buffer(nb)
   flush_pending_edits(bufnr, nb)
 
@@ -137,6 +140,7 @@ end
 -- Run every cell in the notebook.
 function M.run_all_cells(bufnr, nb)
   if not require_server(nb) then return end
+  if nb._flush_pending then nb._flush_pending() end
   buffer.sync_cells_from_buffer(nb)
   flush_pending_edits(bufnr, nb)
 

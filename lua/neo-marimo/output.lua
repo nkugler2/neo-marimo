@@ -77,9 +77,16 @@ local function render_html(data)
   -- an embedded image (e.g. matplotlib's data:image/png base64 payload),
   -- prepend a placeholder line so the user knows to look at the browser —
   -- otherwise we'd strip the <img> tag and render nothing visible.
+  --
+  -- The non-alphanumeric guard (e.g. `<img[^%w]`) catches `<img>`, `<img/>`,
+  -- `<img src=…>`, `<img\n…>` without false-matching `<imgine>` or similar.
+  -- Also catches data: URIs in case marimo ever sends the bare base64.
   if type(data) ~= "string" then return {} end
   local lines = {}
-  if data:find("<img%s") or data:find("<img>") or data:find("<svg%s") or data:find("<svg>") then
+  local has_image = data:find("<img[^%w]")
+    or data:find("<svg[^%w]")
+    or data:find("data:image/")
+  if has_image then
     table.insert(lines, { { "  [image — open in browser to view]", "Comment" } })
   end
   local stripped = data:gsub("<[^>]+>", ""):gsub("&amp;", "&"):gsub("&lt;", "<"):gsub("&gt;", ">")

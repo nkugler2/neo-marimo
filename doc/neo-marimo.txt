@@ -78,6 +78,15 @@ Default keymaps (all buffer-local, only active in notebook buffers):
   <leader>mt      Toggle cell output display
   <leader>mv      Toggle between notebook view and underlying .py
 
+LSP keymaps (Phase 7, routed through a hidden shadow buffer so the user's
+existing Python LSP — pyright, basedpyright, pylsp — works inside the
+notebook view):
+
+  K               Hover (LSP)
+  gd              Goto definition (LSP, within the current cell)
+  <C-k>           Signature help (insert mode)
+  <C-x><C-o>      Omnifunc completion (via neo_marimo_omnifunc)
+
 `<leader>mv` is also bound on the plain .py buffer the first time you
 toggle off, so the same key swaps you back.
 
@@ -120,6 +129,8 @@ Debug:
 
   :MarimoWsDebug [path]    Toggle WebSocket message logging. With no arg
                            logs to /tmp/neo-marimo-ws.log. `off` disables.
+  :MarimoWsPing            Send a no-op ping over the WS. Useful with
+                           :MarimoWsDebug to verify the pipe is healthy.
 
 ==============================================================================
 6. STATUSLINE                                            *neo-marimo-statusline*
@@ -186,6 +197,12 @@ Full configuration with defaults: >lua
       run_all         = "<leader>mR",
       toggle_output   = "<leader>mt",
       toggle_view     = "<leader>mv",
+      reclaim_ws      = "<leader>mc",
+      -- LSP (Phase 7)
+      hover           = "K",
+      signature_help  = "<C-k>",      -- insert mode
+      goto_definition = "gd",
+      completion      = true,          -- set false to leave omnifunc alone
     },
   })
 <

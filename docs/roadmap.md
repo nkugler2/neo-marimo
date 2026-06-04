@@ -27,9 +27,12 @@ This roadmap covers the next five phases. Goals (in priority order):
 
 ---
 
-## Cross-phase architectural changes
+## Cross-phase architectural changes — DONE
 
 Three small refactors land alongside Phase 4 so the rest of the roadmap plugs in cleanly. Each is small (<100 LOC) and self-contained.
+
+> **Status:** all three shipped. Renderer registry in `output.lua`, WS dispatch
+> table in `ws_handlers.lua`, detector chain in `cell.lua`.
 
 ### Registry pattern for output renderers — `lua/neo-marimo/output.lua`
 
@@ -61,11 +64,16 @@ New file `lua/neo-marimo/ws_handlers.lua` exposes `register(op, fn)` and `dispat
 
 ---
 
-## Phase 4 — Workflow Fixes (≈3–4 days)
+## Phase 4 — Workflow Fixes (≈3–4 days) — DONE
 
 **Goal:** make day-to-day editing not feel broken. After this phase, Enter works, code stays visible, cell types are obvious, and the missing user commands exist.
 
-### 4.1 Fix Enter in multi-line strings (`TOCHANGE.md` #8) — **critical**
+> **Status:** shipped in commits `ec5bcdd`, `c897975` (post-Phase-4 regression
+> sweep), and finalized on 2026-06-02 with the stale-offset flush that
+> resolved the last `buffer.lua` extmark crashes (see
+> `docs/Cross-phase-and-phase-4-issues.md`).
+
+### 4.1 Fix Enter in multi-line strings (`TOCHANGE.md` #8) — **critical** — DONE
 
 **Root cause:** `buffer.lua:223 on_text_changed` attributes line-count deltas to _the cell containing the cursor_. When you press Enter mid-cell, the cursor moves down one row before the debounced handler fires, so it lands at `cell[i+1].start_row` (cells are contiguous) and the delta gets assigned to the wrong cell. On save, cell _i_ becomes `mo.md("""test` (unterminated string → syntax error), cell _i+1_ becomes `text""")` + original code.
 
@@ -78,7 +86,7 @@ Key files:
 
 **Verification:** open a notebook, type `mo.md("""test`, press Enter, type `text""")`, `:w`, reopen — cell content is preserved as a single multi-line string.
 
-### 4.2 Window-adaptive cell borders + soft-wrap (`TOCHANGE.md` #1)
+### 4.2 Window-adaptive cell borders + soft-wrap (`TOCHANGE.md` #1) — DONE
 
 Two layered fixes:
 
@@ -87,7 +95,7 @@ Two layered fixes:
 
 Borders draw at the _visible_ window width, code wraps within that width. No horizontal scroll needed for the common case; users with extremely long lines can still `:set nowrap` locally.
 
-### 4.3 Per-type icons + `mo` widget cell detection (`TOCHANGE.md` #7)
+### 4.3 Per-type icons + `mo` widget cell detection (`TOCHANGE.md` #7) — DONE
 
 - **Icons in label**: change the `type_labels` table in `buffer.lua:19` to:
   ```lua
@@ -100,7 +108,7 @@ Borders draw at the _visible_ window width, code wraps within that width. No hor
 - **`mo` detection**: extend `cell.detect_type` chain to add a "marimo" type when the cell body is _only_ `mo.ui.*`, `mo.hstack`, `mo.vstack`, `mo.tabs`, etc. with no surrounding logic. Heuristic: trimmed code starts with `mo.` and ends with `)`, no `=`, no `def`, no `import`.
 - **New highlight group**: `MarimoCellMarimoBorder` and `MarimoCellMarimoLabel` in `lua/neo-marimo/highlights.lua`, color `#E6C384` (warm yellow — distinct from py/md/sql).
 
-### 4.4 `:MarimoEdit`, `:MarimoRun`, `:MarimoNew` user commands (plan.md pending)
+### 4.4 `:MarimoEdit`, `:MarimoRun`, `:MarimoNew` user commands (plan.md pending) — DONE
 
 `:MarimoNew` already exists for "create new notebook" — keep it.
 
@@ -119,11 +127,13 @@ Critical files: `plugin/neo-marimo.lua` (where `nvim_create_user_command` calls 
 
 ---
 
-## Phase 5 — Toggle View, Statusline, Server Introspection (≈2 days)
+## Phase 5 — Toggle View, Statusline, Server Introspection (≈2 days) — DONE
 
 **Goal:** users can dip in/out of the notebook view and always see whether a server is running.
 
-### 5.1 Toggle marimo view on/off (`TOCHANGE.md` #5)
+> **Status:** shipped in commit `67ef4d8`. All three sub-items below complete.
+
+### 5.1 Toggle marimo view on/off (`TOCHANGE.md` #5) — DONE
 
 Add `:MarimoToggle` and `<leader>mv`:
 
@@ -139,7 +149,7 @@ Critical files:
 
 The notebook buffer's `BufWipeout` autocmd currently stops the server on close (init.lua:162); change it to only stop if the user really wants — the toggle should _not_ nuke the server. Move the stop-on-wipe behavior to a config flag `server.stop_on_close = false` (default).
 
-### 5.2 Statusline component (`TOCHANGE.md` #6)
+### 5.2 Statusline component (`TOCHANGE.md` #6) — DONE
 
 New file `lua/neo-marimo/statusline.lua`:
 
@@ -162,7 +172,7 @@ require("lualine").setup({
 
 `:MarimoServerList` already exists — extend it to also show ws_connected status, cell count, and an option to `<leader>mo` from the list buffer to switch to any open notebook.
 
-### 5.3 Architecture refactors (the three cross-phase changes above)
+### 5.3 Architecture refactors (the three cross-phase changes above) — DONE
 
 Land the renderer registry, WS dispatcher, and detector chain here. Each is a no-op refactor that keeps `:checkhealth neo_marimo` green.
 
@@ -175,11 +185,15 @@ Land the renderer registry, WS dispatcher, and detector chain here. Each is a no
 
 ---
 
-## Phase 6 — Bidirectional Sync (file-watch path) (≈4–5 days)
+## Phase 6 — Bidirectional Sync (file-watch path) (≈4–5 days) — DONE
 
 **Goal:** edits in nvim show up in the browser within ~300ms, edits in the browser show up in nvim within ~300ms, and the browser is no longer locked out when a notebook is open in nvim.
 
-### 6.1 Unblock the browser — auto-disconnect on `:MarimoOpen`
+> **Status:** shipped in commits `434c9d9`, `39df229` (kiosk reconnect),
+> `11d5418` (browser auto-update on :w), `44c51f4` (cell ID sync).
+> 6.3 took a different shape than the plan called for — see note below.
+
+### 6.1 Unblock the browser — auto-disconnect on `:MarimoOpen` — DONE
 
 Marimo's EDIT mode allows exactly one WS connection per file. When the user calls `<leader>mo` / `:MarimoEdit`, we currently win the race and the browser sees "Network already connected".
 
@@ -195,7 +209,7 @@ Critical files:
 - `lua/neo-marimo/server.lua`: modify `start_and_open` to call `release_ws` before `open_browser` if `config.options.server.share_with_browser == true` (new option, default `true`).
 - New keymap `<leader>mc` ("reclaim"): calls `server.connect_ws(filepath, nb._on_ws_message)` again.
 
-### 6.2 File watcher — pull browser edits into nvim
+### 6.2 File watcher — pull browser edits into nvim — DONE
 
 Marimo's browser saves the `.py` file when the user edits cells. We need to detect that and refresh the notebook view.
 
@@ -214,7 +228,15 @@ Critical files:
 - `lua/neo-marimo/sync.lua`: add `apply_remote_changes(nb, new_cells)` that does the cell-by-id diff and patches the buffer in place. Reuse `reload_from_file` as the fallback for major structural changes (cells added/removed).
 - `lua/neo-marimo/init.lua`: start the watcher in `attach()`, stop it in the `BufWipeout` cleanup.
 
-### 6.3 Send-side: push nvim edits to the live server
+### 6.3 Send-side: push nvim edits to the live server — DONE (different shape than planned)
+
+> **Status:** the `/api/kernel/save` POST in the original plan was
+> **deliberately not implemented** — it sets marimo's `_last_saved_content`,
+> which makes the watcher skip the broadcast and leaves the browser stale
+> until manual reload. Instead, we rely on `marimo edit --watch` picking up
+> our `writefile` directly; the watcher reloads and broadcasts
+> `update-cell-codes` to all consumers (browser + our kiosk WS). See
+> `sync.lua:89-97` for the full reasoning.
 
 Currently the user's `:w` writes the `.py` file but the running marimo server is only watching the file via inotify-equivalent — there's a ~1s lag before it picks up. We can do better:
 
@@ -226,7 +248,7 @@ Critical files:
 - `lua/neo-marimo/server.lua`: new function `save_cells(filepath, cells)` that POSTs `/api/kernel/save`.
 - `lua/neo-marimo/sync.lua`: call `server.save_cells` after successful `writefile` if server is running.
 
-### 6.4 Implement remaining WS handlers via the dispatch table (5.3)
+### 6.4 Implement remaining WS handlers via the dispatch table (5.3) — DONE
 
 Phase 5's `ws_handlers` module gets two new entries:
 
@@ -242,9 +264,13 @@ Phase 5's `ws_handlers` module gets two new entries:
 
 ---
 
-## Phase 7 — LSP & Hover (≈3–4 days)
+## Phase 7 — LSP & Hover (≈3–4 days) — NOT STARTED (next up)
 
 **Goal:** pressing `K` shows actual documentation for symbols in the notebook buffer, just like in a regular `.py` file. Completion works too if the user has a completion plugin.
+
+> **Prerequisite:** WS `send(cmd)` path (Lua → marimo) still needs to be wired
+> in `python/ws_client.py` and `server.send_ws`. Listed as ⬜ in plan.md's
+> not-yet-implemented section.
 
 ### 7.1 Marimo WS-based language features (primary)
 

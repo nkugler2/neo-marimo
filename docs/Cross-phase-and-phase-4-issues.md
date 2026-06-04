@@ -8,7 +8,14 @@ tags: []
 
 There are issue with the most recent run that you did.
 
-## Cell issues
+> **Status:** all items below resolved on 2026-06-02. Root cause was the same
+> for the cell-issues section and TOCHANGE #4 here: keymap actions read
+> `cell.start_row`/`cell.end_row` immediately, but those offsets are only
+> updated on a 300ms debounce. Typing-then-acting read stale offsets and either
+> crashed (extmark out-of-range) or chopped the wrong rows. Fix: synchronous
+> `nb._flush_pending()` at the top of every action that reads cell offsets.
+
+## Cell issues — DONE
 
 It seems like the change that you made to stop creating new cells when I press enter worked, but now there are some bugs.
 
@@ -54,7 +61,11 @@ When I exit neovim and go back in, all the cells appear to be right, even the on
 
 ## Misc.
 
-1. AI told me that when I plot something and it makes a picture, there should be placeholder text, but there isn't any.
-2. When i drag the window from the right to left to make my screen smaller, the cells nicely and smoothly shrink in size as i drag the window. But when I drag the window out back to full width, the cell drawing is janky and bad and kind of slow. I would like that to be more polished and clean
-3. I don't know if ` require("neo-marimo").setup({ ui = { wrap_cells = false } }),` is working, but that could be on me.
-4. `MarimoNewCell above` does not work properly. When I tried to do it from the first line of a cell, it took the text of the first line and put it in the new cell above.
+1. **DONE** AI told me that when I plot something and it makes a picture, there should be placeholder text, but there isn't any.
+   - Fix: tightened `<img>`/`<svg>` detection in `output.lua` so self-closing tags and newline-prefixed attributes match. Also matches bare `data:image/` URIs.
+2. **DONE** When i drag the window from the right to left to make my screen smaller, the cells nicely and smoothly shrink in size as i drag the window. But when I drag the window out back to full width, the cell drawing is janky and bad and kind of slow. I would like that to be more polished and clean
+   - Fix: dropped the 30ms debounce on `WinResized` and render synchronously; the existing width cache prevents thrashing.
+3. **DONE (verified working)** I don't know if ` require("neo-marimo").setup({ ui = { wrap_cells = false } }),` is working, but that could be on me.
+   - Plumbing checked end-to-end: `tbl_deep_extend` merges the override, `apply_window_settings` reads `ui.wrap_cells ~= false` and calls `nvim_set_option_value("wrap", false)`.
+4. **DONE** `MarimoNewCell above` does not work properly. When I tried to do it from the first line of a cell, it took the text of the first line and put it in the new cell above.
+   - Same root cause as the cell-issues section above (stale offsets after typing). Fixed by the synchronous flush at the top of `actions.new_cell_above`.

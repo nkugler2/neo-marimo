@@ -239,6 +239,30 @@ vim.api.nvim_create_user_command("MarimoKillAll", function()
   vim.notify("[neo-marimo] Killed " .. n .. " marimo process(es).", vim.log.levels.INFO)
 end, { desc = "Force-kill all marimo edit processes on the system" })
 
+-- Send a hand-crafted ping frame to the WS. The marimo server's WS
+-- receive loop only uses incoming frames for disconnect detection (so it
+-- won't respond), but with :MarimoWsDebug logging on we can confirm the
+-- pipe didn't die or close the connection. Useful for verifying the
+-- ws_client.py stdin → WS round-trip after a code change.
+vim.api.nvim_create_user_command("MarimoWsPing", function()
+  local marimo = require("neo-marimo")
+  local nb = marimo.current_notebook()
+  if not nb then
+    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    return
+  end
+  local server = require("neo-marimo.server")
+  local ok = server.send_ws(nb.filepath, {
+    op = "neo_marimo_ping",
+    ts = vim.uv.hrtime() / 1e6,
+  })
+  if ok then
+    vim.notify("[neo-marimo] Sent WS ping", vim.log.levels.INFO)
+  else
+    vim.notify("[neo-marimo] WS not connected; can't send ping", vim.log.levels.WARN)
+  end
+end, { desc = "Send a no-op ping over the marimo WebSocket (for debugging)" })
+
 vim.api.nvim_create_user_command("MarimoWsDebug", function(opts)
   -- Toggle WS message logging. Without args: toggles on/off using a default
   -- path. With an arg: enables logging to that path. Use "off" to disable.

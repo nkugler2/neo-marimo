@@ -4,6 +4,7 @@ local buffer = require("neo-marimo.buffer")
 local server = require("neo-marimo.server")
 local output = require("neo-marimo.output")
 local actions = require("neo-marimo.actions")
+local lsp = require("neo-marimo.lsp")
 
 local M = {}
 
@@ -42,6 +43,7 @@ function M.setup(bufnr, nb)
   -- Next cell
   if km.next_cell then
     vim.keymap.set("n", km.next_cell, function()
+      if nb._flush_pending then nb._flush_pending() end
       local row = vim.api.nvim_win_get_cursor(0)[1] - 1
       local cell = notebook.get_cell_at_row(nb, row)
       if cell and cell.index < #nb.cells then
@@ -53,6 +55,7 @@ function M.setup(bufnr, nb)
   -- Previous cell
   if km.prev_cell then
     vim.keymap.set("n", km.prev_cell, function()
+      if nb._flush_pending then nb._flush_pending() end
       local row = vim.api.nvim_win_get_cursor(0)[1] - 1
       local cell = notebook.get_cell_at_row(nb, row)
       if cell and cell.index > 1 then
@@ -78,6 +81,7 @@ function M.setup(bufnr, nb)
   -- Delete cell
   if km.delete_cell then
     vim.keymap.set("n", km.delete_cell, function()
+      if nb._flush_pending then nb._flush_pending() end
       local row = vim.api.nvim_win_get_cursor(0)[1] - 1
       local cell = notebook.get_cell_at_row(nb, row)
       if not cell then return end
@@ -113,6 +117,7 @@ function M.setup(bufnr, nb)
   -- Move cell down
   if km.move_cell_down then
     vim.keymap.set("n", km.move_cell_down, function()
+      if nb._flush_pending then nb._flush_pending() end
       local row = vim.api.nvim_win_get_cursor(0)[1] - 1
       local cell = notebook.get_cell_at_row(nb, row)
       if not cell or cell.index >= #nb.cells then return end
@@ -149,6 +154,7 @@ function M.setup(bufnr, nb)
   -- Move cell up
   if km.move_cell_up then
     vim.keymap.set("n", km.move_cell_up, function()
+      if nb._flush_pending then nb._flush_pending() end
       local row = vim.api.nvim_win_get_cursor(0)[1] - 1
       local cell = notebook.get_cell_at_row(nb, row)
       if not cell or cell.index <= 1 then return end
@@ -211,6 +217,7 @@ function M.setup(bufnr, nb)
   -- Toggle output visibility
   if km.toggle_output then
     vim.keymap.set("n", km.toggle_output, function()
+      if nb._flush_pending then nb._flush_pending() end
       local row = vim.api.nvim_win_get_cursor(0)[1] - 1
       local cell = notebook.get_cell_at_row(nb, row)
       if not cell then return end
@@ -240,6 +247,40 @@ function M.setup(bufnr, nb)
     vim.keymap.set("n", km.reclaim_ws, function()
       server.reclaim_ws(nb.filepath)
     end, o("Marimo: reclaim WebSocket from browser"))
+  end
+
+  -- LSP: hover, signature help, goto-definition, completion.
+  -- Routed through a hidden shadow buffer (see lua/neo-marimo/lsp.lua).
+  -- The default keymaps mirror nvim's built-in LSP defaults so muscle
+  -- memory carries over from regular Python buffers.
+  if km.hover ~= false then
+    vim.keymap.set("n", km.hover or "K", function()
+      lsp.hover()
+    end, o("Marimo: hover (LSP)"))
+  end
+
+  if km.signature_help ~= false then
+    vim.keymap.set("i", km.signature_help or "<C-k>", function()
+      lsp.signature()
+    end, o("Marimo: signature help (LSP)"))
+  end
+
+  if km.goto_definition ~= false then
+    vim.keymap.set("n", km.goto_definition or "gd", function()
+      lsp.goto_definition()
+    end, o("Marimo: goto definition (LSP)"))
+  end
+
+  -- Wire <C-x><C-o> through our completefunc. The user's completion
+  -- plugin (nvim-cmp, blink.cmp, coq, etc.) can also drive completion
+  -- by calling neo_marimo_omnifunc(findstart, base) — most users will
+  -- hit <C-x><C-o> directly, so setting omnifunc on the notebook
+  -- buffer covers the default UX.
+  if km.completion ~= false then
+    vim.api.nvim_set_option_value(
+      "omnifunc", "v:lua.neo_marimo_omnifunc",
+      { buf = bufnr }
+    )
   end
 end
 

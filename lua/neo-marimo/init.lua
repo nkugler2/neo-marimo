@@ -9,6 +9,7 @@ local server = require("neo-marimo.server")
 local utils = require("neo-marimo.utils")
 local ws_handlers = require("neo-marimo.ws_handlers")
 local watcher = require("neo-marimo.watcher")
+local lsp = require("neo-marimo.lsp")
 
 local M = {}
 
@@ -145,14 +146,25 @@ function M.attach(source_bufnr)
   -- — not the cell under the cursor. Pressing Enter mid-cell used to misroute
   -- the delta to the next cell because the cursor moved before the autocmd
   -- fired; on_bytes fixes that at the source.
+  --
+  -- Flushes are normally debounced 300ms, but keymap actions (delete cell,
+  -- insert cell, run cell, …) call nb._flush_pending() synchronously before
+  -- reading cell.start_row/end_row. Without that gate, typing then
+  -- immediately triggering an action would read stale offsets and either
+  -- crash (out-of-range extmarks) or corrupt cell boundaries — e.g. delete
+  -- chopping the wrong rows so neighbouring cells visually merged.
   local pending_changes = {}
-  local flush_changes = utils.debounce(function()
-    if not vim.api.nvim_buf_is_valid(nb_bufnr) then return end
+  nb._flush_pending = function()
+    if not vim.api.nvim_buf_is_valid(nb_bufnr) then
+      pending_changes = {}
+      return
+    end
     if #pending_changes == 0 then return end
     local changes = pending_changes
     pending_changes = {}
     buffer.on_bytes_changed(nb_bufnr, nb, changes)
-  end, 300)
+  end
+  local flush_changes = utils.debounce(nb._flush_pending, 300)
 
   vim.api.nvim_buf_attach(nb_bufnr, false, {
     on_bytes = function(_, bnr, _changedtick,
@@ -182,12 +194,34 @@ function M.attach(source_bufnr)
     callback = function()
       _attached[filepath] = nil
       watcher.stop(filepath)
+      lsp.cleanup(filepath)
       if config.options.server and config.options.server.stop_on_close
           and server.is_running(filepath) then
         server.stop(filepath)
       end
     end,
   })
+
+  -- Keep the shadow buffer in sync with edits. Debounced so a burst of
+  -- keystrokes only triggers one regeneration. 500ms is short enough
+  -- that K / completion after a brief pause hits a fresh shadow, but
+  -- long enough that pyright doesn't re-analyze on every keystroke.
+  local refresh_shadow = utils.debounce(function()
+    pcall(lsp.refresh_shadow, nb)
+  end, 500)
+  vim.api.nvim_buf_attach(nb_bufnr, false, {
+    on_bytes = function(_, bnr)
+      if bnr ~= nb_bufnr then return true end
+      refresh_shadow()
+    end,
+  })
+
+  -- Prime the shadow once at attach so pyright gets first-look analysis
+  -- before the user invokes K. Done via vim.schedule so it doesn't race
+  -- the buffer creation (sync_cells_from_buffer would see empty lines).
+  vim.schedule(function()
+    pcall(lsp.refresh_shadow, nb)
+  end)
 
   -- Watch the .py for external edits (browser saves, other editors).
   -- Skipped if disabled, or if the file doesn't exist on disk yet
@@ -242,26 +276,25 @@ function M.attach(source_bufnr)
   })
 
   -- Adaptive border width: re-render on window resize so the cell borders
-  -- always span the visible width. We cache the last rendered width and
-  -- skip re-renders that wouldn't change anything; that lets us run on a
-  -- tight 30ms debounce (smooth during a drag-resize) without thrashing
-  -- extmarks when WinResized fires for unrelated reasons.
+  -- always span the visible width. Synchronous (not debounced) so the user
+  -- sees borders extend in lockstep as they drag the window wider. The
+  -- width cache short-circuits no-op renders, so WinResized firing for
+  -- unrelated reasons doesn't thrash extmarks. The earlier 30ms debounce
+  -- looked smooth on shrink (where the over-long border is just clipped)
+  -- but janky on widen (where the new visible area sat without dashes
+  -- until the timer fired).
   local last_width = nil
-  local redraw_borders = utils.debounce(function()
+  local function redraw_borders()
     if not vim.api.nvim_buf_is_valid(nb_bufnr) then return end
     if #vim.fn.win_findbuf(nb_bufnr) == 0 then return end
     local w = buffer.border_width(nb_bufnr)
     if w == last_width then return end
     last_width = w
     buffer.render_all_borders(nb_bufnr, nb)
-  end, 30)
+  end
 
   vim.api.nvim_create_autocmd({ "WinResized", "VimResized" }, {
-    callback = function()
-      if #vim.fn.win_findbuf(nb_bufnr) > 0 then
-        redraw_borders()
-      end
-    end,
+    callback = redraw_borders,
   })
 
   -- Wipe the original source buffer (we no longer need it displayed)

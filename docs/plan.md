@@ -356,8 +356,8 @@ Things the plan didn't anticipate that have shipped:
 
 Things the plan called out that are **not yet implemented**:
 
-- [x] ⬜ `:MarimoEdit`, `:MarimoRun`, `:MarimoNew` user commands (functionality is on keymaps instead).
-- ⬜ Handlers for `completed-run` and `update-cell-codes` WS ops (received but ignored — would be needed for proper external-edit sync and run-completion signals).
-- ⬜ `/api/kernel/save` endpoint integration (we save via the Python bridge, which works but means the running server's view can drift from disk after a save).
-- ⬜ Sending commands TO the server over the WS (`send(cmd)`) — everything currently goes via HTTP.
-- ⬜ Bidirectional sync from the marimo browser back to nvim (browser is currently locked out because of the single-connection limit — needs kiosk-mode or RTC to coexist).
+- [x] ✅ `:MarimoEdit`, `:MarimoRun`, `:MarimoNew` user commands (Phase 4.4 — also kept the keymap bindings).
+- [x] ✅ Handlers for `completed-run` and `update-cell-codes` WS ops (Phase 6.4 — wired in `ws_handlers.lua`; `update-cell-codes` routes through `sync.apply_remote_changes`, `completed-run` is a documented no-op since `cell-op` already drives per-cell status).
+- [x] ⬜ `/api/kernel/save` endpoint integration — **deliberately skipped**. POSTing this sets marimo's `_last_saved_content` to our content, which makes its file-watcher's `file_content_matches_last_save()` guard skip the subsequent reload — suppressing the `update-cell-codes` broadcast to the browser. Marimo's `--watch` picks up our `writefile` directly, so the kernel/save POST isn't needed. See `sync.lua:89-97`.
+- ⬜ Sending commands TO the server over the WS (`send(cmd)`) — everything currently goes via HTTP. **Needed for Phase 7 (LSP hover/completion).**
+- [x] ✅ Bidirectional sync from the marimo browser back to nvim (Phase 6 — kiosk-mode reconnect + libuv `fs_event` watcher + `update-cell-codes` handler).

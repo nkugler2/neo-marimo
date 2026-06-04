@@ -424,6 +424,27 @@ function M.connect_ws(filepath, on_message, opts)
   return true
 end
 
+-- Send a raw message to the WS via ws_client.py's stdin pipe. The Python
+-- side validates JSON and forwards each line as a WS frame. Returns true on
+-- successful enqueue (chansend reports bytes written), false if the WS job
+-- isn't live.
+--
+-- Note: marimo's main /ws endpoint is currently server→client only — its
+-- receive loop just uses incoming frames to detect disconnect. This helper
+-- exists for future use (RTC, hypothetical client-side ops) and for
+-- :MarimoWsPing verification of the pipe.
+function M.send_ws(filepath, msg)
+  local srv = M._servers[filepath]
+  if not srv or not srv.ws_job_id then return false end
+  local encoded, err = utils.json_encode(msg)
+  if err then
+    utils.warn("send_ws encode error: " .. err)
+    return false
+  end
+  local written = vim.fn.chansend(srv.ws_job_id, encoded .. "\n")
+  return written > 0
+end
+
 -- Gracefully release our WebSocket connection so another client (browser)
 -- can grab the single EDIT-mode connection slot. Keeps the marimo server
 -- itself running. Sets srv.browser_active = true so the rest of the code

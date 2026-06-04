@@ -5,13 +5,20 @@ Connects to a running marimo server and bridges messages to Neovim via stdio.
 
 Usage: ws_client.py <port> <session_id> [filepath] [access_token] [--kiosk]
 
-Stdout: newline-delimited JSON messages from the server
+Stdin:  newline-delimited JSON messages from Neovim → forwarded to the WS
+Stdout: newline-delimited JSON messages from the server → consumed by Neovim
 Stderr: diagnostic/error messages
 
 Kiosk mode (--kiosk) connects as a secondary "observer" consumer. Marimo's
 EDIT mode allows exactly one *main* consumer per file, but any number of
 kiosks. That lets nvim sit alongside the browser without kicking it off —
 both editors see the same cell-op stream.
+
+Note on send direction: marimo's /ws endpoint is currently server→client.
+The server's receive loop only uses incoming frames to detect disconnect.
+The stdin → WS pipe below still exists for future use (RTC, or marimo
+versions that grow a client-side message protocol), and for verifying the
+WS pipe is healthy via :MarimoWsPing.
 """
 import asyncio
 import json
@@ -22,6 +29,47 @@ import urllib.parse
 def emit(msg: dict) -> None:
     """Write a JSON message to stdout for Neovim to read."""
     print(json.dumps(msg), flush=True)
+
+
+async def _pump_stdin_to_ws(ws) -> None:
+    """Read newline-delimited JSON from stdin, forward each line to the WS.
+
+    Runs concurrently with the WS-receive loop. Exits silently when stdin
+    closes (ws_client.py is being torn down) so the gather() returns and
+    the connection closes cleanly.
+    """
+    loop = asyncio.get_running_loop()
+    while True:
+        # readline() in a thread so we don't block the event loop. None / "" on EOF.
+        line = await loop.run_in_executor(None, sys.stdin.readline)
+        if not line:
+            return  # EOF — parent process exited
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        try:
+            # Validate JSON before forwarding so a bad line doesn't kill the WS.
+            json.loads(line)
+        except json.JSONDecodeError as e:
+            print(f"ws_client: bad json on stdin: {e}", file=sys.stderr, flush=True)
+            continue
+        try:
+            await ws.send(line)
+        except Exception as e:
+            print(f"ws_client: send failed: {e}", file=sys.stderr, flush=True)
+            return
+
+
+async def _pump_ws_to_stdout(ws) -> None:
+    """Read frames from the WS and emit them on stdout for Lua to consume."""
+    async for raw in ws:
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        try:
+            msg = json.loads(raw)
+            emit(msg)
+        except json.JSONDecodeError:
+            pass
 
 
 async def main(
@@ -52,15 +100,17 @@ async def main(
         ) as ws:
             emit({"op": "neo_marimo_connected", "session_id": session_id, "port": port})
 
-            async for raw in ws:
-                if isinstance(raw, bytes):
-                    raw = raw.decode("utf-8")
-                try:
-                    msg = json.loads(raw)
-                    # Forward all server messages to Neovim
-                    emit(msg)
-                except json.JSONDecodeError:
-                    pass
+            # Run send + receive concurrently. If either side errors, the
+            # whole connection winds down — preferable to one direction
+            # silently hanging while the other reports success.
+            recv_task = asyncio.create_task(_pump_ws_to_stdout(ws))
+            send_task = asyncio.create_task(_pump_stdin_to_ws(ws))
+            done, pending = await asyncio.wait(
+                {recv_task, send_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
 
     except ConnectionRefusedError:
         emit({"op": "neo_marimo_error", "message": f"Connection refused on port {port}"})

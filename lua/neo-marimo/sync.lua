@@ -42,6 +42,11 @@ function M.write_to_file(nb)
     return false
   end
 
+  -- Drain any debounced on_bytes deltas before we read cell offsets, otherwise
+  -- :w fired right after typing would generate the .py from stale start_row/
+  -- end_row values and split or merge lines across cell boundaries.
+  if nb._flush_pending then nb._flush_pending() end
+
   -- Sync cell code from buffer content
   buffer.sync_cells_from_buffer(nb)
 
@@ -166,6 +171,11 @@ function M.apply_remote_changes(nb, new_cells_data)
   local bufnr = nb.bufnr
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return false end
   if type(new_cells_data) ~= "table" then return false end
+
+  -- Drain pending on_bytes deltas so the cell offsets we'll patch against
+  -- below reflect the current buffer state, not the state from before the
+  -- last few keystrokes.
+  if nb._flush_pending then nb._flush_pending() end
 
   -- Structural change → full reload. Cells don't have stable IDs across
   -- parse calls (the bridge mints fresh IDs each time), so we can't

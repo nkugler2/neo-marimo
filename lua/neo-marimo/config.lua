@@ -66,6 +66,16 @@ M.defaults = {
     -- connect; press this to take it back (e.g. after closing the
     -- browser tab) and resume live updates in nvim.
     reclaim_ws = "<leader>mc",
+    -- LSP keymaps (Phase 7). Routed through a hidden shadow buffer so
+    -- the user's existing Python LSP (pyright, basedpyright, pylsp)
+    -- works inside the notebook view. Set any to false to disable.
+    hover           = "K",
+    signature_help  = "<C-k>",   -- insert mode
+    goto_definition = "gd",
+    -- Completion: when truthy, `omnifunc` on the notebook buffer is
+    -- pointed at neo-marimo's LSP-backed completion driver (used by
+    -- <C-x><C-o> and any completion plugin that respects omnifunc).
+    completion      = true,
   },
 }
 
