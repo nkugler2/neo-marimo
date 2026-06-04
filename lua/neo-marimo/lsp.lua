@@ -41,6 +41,26 @@ local M = {}
 --   }
 M._shadows = {}
 
+-- Drop empty strings from the start and end of a list of lines.
+-- Replaces `vim.lsp.util.trim_empty_lines`, which emits a deprecation
+-- warning on first use in nvim 0.12 ("vim.lsp.util.trim_empty_lines() is
+-- deprecated"). Keeps interior blank lines untouched.
+local function trim_empty_lines(lines)
+  local first, last = 1, #lines
+  while first <= last and (lines[first] == nil or lines[first] == "") do
+    first = first + 1
+  end
+  while last >= first and (lines[last] == nil or lines[last] == "") do
+    last = last - 1
+  end
+  if first == 1 and last == #lines then return lines end
+  local out = {}
+  for i = first, last do
+    table.insert(out, lines[i])
+  end
+  return out
+end
+
 -- Indent each non-empty line in `code` by 4 spaces. Used so cell code
 -- nests inside the `def __cell_N():` wrapper without breaking on blank
 -- lines (pyright is happy with mixed indentation as long as non-blanks
@@ -394,9 +414,8 @@ function M.hover()
     if err or not result or not result.contents then return end
     local lines = vim.lsp.util.convert_input_to_markdown_lines(result.contents)
     if not lines or #lines == 0 then return end
-    if vim.lsp.util.trim_empty_lines then
-      lines = vim.lsp.util.trim_empty_lines(lines)
-    end
+    lines = trim_empty_lines(lines)
+    if #lines == 0 then return end
     vim.lsp.util.open_floating_preview(lines, "markdown", {
       border = "rounded",
       focus = false,
