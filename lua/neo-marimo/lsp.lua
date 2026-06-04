@@ -302,7 +302,9 @@ end
 -- Convert a notebook (row, col) to the corresponding shadow (row, col).
 -- Returns nil if `row` falls outside any cell (e.g., the cursor sits on
 -- a virtual border line — that's expected; LSP requests should no-op).
-local function notebook_to_shadow_pos(nb, entry, row, col)
+-- Exposed on M for the blink.cmp source to consume; the local alias
+-- below keeps the existing in-module call sites concise.
+function M.notebook_to_shadow_pos(nb, entry, row, col)
   if not entry.cell_offsets or #entry.cell_offsets == 0 then
     return nil
   end
@@ -317,6 +319,7 @@ local function notebook_to_shadow_pos(nb, entry, row, col)
   end
   return nil
 end
+local notebook_to_shadow_pos = M.notebook_to_shadow_pos
 
 -- Inverse mapping: shadow (row, col) → notebook (row, col). Used to
 -- translate goto-definition results so the jump lands inside the
