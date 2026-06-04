@@ -105,32 +105,49 @@ local function build_shadow_text(nb)
   return table.concat(lines, "\n"), offsets
 end
 
--- Best-effort: attach an existing Python LSP client to `bufnr`. Most users
--- have lspconfig or a similar plugin that has already started pyright/
--- basedpyright/pylsp on some other Python buffer; we piggyback on that
--- rather than rolling our own start config. Falls back to firing the
--- FileType autocmd if nothing is attached anywhere, which is what
--- lspconfig listens for to spawn a fresh client.
+-- Best-effort: attach every existing Python LSP client to `bufnr`. Most
+-- users have a plugin (or `vim.lsp.enable`) that has already started
+-- pyright/basedpyright/pylsp/ruff on some other Python buffer; we piggy-
+-- back on that rather than rolling our own start config.
+--
+-- We attach ALL matching clients rather than the first one — common
+-- setups run multiple language servers concurrently (e.g. pyright for
+-- hover/types + ruff for diagnostics). Attaching only the first risks
+-- picking the one without the capability we need (ruff without hover,
+-- pyright without diagnostics, etc.).
+--
+-- If nothing is currently running, fire a FileType=python autocmd so the
+-- user's autostart machinery (`vim.lsp.enable("pyright")`, lspconfig)
+-- gets a chance to spawn one for the shadow buffer.
 local function ensure_lsp_attached(bufnr)
   if not vim.api.nvim_buf_is_valid(bufnr) then return end
-  if #vim.lsp.get_clients({ bufnr = bufnr }) > 0 then return end
+
+  local attached_any = false
+  local existing = {}
+  for _, c in ipairs(vim.lsp.get_clients({ bufnr = bufnr })) do
+    existing[c.id] = true
+  end
 
   for _, client in ipairs(vim.lsp.get_clients()) do
-    local fts = (client.config and client.config.filetypes) or {}
-    for _, ft in ipairs(fts) do
-      if ft == "python" then
-        pcall(vim.lsp.buf_attach_client, bufnr, client.id)
-        return
+    if not existing[client.id] then
+      local fts = (client.config and client.config.filetypes) or {}
+      for _, ft in ipairs(fts) do
+        if ft == "python" then
+          pcall(vim.lsp.buf_attach_client, bufnr, client.id)
+          attached_any = true
+          break
+        end
       end
+    else
+      attached_any = true
     end
   end
 
-  -- No live python client anywhere. Re-fire FileType so lspconfig (or
-  -- any setup that hooks FileType=python) gets a chance to spawn one
-  -- for the shadow buffer.
-  pcall(vim.api.nvim_exec_autocmds, "FileType", {
-    buffer = bufnr, modeline = false, pattern = "python",
-  })
+  if not attached_any then
+    pcall(vim.api.nvim_exec_autocmds, "FileType", {
+      buffer = bufnr, modeline = false, pattern = "python",
+    })
+  end
 end
 
 -- Compute a real filesystem path to use as the shadow buffer's name. Many
@@ -206,7 +223,17 @@ function M.refresh_shadow(nb)
 
   local lines = vim.split(text, "\n", { plain = true })
   vim.api.nvim_set_option_value("modifiable", true, { buf = entry.bufnr })
-  vim.api.nvim_buf_set_lines(entry.bufnr, 0, -1, false, lines)
+
+  -- nvim_buf_set_lines is blocked under textlock (E565), which fires when
+  -- we're invoked from inside an omnifunc / completion context. Swallow
+  -- that case: the on_bytes debounce keeps the shadow within ~120ms of
+  -- the live notebook outside textlock, so completion still has near-
+  -- current content to work with. We deliberately keep the OLD
+  -- cell_offsets and last_shadow_text in this case so the LSP position
+  -- translation stays consistent with whatever pyright actually has.
+  local ok = pcall(vim.api.nvim_buf_set_lines, entry.bufnr, 0, -1, false, lines)
+  if not ok then return entry end
+
   entry.cell_offsets = offsets
   entry.last_shadow_text = text
   return entry
@@ -311,37 +338,64 @@ local function request_via_shadow(nb, method, extra_params, handler, fallback_ms
 end
 
 -- Public: hover the symbol under the cursor.
+--
+-- We render the floating preview directly instead of routing through
+-- `vim.lsp.handlers["textDocument/hover"]`. In recent nvim versions the
+-- standard hover path delegates to `vim.lsp.buf.hover()`, which checks
+-- the *current* buffer's clients and warns "method textDocument/hover
+-- is not supported by any server activated for this buffer" — but the
+-- current buffer is the notebook view, and no LSP is (or should be)
+-- attached there. The LSP work happens on the shadow buffer.
 function M.hover()
   local nb = require("neo-marimo").current_notebook()
   if not nb then return end
 
-  request_via_shadow(nb, "textDocument/hover", nil, function(err, result, ctx, config)
+  request_via_shadow(nb, "textDocument/hover", nil, function(err, result)
     if err or not result or not result.contents then return end
-    -- Reuse the standard nvim hover handler so it follows the user's
-    -- floating-window / highlight preferences.
-    local handler = vim.lsp.handlers["textDocument/hover"]
-    if handler then
-      handler(err, result, ctx, config or {})
-    else
-      local lines = vim.lsp.util.convert_input_to_markdown_lines(result.contents)
-      if lines and #lines > 0 then
-        vim.lsp.util.open_floating_preview(lines, "markdown", { border = "rounded" })
-      end
+    local lines = vim.lsp.util.convert_input_to_markdown_lines(result.contents)
+    if not lines or #lines == 0 then return end
+    if vim.lsp.util.trim_empty_lines then
+      lines = vim.lsp.util.trim_empty_lines(lines)
     end
+    vim.lsp.util.open_floating_preview(lines, "markdown", {
+      border = "rounded",
+      focus = false,
+      focusable = true,
+      max_width = math.min(80, math.floor(vim.o.columns * 0.6)),
+    })
   end, "Hover unavailable: no notebook attached")
 end
 
 -- Public: signature help (typically bound to <C-k> in insert mode).
+-- Renders the float directly for the same reason as M.hover — the
+-- standard handler in newer nvim versions consults the current buffer
+-- for capability, which is the notebook view (no LSP attached).
 function M.signature()
   local nb = require("neo-marimo").current_notebook()
   if not nb then return end
 
-  request_via_shadow(nb, "textDocument/signatureHelp", nil, function(err, result, ctx, config)
-    if err or not result then return end
-    local handler = vim.lsp.handlers["textDocument/signatureHelp"]
-    if handler then
-      handler(err, result, ctx, config or {})
+  request_via_shadow(nb, "textDocument/signatureHelp", nil, function(err, result)
+    if err or not result or not result.signatures or #result.signatures == 0 then
+      return
     end
+    local sig = result.signatures[result.activeSignature and (result.activeSignature + 1) or 1]
+        or result.signatures[1]
+    if not sig then return end
+    local lines = { sig.label or "" }
+    if sig.documentation then
+      local doc = type(sig.documentation) == "table"
+          and sig.documentation.value or sig.documentation
+      if doc and doc ~= "" then
+        table.insert(lines, "")
+        for ln in (doc .. "\n"):gmatch("([^\n]*)\n") do
+          table.insert(lines, ln)
+        end
+      end
+    end
+    vim.lsp.util.open_floating_preview(lines, "markdown", {
+      border = "rounded", focus = false,
+      max_width = math.min(80, math.floor(vim.o.columns * 0.6)),
+    })
   end, "Signature help unavailable")
 end
 

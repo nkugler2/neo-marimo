@@ -203,12 +203,12 @@ function M.attach(source_bufnr)
   })
 
   -- Keep the shadow buffer in sync with edits. Debounced so a burst of
-  -- keystrokes only triggers one regeneration. 500ms is short enough
-  -- that K / completion after a brief pause hits a fresh shadow, but
-  -- long enough that pyright doesn't re-analyze on every keystroke.
+  -- keystrokes only triggers one regeneration. 120ms is short enough
+  -- that the shadow is almost always current when the user fires
+  -- <C-x><C-o>, but long enough to coalesce normal typing.
   local refresh_shadow = utils.debounce(function()
     pcall(lsp.refresh_shadow, nb)
-  end, 500)
+  end, 120)
   vim.api.nvim_buf_attach(nb_bufnr, false, {
     on_bytes = function(_, bnr)
       if bnr ~= nb_bufnr then return true end
@@ -222,6 +222,27 @@ function M.attach(source_bufnr)
   vim.schedule(function()
     pcall(lsp.refresh_shadow, nb)
   end)
+
+  -- The notebook buffer needs filetype=python for syntax highlighting,
+  -- which also (correctly) trips the user's `vim.lsp.enable("pyright")` /
+  -- ruff / lspconfig autostart on FileType=python — and any client that
+  -- attaches here triggers the user's own LspAttach autocmd, which in
+  -- the common case re-binds K/gd to `vim.lsp.buf.hover` / `definition`,
+  -- clobbering our marimo-aware versions. We don't want either side of
+  -- that to happen on the notebook buffer (all LSP work belongs on the
+  -- shadow), so when something attaches here we immediately detach the
+  -- client and re-run our keymap setup to restore K/gd/<C-k>.
+  vim.api.nvim_create_autocmd("LspAttach", {
+    buffer = nb_bufnr,
+    callback = function(args)
+      pcall(vim.lsp.buf_detach_client, nb_bufnr, args.data.client_id)
+      vim.schedule(function()
+        if vim.api.nvim_buf_is_valid(nb_bufnr) then
+          keymaps.setup(nb_bufnr, nb)
+        end
+      end)
+    end,
+  })
 
   -- Watch the .py for external edits (browser saves, other editors).
   -- Skipped if disabled, or if the file doesn't exist on disk yet
