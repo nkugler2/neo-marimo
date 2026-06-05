@@ -3,11 +3,28 @@
 
 local hl = require("neo-marimo.highlights")
 local notebook_mod = require("neo-marimo.notebook")
+local markdown = require("neo-marimo.markdown")
+local image = require("neo-marimo.image")
+local widgets = require("neo-marimo.widgets")
 
 local M = {}
 
 -- Maximum output lines to show per cell before truncating.
 local MAX_LINES = 30
+
+-- Phase 8.2 / 8.5: image and widget output frequently arrives bigger than
+-- the inline cap (matplotlib figures are tall; DataFrames have many rows).
+-- Both have dedicated viewers (image.nvim handles plot rendering inline,
+-- :MarimoDataFramePanel opens the full table), so we keep the inline cap
+-- modest and rely on the side paths for "show me everything".
+local MAX_DATAFRAME_INLINE_ROWS = 5
+
+-- Per-cell render context: bufnr and cell_id are forwarded to renderers so
+-- the widget registry can be keyed properly. Stored as a module-level
+-- variable since render is called from a hot path and threading it through
+-- every renderer signature would be a lot of plumbing for one optional
+-- side-effect.
+local _render_ctx = { bufnr = nil, cell_id = nil, row = nil }
 
 -- ── Renderer registry ──────────────────────────────────────────────────────
 --
@@ -73,23 +90,42 @@ local function render_error(data)
 end
 
 local function render_html(data)
-  -- Strip HTML tags (best-effort) and show plain text. If the html contains
-  -- an embedded image (e.g. matplotlib's data:image/png base64 payload),
-  -- prepend a placeholder line so the user knows to look at the browser —
-  -- otherwise we'd strip the <img> tag and render nothing visible.
+  -- Routing pass for HTML payloads. Marimo wraps a lot of different things
+  -- in text/html — we pick the best renderer based on the contents:
   --
-  -- The non-alphanumeric guard (e.g. `<img[^%w]`) catches `<img>`, `<img/>`,
-  -- `<img src=…>`, `<img\n…>` without false-matching `<imgine>` or similar.
-  -- Also catches data: URIs in case marimo ever sends the bare base64.
+  --   1. Layout primitive (hstack/vstack/tabs/accordion) → widgets module
+  --   2. Marimo UI element (slider, button, …)           → widgets module
+  --   3. Markdown wrapper (mo.md output)                 → markdown module
+  --   4. Embedded data:image/...;base64 (matplotlib)     → image module
+  --   5. Embedded <img src="..."> or <svg>               → placeholder line
+  --   6. Anything else                                    → strip tags fallback
   if type(data) ~= "string" then return {} end
-  local lines = {}
-  local has_image = data:find("<img[^%w]")
-    or data:find("<svg[^%w]")
-    or data:find("data:image/")
-  if has_image then
-    table.insert(lines, { { "  [image — open in browser to view]", "Comment" } })
+
+  if widgets.has_layout(data) or widgets.has_widgets(data) then
+    return widgets.render(data, _render_ctx.bufnr, _render_ctx.cell_id)
   end
-  local stripped = data:gsub("<[^>]+>", ""):gsub("&amp;", "&"):gsub("&lt;", "<"):gsub("&gt;", ">")
+
+  if markdown.looks_like_marimo_md_html(data) then
+    return markdown.render(data)
+  end
+
+  if image.has_embedded_image(data) then
+    local mime, b64 = image.extract_data_uri(data)
+    if mime and b64 then
+      return image.render_base64(_render_ctx.bufnr, _render_ctx.row or 0, mime, b64)
+    end
+  end
+
+  -- Fallback: strip remaining tags. Surface SVG/<img> as a placeholder so
+  -- the user knows there's content their terminal couldn't render.
+  local lines = {}
+  local has_image = data:find("<img[^%w]") or data:find("<svg[^%w]")
+  if has_image then
+    table.insert(lines, { { "  [image — install image.nvim or open in browser]", "Comment" } })
+  end
+  local stripped = data:gsub("<[^>]+>", "")
+    :gsub("&amp;", "&"):gsub("&lt;", "<"):gsub("&gt;", ">")
+    :gsub("&quot;", '"'):gsub("&#39;", "'"):gsub("&nbsp;", " ")
   stripped = stripped:match("^%s*(.-)%s*$")
   if stripped ~= "" then
     for _, vl in ipairs(render_text_plain(stripped)) do
@@ -122,8 +158,8 @@ local function render_dataresource(data)
   for _, col in ipairs(cols) do
     col_widths[col] = math.max(#col, 4)
   end
-  -- Measure data widths (up to 5 rows)
-  for i = 1, math.min(5, #rows) do
+  -- Measure data widths (cap mirrors the inline row cap below)
+  for i = 1, math.min(MAX_DATAFRAME_INLINE_ROWS, #rows) do
     for _, col in ipairs(cols) do
       local val = tostring(rows[i][col] or "")
       if #val > col_widths[col] then
@@ -148,8 +184,9 @@ local function render_dataresource(data)
   end
   table.insert(lines, { { sep, "MarimoOutputText" } })
 
-  -- Data rows (max 5)
-  for i = 1, math.min(5, #rows) do
+  -- Data rows (capped — full table available via <leader>mD panel)
+  local shown = math.min(MAX_DATAFRAME_INLINE_ROWS, #rows)
+  for i = 1, shown do
     local row_str = "  │"
     for _, col in ipairs(cols) do
       local val = tostring(rows[i][col] or ""):sub(1, col_widths[col])
@@ -158,31 +195,72 @@ local function render_dataresource(data)
     table.insert(lines, { { row_str, "MarimoOutputText" } })
   end
 
-  if #rows > 5 then
-    table.insert(lines, { { "  … " .. (#rows - 5) .. " more rows", "MarimoOutputText" } })
+  if #rows > shown then
+    table.insert(lines, {
+      { "  … " .. (#rows - shown) .. " more rows · ", "Comment" },
+      { "<leader>mD", "MarimoMarkdownInlineCode" },
+      { " for full panel", "Comment" },
+    })
   end
 
   return lines
 end
 
-local function render_image_placeholder(_)
-  return { { { "  [image — open in browser to view]", "Comment" } } }
+local function render_image(data, _opts, mime)
+  -- Marimo encodes image/* payloads as base64 strings.
+  return image.render_base64(_render_ctx.bufnr, _render_ctx.row or 0,
+    mime or "image/png", tostring(data or ""))
 end
 
-local function render_marimo_mime(_)
-  return { { { "  [marimo widget — open in browser to view]", "Comment" } } }
+local function render_svg(data)
+  -- SVG arrives as XML text. Most terminal image protocols can't render
+  -- SVG directly; image.nvim can with the right backend, snacks.image can
+  -- too. We pass the raw bytes through the image module which will write
+  -- the SVG to a file — backends that can rasterize it will, the rest will
+  -- show the file-path placeholder.
+  if type(data) ~= "string" then return {} end
+  return image.render_at(_render_ctx.bufnr, _render_ctx.row or 0,
+    "image/svg+xml", data)
 end
 
--- Register built-ins. Marimo renders mo.md() to HTML and sends it with the
--- text/markdown mimetype, so markdown and html share the same renderer until
--- Phase 8 replaces text/markdown with a proper treesitter renderer.
+local function render_markdown_mime(data)
+  return require("neo-marimo.markdown").render_markdown_source(data)
+end
+
+local function render_marimo_mime(data)
+  -- application/vnd.marimo+mime is a JSON envelope: {mimetype, data}.
+  -- Route the inner payload through the standard lookup so e.g. a widget
+  -- wrapped in a mime envelope reaches the widget renderer.
+  if type(data) == "table" and data.mimetype then
+    local renderer = M._lookup_renderer(data.mimetype)
+    if renderer then return renderer(data.data, {}) end
+  end
+  -- Marimo also uses this mimetype as a fallback for things it can't
+  -- otherwise type — show the inner mime/data hint so the user knows what
+  -- they're missing.
+  return { {
+    { "  [marimo widget — ", "Comment" },
+    { (type(data) == "table" and data.mimetype) or "unknown", "MarimoWidgetLabel" },
+    { "]", "Comment" },
+  } }
+end
+
+-- Register built-ins. mo.md() emits text/html with a `<span class="markdown
+-- prose ...">` wrapper; render_html detects that shape and forwards to the
+-- markdown renderer (Phase 8.1). Raw text/markdown payloads (rare but
+-- possible) route straight to render_markdown_mime.
 M.register_renderer("text/plain", render_text_plain)
 M.register_renderer("text/html", render_html)
-M.register_renderer("text/markdown", render_html)
+M.register_renderer("text/markdown", render_markdown_mime)
 M.register_renderer("application/vnd.dataresource+json", render_dataresource)
 M.register_renderer("application/vnd.marimo+error", render_error)
 M.register_renderer("application/vnd.marimo+mime", render_marimo_mime)
-M.register_renderer("image/*", render_image_placeholder)
+M.register_renderer("image/svg+xml", render_svg)
+M.register_renderer("image/*", render_image)
+
+-- Internal: expose lookup so renderers (like render_marimo_mime) can
+-- delegate to the registered handler for a nested mimetype.
+function M._lookup_renderer(mime) return lookup_renderer(mime) end
 
 -- Convert a CellOutput object (from the WS message) to virt_lines chunks.
 local function output_to_virt_lines(output)
@@ -200,7 +278,9 @@ local function output_to_virt_lines(output)
 
   local renderer = lookup_renderer(mimetype)
   if renderer then
-    return renderer(data, {})
+    -- Pass the matched mimetype as the third arg so pattern renderers
+    -- (image/*) can branch on the specific subtype.
+    return renderer(data, {}, mimetype)
   end
 
   -- Unknown mime: try to render as text
@@ -239,6 +319,15 @@ function M.render(bufnr, cell)
     cell.start_row, cell.end_row + 1
   )
 
+  -- Prime the per-cell render context so image/widget renderers can
+  -- attach (image.nvim placements, widget registry keys) against the
+  -- right buffer/cell. The renderer body reads from _render_ctx
+  -- synchronously, so it's safe to leave the value in place for the
+  -- duration of this M.render call.
+  _render_ctx.bufnr = bufnr
+  _render_ctx.cell_id = cell.id
+  _render_ctx.row = cell.end_row
+
   local virt_lines = {}
 
   -- Status line (idle only shown once cell has actually been executed)
@@ -247,13 +336,18 @@ function M.render(bufnr, cell)
     table.insert(virt_lines, status_line)
   end
 
-  -- Output content
+  -- Output content. Skip the output cap when the cell has a layout/widget
+  -- payload — those expand to many virt_lines per widget and the cap
+  -- would chop the bottom of a stacked layout, leaving a misleading
+  -- partial display. Plain text/dataframe output keeps the cap as before.
   if cell.output then
     local output_lines = output_to_virt_lines(cell.output)
-    -- Truncate if too long
+    local skip_cap = (cell.output.mimetype == "text/html")
+      and type(cell.output.data) == "string"
+      and (widgets.has_layout(cell.output.data) or widgets.has_widgets(cell.output.data))
     local shown = 0
     for _, vl in ipairs(output_lines) do
-      if shown >= MAX_LINES then
+      if not skip_cap and shown >= MAX_LINES then
         table.insert(virt_lines, { { "  … (output truncated, open in browser for full view)", "Comment" } })
         break
       end
@@ -289,12 +383,20 @@ function M.clear(bufnr, cell)
   cell.output = nil
   cell.console = nil
   cell.status = "idle"
+  widgets.clear_for_cell(bufnr, cell.id)
   M.render(bufnr, cell)
 end
 
 -- Clear output for all cells.
 function M.clear_all(bufnr)
   vim.api.nvim_buf_clear_namespace(bufnr, hl.ns_output, 0, -1)
+  -- Drop the entire widget registry for this buffer so stale entries don't
+  -- survive a kernel restart / output clear.
+  for k, _ in pairs(widgets._by_cell) do
+    if k:sub(1, #tostring(bufnr) + 1) == bufnr .. ":" then
+      widgets._by_cell[k] = nil
+    end
+  end
 end
 
 -- Handle an incoming cell-op WebSocket message.

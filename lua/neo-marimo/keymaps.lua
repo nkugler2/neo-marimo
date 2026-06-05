@@ -5,6 +5,8 @@ local server = require("neo-marimo.server")
 local output = require("neo-marimo.output")
 local actions = require("neo-marimo.actions")
 local lsp = require("neo-marimo.lsp")
+local dataframe = require("neo-marimo.dataframe")
+local widgets = require("neo-marimo.widgets")
 
 local M = {}
 
@@ -281,6 +283,27 @@ function M.setup(bufnr, nb)
       "omnifunc", "v:lua.neo_marimo_omnifunc",
       { buf = bufnr }
     )
+  end
+
+  -- Phase 8.5: DataFrame side-panel for the cell under the cursor.
+  if km.dataframe_panel then
+    vim.keymap.set("n", km.dataframe_panel, function()
+      if nb._flush_pending then nb._flush_pending() end
+      local row = vim.api.nvim_win_get_cursor(0)[1] - 1
+      local cell = notebook.get_cell_at_row(nb, row)
+      if cell then dataframe.open_for_cell(nb, cell) end
+    end, o("Marimo: open DataFrame side-panel"))
+  end
+
+  -- Phase 8.3: Widget interaction picker.
+  if km.widget_picker then
+    vim.keymap.set("n", km.widget_picker, function()
+      if nb._flush_pending then nb._flush_pending() end
+      local row = vim.api.nvim_win_get_cursor(0)[1] - 1
+      local cell = notebook.get_cell_at_row(nb, row)
+      if not cell then return end
+      require("neo-marimo.widget_picker").open(nb, cell)
+    end, o("Marimo: interact with widgets in cell"))
   end
 end
 

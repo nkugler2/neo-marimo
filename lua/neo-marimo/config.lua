@@ -76,6 +76,13 @@ M.defaults = {
     -- pointed at neo-marimo's LSP-backed completion driver (used by
     -- <C-x><C-o> and any completion plugin that respects omnifunc).
     completion      = true,
+    -- Phase 8.5: open a side-split panel showing the full DataFrame
+    -- output for the cell under the cursor (no row cap; `s` to sort).
+    dataframe_panel = "<leader>mD",
+    -- Phase 8.3: interact with any UI widgets in the cell under the
+    -- cursor (slider, button, dropdown, …). Opens a picker that POSTs
+    -- the new value to /api/kernel/set_ui_element_value.
+    widget_picker   = "<leader>mw",
   },
 }
 

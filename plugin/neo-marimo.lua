@@ -338,6 +338,33 @@ end, {
   desc = "Insert a new blank cell above or below the cursor",
 })
 
+-- Phase 8.5: open the side-split DataFrame viewer for the cell under the
+-- cursor. The cell must have a `application/vnd.dataresource+json` output;
+-- typically that's set by returning a pandas/polars DataFrame.
+vim.api.nvim_create_user_command("MarimoDataFramePanel", function()
+  require("neo-marimo.dataframe").open_at_cursor()
+end, { desc = "Open the full DataFrame side-panel for the cell under cursor" })
+
+-- Phase 8.3: open the widget picker for the cell under the cursor. Lists
+-- every UI element marimo emitted in the cell's last output and lets the
+-- user adjust its value, which POSTs to /api/kernel/set_ui_element_value
+-- and reactively re-runs dependent cells.
+vim.api.nvim_create_user_command("MarimoWidget", function()
+  local marimo = require("neo-marimo")
+  local nb = marimo.current_notebook()
+  if not nb then
+    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    return
+  end
+  local row = vim.api.nvim_win_get_cursor(0)[1] - 1
+  local cell = require("neo-marimo.notebook").get_cell_at_row(nb, row)
+  if not cell then
+    vim.notify("[neo-marimo] Cursor is not over a cell.", vim.log.levels.WARN)
+    return
+  end
+  require("neo-marimo.widget_picker").open(nb, cell)
+end, { desc = "Interact with UI widgets in the cell under cursor" })
+
 vim.api.nvim_create_user_command("MarimoNew", function(opts)
   local filepath = opts.args ~= "" and opts.args
     or vim.fn.input("New notebook path: ", vim.fn.getcwd() .. "/", "file")
