@@ -92,46 +92,118 @@ local function parse_dataresource(data)
   return { rows = rows, cols = cols }
 end
 
--- Shape 2: <marimo-table …data-data="[{…}]" …data-fields="[…]" …>.
+-- Forward declaration: parse_marimo_table falls back to parse_html_table
+-- for HTML embedded inside `<marimo-table>...</marimo-table>` bodies, but
+-- the html-table parser appears later in the file (depends on strip_tags
+-- and lives next to its own helpers). Without this forward `local`, the
+-- reference inside parse_marimo_table would resolve to a nil global.
+local parse_html_table
+
+-- Try to coerce a decoded JSON value into a row list. Marimo serializes the
+-- table data into several different shapes depending on which attribute it
+-- lands on and which version is running:
+--
+--   * `[{x:1, y:"a"}, …]`               — direct list of record rows
+--   * `[[1, "a"], …]`                    — direct list of positional arrays
+--   * `{data: [...rows], showColumnSummaries: ...}` — wrapper record
+--   * `{rows: [...], …}`, `{value: [...]}`, `{tableData: [...]}` — other wrappers
+--
+-- Returns the row list, or nil if the value doesn't look like rows at all.
+local function rows_from_value(decoded)
+  if type(decoded) ~= "table" then return nil end
+  if decoded[1] ~= nil then return decoded end
+  for _, key in ipairs({ "data", "rows", "value", "tableData", "table_data" }) do
+    local nested = decoded[key]
+    if type(nested) == "table" and nested[1] ~= nil then
+      return nested
+    end
+  end
+  return nil
+end
+
+-- Shape 2: `<marimo-table>` custom element. The actual attribute names and
+-- value shapes shift between marimo versions, so we cast a wide net rather
+-- than locking onto one transport.
 local function parse_marimo_table(html)
-  -- Find the OPENING tag — attributes live there, the body is usually
-  -- empty for our purposes (marimo renders client-side from the attrs).
   local tag_open = html:match("<marimo%-table[^>]*>")
   if not tag_open then return nil end
 
-  -- Marimo sometimes uses `data-data`, sometimes `data-initial-value` for
-  -- the row payload depending on the version. Try both.
-  local rows = decode_json_attr(read_attr(tag_open, "data-data"))
-                or decode_json_attr(read_attr(tag_open, "data-initial-value"))
-                or decode_json_attr(read_attr(tag_open, "data-rows"))
-  if type(rows) ~= "table" then return nil end
+  -- 1. Try every attribute we've ever seen carry row data.
+  local rows
+  for _, attr in ipairs({
+    "data-data", "data-rows", "data-table-data",
+    "data-initial-value", "data-value",
+  }) do
+    local raw = read_attr(tag_open, attr)
+    if raw then
+      rows = rows_from_value(decode_json_attr(raw))
+      if rows then break end
+    end
+  end
 
-  -- Column descriptors. data-fields is typical; data-field-types and
-  -- data-columns also appear.
-  local cols = {}
-  local fields = decode_json_attr(read_attr(tag_open, "data-fields"))
-                  or decode_json_attr(read_attr(tag_open, "data-field-types"))
-                  or decode_json_attr(read_attr(tag_open, "data-columns"))
-  if type(fields) == "table" then
-    for _, f in ipairs(fields) do
-      if type(f) == "table" then
-        table.insert(cols, f.name or f[1] or "?")
-      elseif type(f) == "string" then
-        table.insert(cols, f)
+  -- 2. Fall back to the element body — marimo sometimes embeds the data as
+  -- text content rather than as an attribute.
+  if not rows then
+    local body = html:match("<marimo%-table[^>]*>(.-)</marimo%-table>")
+    if body and body ~= "" then
+      local trimmed = body:match("^%s*(.-)%s*$") or ""
+      if trimmed ~= "" then
+        rows = rows_from_value(decode_json_attr(trimmed))
+        -- 3. And as a last resort, a nested <table> inside the custom element.
+        if not rows then
+          local nested_df = parse_html_table(trimmed)
+          if nested_df then return nested_df end
+        end
       end
     end
   end
 
-  if #cols == 0 and rows[1] then
-    for k, _ in pairs(rows[1]) do table.insert(cols, k) end
+  -- 4. Column descriptors. data-fields is typical; data-field-types and
+  -- data-columns appear in some versions.
+  local cols = {}
+  for _, attr in ipairs({ "data-fields", "data-field-types", "data-columns" }) do
+    local fields = decode_json_attr(read_attr(tag_open, attr))
+    if type(fields) == "table" then
+      for _, f in ipairs(fields) do
+        if type(f) == "table" then
+          table.insert(cols, f.name or f[1] or "?")
+        elseif type(f) == "string" then
+          table.insert(cols, f)
+        end
+      end
+      if #cols > 0 then break end
+    end
+  end
+
+  -- 5. Last-resort columns: derive from the first row's keys (record shape only).
+  if rows and #cols == 0 and type(rows[1]) == "table" then
+    for k, _ in pairs(rows[1]) do
+      if type(k) == "string" then table.insert(cols, k) end
+    end
     table.sort(cols)
   end
 
-  return { rows = rows, cols = cols }
+  -- 6. Rows-as-positional-arrays → convert to records keyed by column name
+  --    so render_inline / panel can index by column. Detected by: first
+  --    row is a table, has numeric index [1] but no key matching cols[1].
+  if rows and #cols > 0 and type(rows[1]) == "table"
+      and rows[1][cols[1]] == nil and rows[1][1] ~= nil then
+    local records = {}
+    for _, row in ipairs(rows) do
+      local rec = {}
+      for i, c in ipairs(cols) do rec[c] = row[i] end
+      table.insert(records, rec)
+    end
+    rows = records
+  end
+
+  rows = rows or {}
+  if #cols == 0 then return nil end
+  return { cols = cols, rows = rows }
 end
 
 -- Shape 3: plain HTML <table>. Pandas' df.to_html() format.
-local function parse_html_table(html)
+parse_html_table = function(html)
   local table_html = html:match("<table[^>]*>(.-)</table>")
   if not table_html then return nil end
 
