@@ -67,6 +67,14 @@ function M.set_override(object_id, value)
   M._value_overrides[object_id] = value
 end
 
+-- Clear every value override the notebook holds. Wired to :MarimoResetWidgets
+-- so the user has an explicit knob when an override has gotten stale
+-- (typically: they changed the slider's code range and want the new initial
+-- value back).
+function M.clear_all_overrides()
+  M._value_overrides = {}
+end
+
 local function register(bufnr, cell_id, widget)
   local key = registry_key(bufnr, cell_id)
   M._by_cell[key] = M._by_cell[key] or {}
@@ -75,14 +83,26 @@ end
 
 -- ── HTML helpers ──────────────────────────────────────────────────────────
 
+-- Decode the named entities marimo uses (amp/lt/gt/quot/apos) AND the
+-- generic numeric character references (&#92; for backslash is the one
+-- that bites — marimo entity-encodes embedded backslashes in JSON-encoded
+-- attribute values, so without this the JSON decode downstream sees
+-- `&#92;"` instead of `\"` and bails on a malformed escape).
 local function decode_entities(s)
   if type(s) ~= "string" then return s end
   return (s:gsub("&amp;", "&")
            :gsub("&lt;", "<")
            :gsub("&gt;", ">")
            :gsub("&quot;", '"')
-           :gsub("&#39;", "'")
-           :gsub("&apos;", "'"))
+           :gsub("&apos;", "'")
+           :gsub("&#x(%x+);", function(hex)
+             local n = tonumber(hex, 16)
+             if n then return vim.fn.nr2char(n) end
+           end)
+           :gsub("&#(%d+);", function(dec)
+             local n = tonumber(dec)
+             if n then return vim.fn.nr2char(n) end
+           end))
 end
 
 -- Parse a key="value" / key='value' / key=value (unquoted) attribute string

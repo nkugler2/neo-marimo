@@ -385,27 +385,22 @@ function M.handle_cell_op(bufnr, nb, msg)
   -- Update status. Mark the cell as having been executed once we see it
   -- finish (idle) or fail (error) — this is what gates the "✓ ran" indicator.
   --
-  -- Widget overrides are cleared on the *transition* into queued/running
-  -- (a fresh execution starts), not on every cell-op. Marimo periodically
-  -- re-emits cell-op with the original output HTML after the picker calls
-  -- set_ui_element_value, and clearing on those echoes was snapping the
-  -- slider thumb back to the parsed data-initial-value (= 0.5) milliseconds
-  -- after the user typed a new value — even though the kernel's slider.value
-  -- was correctly updated.
+  -- Widget overrides are NOT cleared on any cell-op. Empirically marimo
+  -- broadcasts cell-op with status transitions (queued/running/idle) on
+  -- the slider's own cell after set_ui_element_value succeeds, even
+  -- though the cell isn't being re-executed — every previous heuristic
+  -- (clear-on-fresh-output, clear-on-status-transition) ended up tripping
+  -- on those echoes and snapping the thumb back to the parsed
+  -- data-initial-value. Now overrides persist for the lifetime of the
+  -- cell; the user clears them explicitly by re-running the cell
+  -- (actions.run_cell_at_cursor) or by `:MarimoResetWidgets`.
   if msg.status then
-    local was_active = cell.status == "queued" or cell.status == "running"
-    local is_starting = msg.status == "queued" or msg.status == "running"
-    if is_starting and not was_active then
-      widgets.clear_overrides_for_cell(bufnr, cell.id)
-    end
     cell.status = msg.status
     if msg.status == "idle" or msg.status == "error" then
       cell._has_run = true
     end
   end
 
-  -- Update output if a new one is provided. Overrides are NOT cleared
-  -- here (see above) — they're tied to the fresh-execution transition.
   if msg.output then
     cell.output = msg.output
   end

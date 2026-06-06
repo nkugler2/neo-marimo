@@ -60,15 +60,34 @@ local function read_attr(tag_open, name)
 end
 
 -- Decode an attribute value that holds JSON. Marimo HTML-entity-encodes
--- the value when it lands on the wire (e.g. &quot; for "), then the value
--- itself is JSON, so we undo the entities and then json_decode.
+-- the value on the wire — and for nested-quote content (`{"x": "a"}`)
+-- it includes &#92; for the escaping backslash inside the JSON string.
+-- Without the &#NNN; pass, json.decode sees `&#92;"` and bails on a
+-- malformed escape. Additionally, marimo sometimes DOUBLE-encodes: the
+-- attribute holds a JSON-encoded *string* whose content is itself JSON
+-- (`data-data='&quot;[{&#92;&quot;x&#92;&quot;:1}]&quot;'`). After one
+-- decode we get a Lua string holding `[{"x":1}]`; a second decode yields
+-- the actual row list.
 local function decode_json_attr(s)
   if type(s) ~= "string" or s == "" then return nil end
-  s = s:gsub("&quot;", '"'):gsub("&amp;", "&")
+  s = s:gsub("&amp;", "&")
        :gsub("&lt;", "<"):gsub("&gt;", ">")
-       :gsub("&#39;", "'"):gsub("&apos;", "'")
+       :gsub("&quot;", '"'):gsub("&apos;", "'")
+       :gsub("&#x(%x+);", function(hex)
+         local n = tonumber(hex, 16)
+         if n then return vim.fn.nr2char(n) end
+       end)
+       :gsub("&#(%d+);", function(dec)
+         local n = tonumber(dec)
+         if n then return vim.fn.nr2char(n) end
+       end)
   local ok, data = pcall(vim.json.decode, s)
   if not ok then return nil end
+  -- Unwrap double-encoded JSON (a JSON-string whose content is itself JSON).
+  if type(data) == "string" then
+    local ok2, data2 = pcall(vim.json.decode, data)
+    if ok2 then return data2 end
+  end
   return data
 end
 

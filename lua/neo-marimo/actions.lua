@@ -9,6 +9,7 @@ local buffer = require("neo-marimo.buffer")
 local server = require("neo-marimo.server")
 local output = require("neo-marimo.output")
 local sync = require("neo-marimo.sync")
+local widgets = require("neo-marimo.widgets")
 
 local M = {}
 
@@ -132,6 +133,12 @@ function M.run_cell_at_cursor(bufnr, nb)
   local cell = notebook.get_cell_at_row(nb, row)
   if not cell then return end
 
+  -- User-driven re-execution is the *only* place we clear widget value
+  -- overrides for a cell. Auto-clearing on cell-op echoes was snapping
+  -- sliders back to their parsed data-initial-value milliseconds after
+  -- the user moved them via :MarimoWidget — see output.handle_cell_op.
+  widgets.clear_overrides_for_cell(bufnr, cell.id)
+
   cell.status = "queued"
   output.render(bufnr, cell)
   server.run_cells(nb.filepath, { cell.id }, { cell.code })
@@ -149,6 +156,7 @@ function M.run_all_cells(bufnr, nb)
   for _, cell in ipairs(nb.cells) do
     table.insert(cell_ids, cell.id)
     table.insert(codes, cell.code)
+    widgets.clear_overrides_for_cell(bufnr, cell.id)
     cell.status = "queued"
     output.render(bufnr, cell)
   end

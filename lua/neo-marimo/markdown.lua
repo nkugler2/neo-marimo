@@ -32,7 +32,20 @@ local HTML_ENTITIES = {
 }
 
 local function decode_entities(s)
-  return (s:gsub("&[#%w]+;", function(e) return HTML_ENTITIES[e] or e end))
+  -- Named entities from the lookup table first.
+  s = s:gsub("&%w+;", function(e) return HTML_ENTITIES[e] or e end)
+  -- Generic numeric character references — marimo uses &#92; for backslash
+  -- in nested-JSON content, and we don't want to hand-roll a name for every
+  -- printable codepoint. nr2char handles the UTF-8 encoding.
+  s = s:gsub("&#x(%x+);", function(hex)
+    local n = tonumber(hex, 16)
+    if n then return vim.fn.nr2char(n) end
+  end)
+  s = s:gsub("&#(%d+);", function(dec)
+    local n = tonumber(dec)
+    if n then return vim.fn.nr2char(n) end
+  end)
+  return s
 end
 
 -- True if the payload looks like marimo's HTML markdown wrapper, vs. an

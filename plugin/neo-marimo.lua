@@ -395,6 +395,24 @@ vim.api.nvim_create_user_command("MarimoInspectOutput", function()
   vim.api.nvim_buf_set_name(buf, "marimo://inspect/cell-" .. tostring(cell.id))
 end, { desc = "Inspect cell output mimetype + payload + parsed widgets" })
 
+-- Drop every cached widget value override and re-render the notebook so
+-- each widget falls back to whatever data-initial-value its current
+-- output HTML reports. Use this when an override has gotten stale (e.g.
+-- you changed a slider's range and want the new initial value back).
+vim.api.nvim_create_user_command("MarimoResetWidgets", function()
+  local marimo = require("neo-marimo")
+  local nb = marimo.current_notebook()
+  if not nb then
+    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    return
+  end
+  require("neo-marimo.widgets").clear_all_overrides()
+  for _, cell in ipairs(nb.cells) do
+    require("neo-marimo.output").render(nb.bufnr, cell)
+  end
+  vim.notify("[neo-marimo] Widget overrides cleared.", vim.log.levels.INFO)
+end, { desc = "Clear all widget value overrides and re-render" })
+
 -- Phase 8.3: open the widget picker for the cell under the cursor. Lists
 -- every UI element marimo emitted in the cell's last output and lets the
 -- user adjust its value, which POSTs to /api/kernel/set_ui_element_value
