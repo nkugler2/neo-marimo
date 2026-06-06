@@ -45,35 +45,46 @@ local function prompt_select(label, options, on_set)
   end)
 end
 
-local function interact(nb, w)
+-- After successful set_value, both the override registry and the cell
+-- need to be poked so the user sees the new value immediately. The cell
+-- output text doesn't change, so the next render would otherwise re-parse
+-- the original data-initial-value and snap the thumb back.
+local function commit(nb, cell, w, value)
+  widgets.set_override(w.object_id, value)
+  w.value = value
+  if widgets.set_value(nb.filepath, w.object_id, value) then
+    require("neo-marimo.output").render(nb.bufnr, cell)
+  end
+end
+
+local function interact(nb, cell, w)
   if not w.object_id then
     vim.notify("[neo-marimo] widget has no object-id; cannot update",
       vim.log.levels.WARN)
     return
   end
 
-  if w.name == "slider" or w.name == "number" then
+  if w.name == "slider" or w.name == "number" or w.name == "range_slider" then
     prompt_number(w.label, w.value, function(v)
-      w.value = v
-      widgets.set_value(nb.filepath, w.object_id, v)
+      commit(nb, cell, w, v)
     end)
 
   elseif w.name == "checkbox" or w.name == "switch" then
     local nv = not (w.value == true or w.value == "true" or w.value == 1)
-    w.value = nv
-    widgets.set_value(nb.filepath, w.object_id, nv)
+    commit(nb, cell, w, nv)
     vim.notify("[neo-marimo] " .. w.label .. " = " .. tostring(nv),
       vim.log.levels.INFO)
 
   elseif w.name == "button" then
-    widgets.set_value(nb.filepath, w.object_id, (w.value or 0) + 1)
+    -- Marimo button "press" is an integer-incrementing counter on the
+    -- kernel side. Send `current + 1`; the kernel re-runs anything that
+    -- read button.value.
+    local cur = tonumber(w.value) or 0
+    commit(nb, cell, w, cur + 1)
     vim.notify("[neo-marimo] pressed " .. w.label, vim.log.levels.INFO)
 
   elseif w.name == "text" or w.name == "text_area" then
-    prompt_text(w.label, w.value, function(v)
-      w.value = v
-      widgets.set_value(nb.filepath, w.object_id, v)
-    end)
+    prompt_text(w.label, w.value, function(v) commit(nb, cell, w, v) end)
 
   elseif w.name == "dropdown" then
     -- Marimo serializes the option list in data-options as JSON; fall back
@@ -82,17 +93,11 @@ local function interact(nb, w)
     if opts_raw then
       local ok, opts = pcall(vim.json.decode, opts_raw)
       if ok and type(opts) == "table" then
-        prompt_select(w.label, opts, function(v)
-          w.value = v
-          widgets.set_value(nb.filepath, w.object_id, v)
-        end)
+        prompt_select(w.label, opts, function(v) commit(nb, cell, w, v) end)
         return
       end
     end
-    prompt_text(w.label, w.value, function(v)
-      w.value = v
-      widgets.set_value(nb.filepath, w.object_id, v)
-    end)
+    prompt_text(w.label, w.value, function(v) commit(nb, cell, w, v) end)
 
   elseif w.name == "multiselect" then
     prompt_text(w.label .. " (comma-separated)",
@@ -103,14 +108,11 @@ local function interact(nb, w)
           local trimmed = part:match("^%s*(.-)%s*$")
           if trimmed ~= "" then table.insert(list, trimmed) end
         end
-        w.value = list
-        widgets.set_value(nb.filepath, w.object_id, list)
+        commit(nb, cell, w, list)
       end)
 
   else
-    prompt_text(w.label, w.value, function(v)
-      widgets.set_value(nb.filepath, w.object_id, v)
-    end)
+    prompt_text(w.label, w.value, function(v) commit(nb, cell, w, v) end)
   end
 end
 
@@ -178,7 +180,7 @@ function M.open(nb, cell)
     local w = list[row]
     if not w then return end
     close()
-    interact(nb, w)
+    interact(nb, cell, w)
   end, "Interact with selected widget")
 end
 

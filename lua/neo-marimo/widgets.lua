@@ -31,6 +31,16 @@ local M = {}
 
 M._by_cell = {}
 
+-- Persistent per-object-id value overrides. Marimo doesn't re-broadcast a
+-- widget's own cell-op when its value changes, so without this map the
+-- picker would update the value, POST it to the kernel, then the very next
+-- cell re-render would parse the original `data-initial-value` from the
+-- cached output HTML and snap the displayed thumb back to where it started.
+-- Overrides are cleared when a fresh cell-op delivers a new output for the
+-- cell (see output.handle_cell_op): real re-executions reset the slider,
+-- silent value-change pokes do not.
+M._value_overrides = {}
+
 local function registry_key(bufnr, cell_id) return bufnr .. ":" .. cell_id end
 
 function M.clear_for_cell(bufnr, cell_id)
@@ -39,6 +49,22 @@ end
 
 function M.list_for_cell(bufnr, cell_id)
   return M._by_cell[registry_key(bufnr, cell_id)] or {}
+end
+
+-- Drop overrides for every widget previously registered against this cell.
+-- Called when a fresh cell-op replaces cell.output so the post-execution
+-- display matches the new HTML, not the user's stale interaction state.
+function M.clear_overrides_for_cell(bufnr, cell_id)
+  local list = M._by_cell[registry_key(bufnr, cell_id)]
+  if not list then return end
+  for _, w in ipairs(list) do
+    if w.object_id then M._value_overrides[w.object_id] = nil end
+  end
+end
+
+function M.set_override(object_id, value)
+  if not object_id then return end
+  M._value_overrides[object_id] = value
 end
 
 local function register(bufnr, cell_id, widget)
@@ -102,6 +128,25 @@ local function parse_initial_value(raw)
     if not err then return data end
   end
   return raw
+end
+
+-- Clean up a string attribute value that marimo might have triple-wrapped
+-- as: HTML-attribute-encoded ⇒ JSON-string ⇒ HTML-markup. For widget
+-- labels marimo runs the label text through its markdown renderer first
+-- (so headings/inline-code in labels work), JSON-encodes the result for
+-- transport, and HTML-entity-encodes that for the attribute value. We undo
+-- all three so the picker shows "alpha", not the literal
+-- `"<span class=\"markdown prose…\">alpha</span>"` block the user reported.
+local function clean_label(s)
+  if type(s) ~= "string" or s == "" then return s end
+  s = decode_entities(s)
+  if s:sub(1, 1) == '"' and s:sub(-1) == '"' then
+    local ok, decoded = pcall(vim.json.decode, s)
+    if ok and type(decoded) == "string" then s = decoded end
+  end
+  s = s:gsub("<[^>]+>", "")
+  s = s:match("^%s*(.-)%s*$") or s
+  return s
 end
 
 -- ── per-type renderers ────────────────────────────────────────────────────
@@ -309,13 +354,51 @@ local RENDERERS = {
 
 local WIDGET_PATTERN = "<marimo%-([%w%-]+)([^>]*)>"
 
+-- Marimo wraps every UI element in `<marimo-ui-element object-id="…">…
+-- <marimo-{kind} data-…></marimo-{kind}>…</marimo-ui-element>`. The wrapper
+-- carries the kernel-stable `object-id` (the thing set_ui_element_value
+-- needs); the inner tag carries `data-initial-value`, `data-start`, etc.
+--
+-- Pre-process the input so each `<marimo-{kind}>` tag inherits the wrapper's
+-- `object-id`. After this pass the wrapper is gone, the inner tag has both
+-- the id and the data attributes, and the main parser can treat it as a
+-- single self-contained widget — fixes the picker showing "ui_element ·
+-- ui_element = nil" alongside the real widget.
+local UI_ELEMENT_PATTERN = "<marimo%-ui%-element([^>]*)>(.-)</marimo%-ui%-element>"
+
+local function inject_object_id(inner_html, object_id)
+  if not object_id or object_id == "" then return inner_html end
+  -- Inject onto the first `<marimo-{kind}>` opener we find inside the
+  -- wrapper (typically just one). Skip if the tag already has its own.
+  local replaced = false
+  return inner_html:gsub("(<marimo%-[%w%-]+)([^>]*)>", function(open_tag, attrs)
+    if replaced then return open_tag .. attrs .. ">" end
+    replaced = true
+    if attrs:find("object%-id=", 1, true) then
+      return open_tag .. attrs .. ">"
+    end
+    return open_tag .. attrs .. ' object-id="' .. object_id .. '">'
+  end, 1)
+end
+
 -- Extract widgets from an HTML payload. Returns:
 --   widgets : list of parsed widget tables
 --   stripped: html with the widget tags substituted by ASCII placeholders
 --             ("[slider]") so any surrounding text/structure renders cleanly.
 local function parse_widgets(html)
+  -- First pass: hoist object-id from each <marimo-ui-element> wrapper onto
+  -- its inner widget tag, then remove the wrapper.
+  html = html:gsub(UI_ELEMENT_PATTERN, function(attr_str, inner)
+    local outer = parse_attrs(attr_str)
+    return inject_object_id(inner, outer["object-id"] or outer.object_id)
+  end)
+
   local widgets = {}
   local stripped = html:gsub(WIDGET_PATTERN, function(name, attr_str)
+    -- Skip the wrapper itself if any survived the first pass (e.g. an
+    -- unclosed wrapper). The wrapper isn't a renderable widget.
+    if name == "ui-element" then return "" end
+
     local attrs = parse_attrs(attr_str)
     local key = name:gsub("-", "_")
     local options = {}
@@ -327,20 +410,30 @@ local function parse_widgets(html)
     if options.start then options.start = to_num(options.start, options.start) end
     if options.stop  then options.stop  = to_num(options.stop,  options.stop)  end
     if options.step  then options.step  = to_num(options.step,  options.step)  end
+    if options.label then options.label = clean_label(options.label) end
+
+    local object_id = attrs["object-id"] or attrs.object_id
+    local parsed_value = parse_initial_value(options.initial_value)
+    -- Apply any persistent override from a prior picker interaction so the
+    -- displayed slider thumb / number field reflects the user's last set
+    -- value, not the original initial-value from the parsed HTML.
+    if object_id and M._value_overrides[object_id] ~= nil then
+      parsed_value = M._value_overrides[object_id]
+    end
 
     local w = {
       name = key,
-      object_id = attrs["object-id"] or attrs.object_id,
-      label = options.label or key,
-      value = parse_initial_value(options.initial_value),
+      object_id = object_id,
+      label = (options.label and options.label ~= "") and options.label or key,
+      value = parsed_value,
       options = options,
     }
     table.insert(widgets, w)
     return "[" .. key .. "]"
   end)
 
-  -- Also close any trailing </marimo-name> tags now that we've stripped
-  -- the opener — leaving them in would show as literal "</marimo-slider>".
+  -- Close any trailing </marimo-name> tags now that we've stripped the
+  -- openers — leaving them in would show as literal "</marimo-slider>".
   stripped = stripped:gsub("</marimo%-[%w%-]+>", "")
   return widgets, stripped
 end
@@ -635,10 +728,18 @@ function M.render(html, bufnr, cell_id)
   return virt_lines
 end
 
--- POST a new value for a widget to /api/kernel/set_ui_element_value. Returns
--- true on success. The server replies with cell-op updates for any cell that
--- depends on this widget, so the user sees re-runs in the cell output area.
+-- POST a new value for a widget to /api/kernel/set_ui_element_value.
+-- Returns true on HTTP 200, false otherwise (with a [neo-marimo] warning).
+-- After a successful POST, marimo recomputes any cells that depend on
+-- the widget and broadcasts cell-op for each — the slider's own cell does
+-- NOT re-broadcast though, which is why we also stash an override in
+-- M._value_overrides so the next render of *this* cell shows the new value.
 function M.set_value(filepath, object_id, value)
+  if not object_id or object_id == "" then
+    utils.warn("Widget has no object-id; can't update its value.")
+    return false
+  end
+
   local server = require("neo-marimo.server")
   local srv = server._servers and server._servers[filepath]
   if not srv then
@@ -646,42 +747,70 @@ function M.set_value(filepath, object_id, value)
     return false
   end
 
-  local http_post = server._http_post
-  if not http_post then
-    -- server.lua keeps http_post private. Re-implement the minimal call here
-    -- via vim.system + curl so we don't have to widen the API surface.
-    local body = vim.json.encode({
-      object_ids = { object_id },
-      values     = { value },
-    })
-    local args = {
-      "curl", "-s", "--max-time", "10", "-X", "POST",
-      "-H", "Content-Type: application/json",
-      "-H", "Marimo-Session-Id: " .. srv.session_id,
-    }
-    if srv.server_token then
-      table.insert(args, "-H")
-      table.insert(args, "Marimo-Server-Token: " .. srv.server_token)
-    end
-    table.insert(args, "-d"); table.insert(args, body)
-    table.insert(args, "http://127.0.0.1:" .. tostring(srv.port)
-                       .. "/api/kernel/set_ui_element_value")
-    local r = vim.system(args, { text = true }):wait()
-    return r.code == 0
+  -- Field names use camelCase. Marimo's other kernel endpoints
+  -- (/api/kernel/run, /api/kernel/instantiate) take `cellIds`, `objectIds`,
+  -- `autoRun`, etc. — same pattern here.
+  local body = vim.json.encode({
+    objectIds = { object_id },
+    values    = { value },
+  })
+  local args = {
+    "curl", "-s", "--max-time", "10",
+    "-w", "\n%{http_code}",
+    "-X", "POST",
+    "-H", "Content-Type: application/json",
+    "-H", "Marimo-Session-Id: " .. srv.session_id,
+  }
+  if srv.server_token then
+    table.insert(args, "-H")
+    table.insert(args, "Marimo-Server-Token: " .. srv.server_token)
   end
+  table.insert(args, "-d"); table.insert(args, body)
+  table.insert(args, "http://127.0.0.1:" .. tostring(srv.port)
+                     .. "/api/kernel/set_ui_element_value")
+
+  local r = vim.system(args, { text = true }):wait()
+  if r.code ~= 0 then
+    utils.warn("set_ui_element_value: curl exit " .. tostring(r.code))
+    return false
+  end
+
+  local out_body, status = r.stdout:match("^(.*)\n(%d+)%s*$")
+  if not status then status = "?"; out_body = r.stdout end
+  if status ~= "200" then
+    utils.warn("set_ui_element_value → HTTP " .. status .. ": " ..
+      (out_body or ""):sub(1, 200))
+    return false
+  end
+  return true
 end
 
--- Build a human-readable list-row label for use in pickers.
+-- Build a human-readable list-row label for use in pickers. Long string
+-- values (multiselect arrays, text_area bodies) get truncated to ~30 chars
+-- so the picker row stays one line.
+local function short(v, n)
+  local s
+  if type(v) == "table" then
+    s = table.concat(vim.tbl_map(tostring, v), ",")
+  else
+    s = tostring(v)
+  end
+  n = n or 30
+  if #s > n then s = s:sub(1, n - 1) .. "…" end
+  return s
+end
+
 function M.describe(w)
-  if w.name == "slider" then
+  if w.name == "slider" or w.name == "range_slider" then
     return string.format("slider · %s = %s (%s‥%s)",
-      w.label, tostring(w.value), tostring(w.options.start), tostring(w.options.stop))
+      w.label, short(w.value, 20),
+      tostring(w.options.start), tostring(w.options.stop))
   elseif w.name == "checkbox" or w.name == "switch" then
-    return string.format("%s · %s = %s", w.name, w.label, tostring(w.value))
+    return string.format("%s · %s = %s", w.name, w.label, short(w.value, 8))
   elseif w.name == "button" then
     return string.format("button · %s", w.label)
   else
-    return string.format("%s · %s = %s", w.name, w.label, tostring(w.value))
+    return string.format("%s · %s = %s", w.name, w.label, short(w.value))
   end
 end
 

@@ -113,6 +113,12 @@ local function html_to_md(html)
   end)
 
   html = html:gsub("<p[^>]*>(.-)</p>", "\n%1\n")
+
+  -- Marimo's mo.md() emits `<span class="paragraph">…</span>` instead of
+  -- `<p>…</p>` for prose paragraphs. Convert those to paragraph breaks so
+  -- consecutive sentences don't end up jammed together as one line.
+  html = html:gsub('<span class="paragraph"[^>]*>(.-)</span>', "\n%1\n")
+
   html = html:gsub("<br%s*/?>", "\n")
 
   -- Inline: keep markdown markers so the renderer can highlight them.

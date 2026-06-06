@@ -21,23 +21,62 @@ local M = {}
 M._panels = {}
 
 -- ── data extraction ──────────────────────────────────────────────────────
+--
+-- DataFrames reach us in four different shapes depending on what marimo's
+-- formatters did to them. Each parser below handles one shape and returns
+-- the same {cols, rows} struct so the rest of the module (panel + inline
+-- renderer) doesn't care where the data came from:
+--
+--   shape 1  application/vnd.dataresource+json
+--            { schema = {fields = [...]}, data = [{col:val, ...}] }
+--            Explicit, structured. Used when a formatter is registered.
+--
+--   shape 2  text/html with <marimo-table data-data="…JSON…">
+--            mo.ui.table auto-wraps pandas/polars DataFrames; data is
+--            embedded as JSON in attributes.
+--
+--   shape 3  text/html with plain <table><thead>…</thead><tbody>…</tbody>
+--            Pandas' df.to_html() output. Includes an unwanted leading
+--            row-index column we strip.
+--
+--   shape 4  application/vnd.marimo+mime envelope wrapping any of 1-3.
 
--- Pull a DataFrame-shaped output off a cell. We accept any cell whose
--- `output.mimetype == "application/vnd.dataresource+json"`. Returns
--- `{ rows = {...}, cols = {...} }` or nil if the cell has no compatible
--- output.
-local function extract_dataresource(cell)
-  if not cell or not cell.output then return nil end
-  if cell.output.mimetype ~= "application/vnd.dataresource+json" then
-    return nil
-  end
-  local data = cell.output.data
+local function strip_tags(s)
+  if type(s) ~= "string" then return tostring(s or "") end
+  return (s:gsub("<[^>]+>", "")
+           :gsub("&amp;", "&"):gsub("&lt;", "<")
+           :gsub("&gt;", ">"):gsub("&quot;", '"')
+           :gsub("&#39;", "'"):gsub("&apos;", "'")
+           :gsub("&nbsp;", " ")
+           :match("^%s*(.-)%s*$"))
+end
+
+-- Read an attribute value out of an opener tag (e.g. `<marimo-table
+-- data-data="…">`). Handles double- and single-quoted forms.
+local function read_attr(tag_open, name)
+  local pat_name = name:gsub("%-", "%%-")
+  return tag_open:match(pat_name .. '%s*=%s*"([^"]*)"')
+      or tag_open:match(pat_name .. "%s*=%s*'([^']*)'")
+end
+
+-- Decode an attribute value that holds JSON. Marimo HTML-entity-encodes
+-- the value when it lands on the wire (e.g. &quot; for "), then the value
+-- itself is JSON, so we undo the entities and then json_decode.
+local function decode_json_attr(s)
+  if type(s) ~= "string" or s == "" then return nil end
+  s = s:gsub("&quot;", '"'):gsub("&amp;", "&")
+       :gsub("&lt;", "<"):gsub("&gt;", ">")
+       :gsub("&#39;", "'"):gsub("&apos;", "'")
+  local ok, data = pcall(vim.json.decode, s)
+  if not ok then return nil end
+  return data
+end
+
+-- Shape 1: application/vnd.dataresource+json.
+local function parse_dataresource(data)
   if type(data) ~= "table" or type(data.data) ~= "table" then return nil end
   local rows = data.data
-  if #rows == 0 then return { rows = {}, cols = {} } end
 
-  -- Column order: use schema.fields if marimo sent one (preserves the
-  -- pandas column order), otherwise fall back to sorted keys.
   local cols = {}
   if type(data.schema) == "table" and type(data.schema.fields) == "table" then
     for _, f in ipairs(data.schema.fields) do
@@ -46,11 +85,194 @@ local function extract_dataresource(cell)
       end
     end
   end
-  if #cols == 0 then
+  if #cols == 0 and rows[1] then
     for k, _ in pairs(rows[1]) do table.insert(cols, k) end
     table.sort(cols)
   end
   return { rows = rows, cols = cols }
+end
+
+-- Shape 2: <marimo-table …data-data="[{…}]" …data-fields="[…]" …>.
+local function parse_marimo_table(html)
+  -- Find the OPENING tag — attributes live there, the body is usually
+  -- empty for our purposes (marimo renders client-side from the attrs).
+  local tag_open = html:match("<marimo%-table[^>]*>")
+  if not tag_open then return nil end
+
+  -- Marimo sometimes uses `data-data`, sometimes `data-initial-value` for
+  -- the row payload depending on the version. Try both.
+  local rows = decode_json_attr(read_attr(tag_open, "data-data"))
+                or decode_json_attr(read_attr(tag_open, "data-initial-value"))
+                or decode_json_attr(read_attr(tag_open, "data-rows"))
+  if type(rows) ~= "table" then return nil end
+
+  -- Column descriptors. data-fields is typical; data-field-types and
+  -- data-columns also appear.
+  local cols = {}
+  local fields = decode_json_attr(read_attr(tag_open, "data-fields"))
+                  or decode_json_attr(read_attr(tag_open, "data-field-types"))
+                  or decode_json_attr(read_attr(tag_open, "data-columns"))
+  if type(fields) == "table" then
+    for _, f in ipairs(fields) do
+      if type(f) == "table" then
+        table.insert(cols, f.name or f[1] or "?")
+      elseif type(f) == "string" then
+        table.insert(cols, f)
+      end
+    end
+  end
+
+  if #cols == 0 and rows[1] then
+    for k, _ in pairs(rows[1]) do table.insert(cols, k) end
+    table.sort(cols)
+  end
+
+  return { rows = rows, cols = cols }
+end
+
+-- Shape 3: plain HTML <table>. Pandas' df.to_html() format.
+local function parse_html_table(html)
+  local table_html = html:match("<table[^>]*>(.-)</table>")
+  if not table_html then return nil end
+
+  -- Header cells: prefer <thead>'s <th>s if present.
+  local cols = {}
+  local thead = table_html:match("<thead[^>]*>(.-)</thead>") or table_html
+  for th in thead:gmatch("<th[^>]*>(.-)</th>") do
+    table.insert(cols, strip_tags(th))
+  end
+  -- Pandas prefixes a blank <th></th> for the row index column.
+  if #cols > 1 and cols[1] == "" then table.remove(cols, 1) end
+  if #cols == 0 then return nil end
+
+  -- Body rows. If no <tbody>, treat everything after the first </tr> (the
+  -- header row) as the body.
+  local tbody = table_html:match("<tbody[^>]*>(.-)</tbody>")
+  if not tbody then
+    local after_hdr = table_html:find("</tr>", 1, true)
+    tbody = after_hdr and table_html:sub(after_hdr + 5) or table_html
+  end
+
+  local rows = {}
+  for tr in tbody:gmatch("<tr[^>]*>(.-)</tr>") do
+    local cells = {}
+    for cell in tr:gmatch("<t[hd][^>]*>(.-)</t[hd]>") do
+      table.insert(cells, strip_tags(cell))
+    end
+    -- Pandas prefixes each row with a <th>N</th> index. If we got one
+    -- more cell than columns, the first one is the index — drop it.
+    if #cells == #cols + 1 then table.remove(cells, 1) end
+    if #cells == #cols then
+      local row = {}
+      for i, c in ipairs(cols) do row[c] = cells[i] end
+      table.insert(rows, row)
+    end
+  end
+
+  if #rows == 0 then return nil end
+  return { cols = cols, rows = rows }
+end
+
+-- Decide which parser applies to a text/html payload.
+local function extract_from_html(html)
+  if type(html) ~= "string" then return nil end
+  if html:find("<marimo%-table", 1) then
+    local df = parse_marimo_table(html)
+    if df and (#df.cols > 0 or #df.rows > 0) then return df end
+  end
+  if html:find("<table", 1) then
+    return parse_html_table(html)
+  end
+  return nil
+end
+
+-- Top-level extractor. Tries each known shape; returns the first match.
+local function extract_from_output(output)
+  if not output then return nil end
+  local mime = output.mimetype
+  local data = output.data
+
+  if mime == "application/vnd.dataresource+json" then
+    return parse_dataresource(data)
+  end
+  if mime == "text/html" and type(data) == "string" then
+    return extract_from_html(data)
+  end
+  if mime == "application/vnd.marimo+mime"
+      and type(data) == "table" and data.mimetype then
+    return extract_from_output({ mimetype = data.mimetype, data = data.data })
+  end
+  return nil
+end
+
+-- Expose extractors so output.lua can call them from render_html.
+M.extract_from_html = extract_from_html
+M.extract_from_output = extract_from_output
+M.parse_dataresource = parse_dataresource
+
+-- ── inline preview (used by output.lua for cell virt_lines) ──────────────
+--
+-- The shape mirrors what the panel uses: { cols = {...}, rows = {...} }.
+-- Row count is capped (5 by default) and we point the user at <leader>mD
+-- for the full view.
+
+local INLINE_MAX_ROWS = 5
+local INLINE_COL_CAP = 20
+
+function M.render_inline(df, opts)
+  opts = opts or {}
+  local max_rows = opts.max_rows or INLINE_MAX_ROWS
+  if not df or not df.cols or #df.cols == 0 then
+    return { { { "  [table]", "MarimoOutputText" } } }
+  end
+  if #df.rows == 0 then
+    return { { { "  [empty table — " .. #df.cols ..
+      " column" .. (#df.cols == 1 and "" or "s") .. "]", "MarimoOutputText" } } }
+  end
+
+  local widths = {}
+  for _, c in ipairs(df.cols) do widths[c] = math.max(#tostring(c), 4) end
+  for i = 1, math.min(max_rows, #df.rows) do
+    for _, c in ipairs(df.cols) do
+      local val = tostring(df.rows[i][c] or "")
+      if #val > widths[c] then widths[c] = math.min(#val, INLINE_COL_CAP) end
+    end
+  end
+
+  local lines = {}
+  -- Header row
+  local header = "  │"
+  for _, c in ipairs(df.cols) do
+    header = header .. string.format(" %-" .. widths[c] .. "s │",
+      tostring(c):sub(1, widths[c]))
+  end
+  table.insert(lines, { { header, "MarimoOutputText" } })
+
+  -- Separator
+  local sep = "  ├"
+  for _, c in ipairs(df.cols) do
+    sep = sep .. string.rep("─", widths[c] + 2) .. "┤"
+  end
+  table.insert(lines, { { sep, "MarimoOutputText" } })
+
+  local shown = math.min(max_rows, #df.rows)
+  for i = 1, shown do
+    local s = "  │"
+    for _, c in ipairs(df.cols) do
+      local v = tostring(df.rows[i][c] or ""):sub(1, widths[c])
+      s = s .. string.format(" %-" .. widths[c] .. "s │", v)
+    end
+    table.insert(lines, { { s, "MarimoOutputText" } })
+  end
+
+  if #df.rows > shown then
+    table.insert(lines, {
+      { "  … " .. (#df.rows - shown) .. " more rows · ", "Comment" },
+      { "<leader>mD", "MarimoMarkdownInlineCode" },
+      { " for full panel", "Comment" },
+    })
+  end
+  return lines
 end
 
 -- ── rendering ────────────────────────────────────────────────────────────
@@ -195,10 +417,13 @@ end
 -- ── open / close ─────────────────────────────────────────────────────────
 
 function M.open_for_cell(nb, cell)
-  local df = extract_dataresource(cell)
+  local df = cell and extract_from_output(cell.output)
   if not df or not df.cols or #df.cols == 0 then
-    vim.notify("[neo-marimo] No DataFrame output on the cell under the cursor.",
-      vim.log.levels.WARN)
+    vim.notify(
+      "[neo-marimo] No DataFrame output on the cell under the cursor. " ..
+        "(run :MarimoInspectOutput to see what marimo sent)",
+      vim.log.levels.WARN
+    )
     return
   end
 

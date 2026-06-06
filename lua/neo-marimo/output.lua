@@ -6,6 +6,7 @@ local notebook_mod = require("neo-marimo.notebook")
 local markdown = require("neo-marimo.markdown")
 local image = require("neo-marimo.image")
 local widgets = require("neo-marimo.widgets")
+local dataframe = require("neo-marimo.dataframe")
 
 local M = {}
 
@@ -93,13 +94,23 @@ local function render_html(data)
   -- Routing pass for HTML payloads. Marimo wraps a lot of different things
   -- in text/html — we pick the best renderer based on the contents:
   --
-  --   1. Layout primitive (hstack/vstack/tabs/accordion) → widgets module
-  --   2. Marimo UI element (slider, button, …)           → widgets module
-  --   3. Markdown wrapper (mo.md output)                 → markdown module
-  --   4. Embedded data:image/...;base64 (matplotlib)     → image module
-  --   5. Embedded <img src="..."> or <svg>               → placeholder line
-  --   6. Anything else                                    → strip tags fallback
+  --   1. Table / DataFrame  (<marimo-table>, <table>)    → dataframe inline
+  --   2. Layout primitive   (hstack/vstack/tabs/accordion) → widgets module
+  --   3. Marimo UI element  (slider, button, …)           → widgets module
+  --   4. Markdown wrapper   (mo.md output)                → markdown module
+  --   5. Embedded data:image/...;base64 (matplotlib)      → image module
+  --   6. Embedded <img src="..."> or <svg>                → placeholder line
+  --   7. Anything else                                    → strip tags fallback
+  --
+  -- Table check goes first because marimo wraps pandas/polars DataFrames as
+  -- `mo.ui.table(df)` automatically — without this special-case, the widget
+  -- pass below would catch `<marimo-table>` and render it as an unknown
+  -- widget placeholder ("[table]"), and `<leader>mD` would never see the
+  -- data either.
   if type(data) ~= "string" then return {} end
+
+  local df = dataframe.extract_from_html(data)
+  if df then return dataframe.render_inline(df) end
 
   if widgets.has_layout(data) or widgets.has_widgets(data) then
     return widgets.render(data, _render_ctx.bufnr, _render_ctx.cell_id)
@@ -136,74 +147,11 @@ local function render_html(data)
 end
 
 local function render_dataresource(data)
-  -- data is {schema: {...}, data: [{col: val, ...}]}
-  if type(data) ~= "table" or not data.data then
-    return { { { "  [table]", "MarimoOutputText" } } }
-  end
-
-  local rows = data.data
-  if #rows == 0 then
-    return { { { "  [empty table]", "MarimoOutputText" } } }
-  end
-
-  -- Collect columns from first row
-  local cols = {}
-  for k, _ in pairs(rows[1]) do
-    table.insert(cols, k)
-  end
-  table.sort(cols)
-
-  -- Build header
-  local col_widths = {}
-  for _, col in ipairs(cols) do
-    col_widths[col] = math.max(#col, 4)
-  end
-  -- Measure data widths (cap mirrors the inline row cap below)
-  for i = 1, math.min(MAX_DATAFRAME_INLINE_ROWS, #rows) do
-    for _, col in ipairs(cols) do
-      local val = tostring(rows[i][col] or "")
-      if #val > col_widths[col] then
-        col_widths[col] = math.min(#val, 20)
-      end
-    end
-  end
-
-  local lines = {}
-  -- Header row
-  local header = "  │"
-  for _, col in ipairs(cols) do
-    local cell_str = col:sub(1, col_widths[col])
-    header = header .. string.format(" %-" .. col_widths[col] .. "s │", cell_str)
-  end
-  table.insert(lines, { { header, "MarimoOutputText" } })
-
-  -- Separator
-  local sep = "  ├"
-  for _, col in ipairs(cols) do
-    sep = sep .. string.rep("─", col_widths[col] + 2) .. "┤"
-  end
-  table.insert(lines, { { sep, "MarimoOutputText" } })
-
-  -- Data rows (capped — full table available via <leader>mD panel)
-  local shown = math.min(MAX_DATAFRAME_INLINE_ROWS, #rows)
-  for i = 1, shown do
-    local row_str = "  │"
-    for _, col in ipairs(cols) do
-      local val = tostring(rows[i][col] or ""):sub(1, col_widths[col])
-      row_str = row_str .. string.format(" %-" .. col_widths[col] .. "s │", val)
-    end
-    table.insert(lines, { { row_str, "MarimoOutputText" } })
-  end
-
-  if #rows > shown then
-    table.insert(lines, {
-      { "  … " .. (#rows - shown) .. " more rows · ", "Comment" },
-      { "<leader>mD", "MarimoMarkdownInlineCode" },
-      { " for full panel", "Comment" },
-    })
-  end
-
-  return lines
+  -- Delegate to dataframe.lua so the inline preview and the side panel
+  -- share one extractor and one renderer — keeps column widths, sort
+  -- arrow placement, and the "<leader>mD for full panel" hint in sync.
+  local df = dataframe.parse_dataresource(data)
+  return dataframe.render_inline(df, { max_rows = MAX_DATAFRAME_INLINE_ROWS })
 end
 
 local function render_image(data, _opts, mime)
@@ -224,7 +172,13 @@ local function render_svg(data)
 end
 
 local function render_markdown_mime(data)
-  return require("neo-marimo.markdown").render_markdown_source(data)
+  -- markdown.render auto-detects HTML wrappers (`<span class="markdown
+  -- prose">`) and unwraps them, then renders. Routing through `render`
+  -- rather than `render_markdown_source` is what makes mimetype
+  -- text/markdown work when marimo serializes mo.md() output as
+  -- pre-rendered HTML wearing a text/markdown sticker — observed in
+  -- marimo ≥ 0.19.
+  return require("neo-marimo.markdown").render(data)
 end
 
 local function render_marimo_mime(data)
@@ -437,8 +391,12 @@ function M.handle_cell_op(bufnr, nb, msg)
     end
   end
 
-  -- Update output (only replace if a new output is provided)
+  -- Update output (only replace if a new output is provided). A fresh
+  -- output also resets any picker-set value overrides for the cell —
+  -- the new HTML carries authoritative initial-values, and the user's
+  -- prior interaction is no longer the source of truth.
   if msg.output then
+    widgets.clear_overrides_for_cell(bufnr, cell.id)
     cell.output = msg.output
   end
 

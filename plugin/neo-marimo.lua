@@ -345,6 +345,56 @@ vim.api.nvim_create_user_command("MarimoDataFramePanel", function()
   require("neo-marimo.dataframe").open_at_cursor()
 end, { desc = "Open the full DataFrame side-panel for the cell under cursor" })
 
+-- Diagnostic: dump the cell-under-cursor's output mimetype + first 1.5 KB
+-- of its payload plus any widgets we parsed out. Use this when output looks
+-- wrong ("why is my mo.md cell rendering as raw HTML?") — paste the buffer
+-- contents back so the renderer routing can be matched against the actual
+-- bytes marimo sent.
+vim.api.nvim_create_user_command("MarimoInspectOutput", function()
+  local marimo = require("neo-marimo")
+  local nb = marimo.current_notebook()
+  if not nb then
+    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    return
+  end
+  local row = vim.api.nvim_win_get_cursor(0)[1] - 1
+  local cell = require("neo-marimo.notebook").get_cell_at_row(nb, row)
+  if not cell then
+    vim.notify("[neo-marimo] Cursor is not over a cell.", vim.log.levels.WARN)
+    return
+  end
+
+  local widgets = require("neo-marimo.widgets")
+  local info = {
+    cell = {
+      id = cell.id,
+      name = cell.name,
+      index = cell.index,
+      type = cell.type,
+      status = cell.status,
+      has_run = cell._has_run == true,
+    },
+    output = cell.output and {
+      mimetype = cell.output.mimetype,
+      data_type = type(cell.output.data),
+      data_len = type(cell.output.data) == "string" and #cell.output.data or nil,
+      data_sample = type(cell.output.data) == "string"
+        and cell.output.data:sub(1, 1500) or cell.output.data,
+    } or "<no output>",
+    console_lines = cell.console and #cell.console or 0,
+    widgets = widgets.list_for_cell(nb.bufnr, cell.id),
+  }
+
+  vim.cmd("botright new")
+  local buf = vim.api.nvim_get_current_buf()
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false,
+    vim.split(vim.inspect(info), "\n", { plain = true }))
+  vim.api.nvim_set_option_value("buftype", "nofile", { buf = buf })
+  vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
+  vim.api.nvim_set_option_value("filetype", "lua", { buf = buf })
+  vim.api.nvim_buf_set_name(buf, "marimo://inspect/cell-" .. tostring(cell.id))
+end, { desc = "Inspect cell output mimetype + payload + parsed widgets" })
+
 -- Phase 8.3: open the widget picker for the cell under the cursor. Lists
 -- every UI element marimo emitted in the cell's last output and lets the
 -- user adjust its value, which POSTs to /api/kernel/set_ui_element_value
