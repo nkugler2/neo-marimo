@@ -72,6 +72,7 @@ function M.new_cell_below(bufnr, nb)
     -- Rebuild offsets from cell.code line counts. Avoids the manual shift
     -- math (which only added +1 to cells past idx+1) silently compounding
     -- with any pre-existing drift.
+    notebook.prune_phantoms(nb)
     notebook.recompute_offsets(nb)
 
     buffer.render_all_borders(bufnr, nb)
@@ -93,6 +94,7 @@ function M.new_cell_above(bufnr, nb)
     vim.api.nvim_buf_set_lines(bufnr, insert_row, insert_row, false, { "" })
 
     new_cell = notebook.insert_cell_before(nb, idx)
+    notebook.prune_phantoms(nb)
     notebook.recompute_offsets(nb)
 
     buffer.render_all_borders(bufnr, nb)

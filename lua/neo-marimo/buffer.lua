@@ -317,9 +317,12 @@ function M.on_bytes_changed(bufnr, nb, changes)
       if idx then
         local cell = nb.cells[idx]
         cell.end_row = cell.end_row + delta
-        if cell.end_row < cell.start_row then
-          cell.end_row = cell.start_row
-        end
+        -- Don't clamp end_row >= start_row here. A negative range is the
+        -- signal that the cell lost its last buffer row (typical: `dd` on
+        -- a 1-line empty cell); prune_phantoms below removes it. The old
+        -- clamp left a zombie cell claiming a row the buffer no longer
+        -- had, which then visually stacked with whichever cell now
+        -- actually occupied that row.
         for j = idx + 1, #nb.cells do
           nb.cells[j].start_row = nb.cells[j].start_row + delta
           nb.cells[j].end_row = nb.cells[j].end_row + delta
@@ -327,6 +330,8 @@ function M.on_bytes_changed(bufnr, nb, changes)
       end
     end
   end
+
+  require("neo-marimo.notebook").prune_phantoms(nb)
 
   -- Refresh code text + cell-type detection from the new buffer state.
   M.sync_cells_from_buffer(nb)

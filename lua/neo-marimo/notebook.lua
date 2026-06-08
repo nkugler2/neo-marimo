@@ -133,6 +133,58 @@ function M.recompute_offsets(nb, line_counts)
   end
 end
 
+-- Drop cells that have no surviving buffer rows. Two shapes show up:
+--   1) end_row < start_row — the cell's range collapsed (e.g. `dd` on the
+--      only line of an empty cell, then the byte-tracker shifted neighbours
+--      up without removing this cell).
+--   2) start_row <= prev.end_row — the cell overlaps the previous cell.
+--      When two cells claim the same rows, the buffer only actually has one
+--      cell's worth of content there; the empty/phantom cell is the one to
+--      drop. If both are non-empty we leave them and let validate_offsets
+--      surface the problem instead of guessing.
+-- Returns the number of cells removed.
+function M.prune_phantoms(nb)
+  local removed = 0
+  local i = 1
+  while i <= #nb.cells do
+    local cell = nb.cells[i]
+    local kill = false
+    if cell.end_row < cell.start_row then
+      kill = true
+    elseif i > 1 then
+      local prev = nb.cells[i - 1]
+      if cell.start_row <= prev.end_row then
+        -- Overlap. Drop whichever side is empty; if both are empty drop
+        -- this one (arbitrary but deterministic); if both non-empty leave
+        -- them for the validator.
+        local cell_empty = (cell.code or "") == ""
+        local prev_empty = (prev.code or "") == ""
+        if cell_empty then
+          kill = true
+        elseif prev_empty then
+          nb.cell_by_id[prev.id] = nil
+          table.remove(nb.cells, i - 1)
+          removed = removed + 1
+          -- Don't increment i; the new cell at i is the one we just
+          -- looked at, and its prev is the new i-1.
+          for k, c in ipairs(nb.cells) do c.index = k end
+          goto continue
+        end
+      end
+    end
+    if kill then
+      nb.cell_by_id[cell.id] = nil
+      table.remove(nb.cells, i)
+      removed = removed + 1
+      for k, c in ipairs(nb.cells) do c.index = k end
+    else
+      i = i + 1
+    end
+    ::continue::
+  end
+  return removed
+end
+
 -- Walk nb.cells and check three invariants that, when violated, cause the
 -- "stacked borders / multiple `py #N` labels on the same row" visual bug:
 --   1) cells[1].start_row == 0
