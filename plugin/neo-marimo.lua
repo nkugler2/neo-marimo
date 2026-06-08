@@ -233,6 +233,40 @@ vim.api.nvim_create_user_command("MarimoServerList", function()
   open_server_list_window()
 end, { desc = "Show managed marimo servers and orphan processes (interactive)" })
 
+-- Validate that nb.cells[].start_row/end_row form a contiguous, non-overlapping
+-- cover of the buffer. When borders stack ("py #N" labels on the same row) or
+-- multiple "✓ ran" indicators appear on the same cell, run this to confirm
+-- whether the notebook's row bookkeeping has drifted from the buffer.
+vim.api.nvim_create_user_command("MarimoCheck", function()
+  local marimo = require("neo-marimo")
+  local nb = marimo.current_notebook()
+  if not nb then
+    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    return
+  end
+  local ok, errors = require("neo-marimo.notebook").validate_offsets(nb, nb.bufnr)
+  if ok then
+    vim.notify(string.format(
+      "[neo-marimo] cell offsets OK (%d cells, %d buffer lines)",
+      #nb.cells, vim.api.nvim_buf_line_count(nb.bufnr)),
+      vim.log.levels.INFO)
+    return
+  end
+  local lines = { string.format("[neo-marimo] offset corruption (%d issue(s)):", #errors) }
+  for _, e in ipairs(errors) do
+    table.insert(lines, "  - " .. e)
+  end
+  table.insert(lines, "")
+  table.insert(lines, "Cells:")
+  for i, c in ipairs(nb.cells) do
+    table.insert(lines, string.format(
+      "  [%d] id=%s  start_row=%d  end_row=%d  code_lines=%d",
+      i, tostring(c.id), c.start_row, c.end_row,
+      require("neo-marimo.cell").line_count(c)))
+  end
+  vim.notify(table.concat(lines, "\n"), vim.log.levels.WARN)
+end, { desc = "Validate notebook cell row offsets against buffer state" })
+
 vim.api.nvim_create_user_command("MarimoKillAll", function()
   local server = require("neo-marimo.server")
   local n = server.kill_all_system_marimo()

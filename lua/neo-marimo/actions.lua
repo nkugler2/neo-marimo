@@ -69,13 +69,10 @@ function M.new_cell_below(bufnr, nb)
     vim.api.nvim_buf_set_lines(bufnr, insert_row, insert_row, false, { "" })
 
     new_cell = notebook.insert_cell_after(nb, idx)
-    new_cell.start_row = insert_row
-    new_cell.end_row = insert_row
-
-    for i = idx + 2, #nb.cells do
-      nb.cells[i].start_row = nb.cells[i].start_row + 1
-      nb.cells[i].end_row = nb.cells[i].end_row + 1
-    end
+    -- Rebuild offsets from cell.code line counts. Avoids the manual shift
+    -- math (which only added +1 to cells past idx+1) silently compounding
+    -- with any pre-existing drift.
+    notebook.recompute_offsets(nb)
 
     buffer.render_all_borders(bufnr, nb)
   end)
@@ -96,13 +93,7 @@ function M.new_cell_above(bufnr, nb)
     vim.api.nvim_buf_set_lines(bufnr, insert_row, insert_row, false, { "" })
 
     new_cell = notebook.insert_cell_before(nb, idx)
-    new_cell.start_row = insert_row
-    new_cell.end_row = insert_row
-
-    for i = idx + 1, #nb.cells do
-      nb.cells[i].start_row = nb.cells[i].start_row + 1
-      nb.cells[i].end_row = nb.cells[i].end_row + 1
-    end
+    notebook.recompute_offsets(nb)
 
     buffer.render_all_borders(bufnr, nb)
   end)

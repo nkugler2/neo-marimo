@@ -295,26 +295,6 @@ local function cell_index_at_row(nb, row)
   return #nb.cells
 end
 
--- Pick the cell that should absorb a row-adding change at `row`. Identical
--- to cell_index_at_row except for the edge case where the cursor sits on
--- an empty new cell (one empty line) and the user pastes or opens a line
--- below: vim reports the inserted row at the *next* cell's start_row, so a
--- plain cell_index_at_row attributes the growth to the next cell and the
--- pasted content visually lands there. Detect that boundary and route the
--- delta back to the empty cell above so the pasted line ends up inside the
--- cell the user thinks they're in.
-local function cell_index_for_insert(nb, row)
-  local idx = cell_index_at_row(nb, row)
-  if not idx or idx <= 1 then return idx end
-  local cell = nb.cells[idx]
-  if row ~= cell.start_row then return idx end
-  local prev = nb.cells[idx - 1]
-  if prev.start_row == prev.end_row and (prev.code or "") == "" then
-    return idx - 1
-  end
-  return idx
-end
-
 -- Apply a list of byte-level changes (captured by nvim_buf_attach's
 -- on_bytes hook) to the notebook's cell row offsets, then re-sync code
 -- and re-render borders.
@@ -333,12 +313,7 @@ function M.on_bytes_changed(bufnr, nb, changes)
   for _, change in ipairs(changes) do
     local delta = change.delta
     if delta ~= 0 then
-      local idx
-      if delta > 0 then
-        idx = cell_index_for_insert(nb, change.start_row)
-      else
-        idx = cell_index_at_row(nb, change.start_row)
-      end
+      local idx = cell_index_at_row(nb, change.start_row)
       if idx then
         local cell = nb.cells[idx]
         cell.end_row = cell.end_row + delta

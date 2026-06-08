@@ -89,27 +89,26 @@ function M.setup(bufnr, nb)
       local cell = notebook.get_cell_at_row(nb, row)
       if not cell then return end
 
+      -- Mirror notebook.delete_cell's guard up here: if we'd refuse to
+      -- delete the only cell, also refuse to nuke its rows from the buffer.
+      -- The previous code ran set_lines first and only then asked the
+      -- notebook to drop the cell, which left the buffer empty while
+      -- nb.cells still held the now-rowless cell.
+      if #nb.cells <= 1 then
+        require("neo-marimo.utils").warn("Cannot delete the only cell in a notebook.")
+        return
+      end
+
       local idx = cell.index
-      local s = cell.start_row + 1  -- 1-indexed
-      local e = cell.end_row + 1    -- 1-indexed (inclusive)
-      local lc = e - s + 1
 
       buffer.with_suppressed_bytes(nb, function()
-        -- Drop the deleted cell's extmarks BEFORE removing the underlying
-        -- buffer rows. nvim_buf_set_lines moves any extmark anchored inside
-        -- the deleted range up to the previous row by default, so an output
-        -- extmark sitting on end_row (the "✓ ran" indicator, any inline
-        -- output, image placements, etc.) would otherwise migrate onto the
-        -- previous cell and visually stack on top of its existing output.
-        -- Borders get re-rendered wholesale by render_all_borders below, but
-        -- clearing the deleted cell's border marks here avoids a transient
-        -- duplicate (phantom "py #N" stub) being visible between the
-        -- nvim_buf_set_lines call and the re-render.
+        -- ns_output isn't wiped by render_all_borders (only ns_border is),
+        -- so a "✓ ran" indicator anchored at the deleted cell's end_row
+        -- would migrate onto the previous row when set_lines collapses the
+        -- range, stacking on top of the previous cell's indicator. Clear it
+        -- first.
         vim.api.nvim_buf_clear_namespace(
           bufnr, highlights.ns_output, cell.start_row, cell.end_row + 1
-        )
-        vim.api.nvim_buf_clear_namespace(
-          bufnr, highlights.ns_border, cell.start_row, cell.end_row + 1
         )
         widgets.clear_for_cell(bufnr, cell.id)
 
@@ -118,11 +117,13 @@ function M.setup(bufnr, nb)
 
         notebook.delete_cell(nb, idx)
 
-        -- Shift remaining cells up
-        for i = idx, #nb.cells do
-          nb.cells[i].start_row = nb.cells[i].start_row - lc
-          nb.cells[i].end_row = nb.cells[i].end_row - lc
-        end
+        -- Rebuild row offsets from each remaining cell's code length instead
+        -- of subtracting the deleted cell's line count from subsequent cells.
+        -- The manual shift compounded any pre-existing offset drift (e.g.
+        -- from a misattributed on_bytes delta) into overlapping ranges, which
+        -- is what produced the "5 cells stacked on 2 rows" corruption that
+        -- repeated deletes exhibited.
+        notebook.recompute_offsets(nb)
 
         buffer.render_all_borders(bufnr, nb)
       end)

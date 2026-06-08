@@ -123,6 +123,7 @@ end
 -- Recompute start_row and end_row for all cells based on current buffer state.
 -- `line_counts` is an array matching nb.cells with the current line count per cell.
 function M.recompute_offsets(nb, line_counts)
+  line_counts = line_counts or {}
   local row = 0
   for i, c in ipairs(nb.cells) do
     local lc = line_counts[i] or cell_mod.line_count(c)
@@ -130,6 +131,56 @@ function M.recompute_offsets(nb, line_counts)
     c.end_row = row + lc - 1
     row = c.end_row + 1
   end
+end
+
+-- Walk nb.cells and check three invariants that, when violated, cause the
+-- "stacked borders / multiple `py #N` labels on the same row" visual bug:
+--   1) cells[1].start_row == 0
+--   2) cells[i].end_row + 1 == cells[i+1].start_row (no overlap, no gap)
+--   3) sum of cell line counts == nvim_buf_line_count(bufnr)
+-- Returns `ok, errors` where errors is a list of human-readable strings.
+-- `bufnr` is optional; if omitted, invariant (3) is skipped.
+function M.validate_offsets(nb, bufnr)
+  local errors = {}
+
+  if #nb.cells == 0 then
+    return true, errors
+  end
+
+  if nb.cells[1].start_row ~= 0 then
+    table.insert(errors, string.format(
+      "cells[1].start_row = %d, expected 0",
+      nb.cells[1].start_row))
+  end
+
+  for i, c in ipairs(nb.cells) do
+    if c.end_row < c.start_row then
+      table.insert(errors, string.format(
+        "cell[%d] (id=%s): end_row=%d < start_row=%d",
+        i, tostring(c.id), c.end_row, c.start_row))
+    end
+    if i < #nb.cells then
+      local next_c = nb.cells[i + 1]
+      if c.end_row + 1 ~= next_c.start_row then
+        table.insert(errors, string.format(
+          "gap/overlap between cell[%d] (end_row=%d) and cell[%d] (start_row=%d)",
+          i, c.end_row, i + 1, next_c.start_row))
+      end
+    end
+  end
+
+  if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+    local buf_lines = vim.api.nvim_buf_line_count(bufnr)
+    local last = nb.cells[#nb.cells]
+    local cells_lines = last.end_row + 1
+    if cells_lines ~= buf_lines then
+      table.insert(errors, string.format(
+        "cells cover %d rows but buffer has %d lines",
+        cells_lines, buf_lines))
+    end
+  end
+
+  return #errors == 0, errors
 end
 
 return M
