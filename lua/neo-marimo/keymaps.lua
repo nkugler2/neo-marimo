@@ -7,6 +7,7 @@ local actions = require("neo-marimo.actions")
 local lsp = require("neo-marimo.lsp")
 local dataframe = require("neo-marimo.dataframe")
 local widgets = require("neo-marimo.widgets")
+local highlights = require("neo-marimo.highlights")
 
 local M = {}
 
@@ -94,6 +95,24 @@ function M.setup(bufnr, nb)
       local lc = e - s + 1
 
       buffer.with_suppressed_bytes(nb, function()
+        -- Drop the deleted cell's extmarks BEFORE removing the underlying
+        -- buffer rows. nvim_buf_set_lines moves any extmark anchored inside
+        -- the deleted range up to the previous row by default, so an output
+        -- extmark sitting on end_row (the "✓ ran" indicator, any inline
+        -- output, image placements, etc.) would otherwise migrate onto the
+        -- previous cell and visually stack on top of its existing output.
+        -- Borders get re-rendered wholesale by render_all_borders below, but
+        -- clearing the deleted cell's border marks here avoids a transient
+        -- duplicate (phantom "py #N" stub) being visible between the
+        -- nvim_buf_set_lines call and the re-render.
+        vim.api.nvim_buf_clear_namespace(
+          bufnr, highlights.ns_output, cell.start_row, cell.end_row + 1
+        )
+        vim.api.nvim_buf_clear_namespace(
+          bufnr, highlights.ns_border, cell.start_row, cell.end_row + 1
+        )
+        widgets.clear_for_cell(bufnr, cell.id)
+
         -- Remove lines from buffer (0-indexed start, exclusive end)
         vim.api.nvim_buf_set_lines(bufnr, cell.start_row, cell.end_row + 1, false, {})
 
