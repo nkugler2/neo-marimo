@@ -307,30 +307,79 @@ end
 --
 -- Walking changes in order matters: each delta shifts subsequent cells,
 -- so later changes need to be located against the updated offsets.
+--
+-- Cross-cell deletes (delta < 0 spanning multiple cells) need special care:
+-- the simple "subtract delta from the target cell, shift the rest" model
+-- over-shifts subsequent cells by the portion of the delete that they
+-- themselves absorbed, producing overlapping ranges. We cascade the
+-- deletion through cells until the row count is consumed, then apply a
+-- uniform shift to the cells past the deleted range.
 function M.on_bytes_changed(bufnr, nb, changes)
   if not vim.api.nvim_buf_is_valid(bufnr) then return end
 
   for _, change in ipairs(changes) do
     local delta = change.delta
-    if delta ~= 0 then
+    if delta == 0 then
+      -- nothing to do
+    elseif delta > 0 then
+      -- Pure insertion: rows added at change.start_row stay in one cell.
       local idx = cell_index_at_row(nb, change.start_row)
       if idx then
         local cell = nb.cells[idx]
         cell.end_row = cell.end_row + delta
-        -- Don't clamp end_row >= start_row here. A negative range is the
-        -- signal that the cell lost its last buffer row (typical: `dd` on
-        -- a 1-line empty cell); prune_phantoms below removes it. The old
-        -- clamp left a zombie cell claiming a row the buffer no longer
-        -- had, which then visually stacked with whichever cell now
-        -- actually occupied that row.
         for j = idx + 1, #nb.cells do
           nb.cells[j].start_row = nb.cells[j].start_row + delta
           nb.cells[j].end_row = nb.cells[j].end_row + delta
         end
       end
+    else
+      -- Deletion of `-delta` rows starting at change.start_row. The rows
+      -- may span several cells. Walk forward, consuming rows from each
+      -- cell until the delete is exhausted, then apply a uniform shift
+      -- to the cells past the deleted range.
+      local idx = cell_index_at_row(nb, change.start_row)
+      if idx then
+        local remaining = -delta  -- positive count of rows to consume
+
+        -- First cell: rows lost = min(end_row, start_row + remaining - 1)
+        --                       - change.start_row + 1
+        local first = nb.cells[idx]
+        local rows_in_first =
+          math.min(first.end_row, change.start_row + remaining - 1)
+          - change.start_row + 1
+        if rows_in_first < 0 then rows_in_first = 0 end
+        first.end_row = first.end_row - rows_in_first
+        remaining = remaining - rows_in_first
+
+        -- Cascade through following cells until remaining hits 0.
+        local j = idx + 1
+        while remaining > 0 and j <= #nb.cells do
+          local c = nb.cells[j]
+          local line_count = c.end_row - c.start_row + 1
+          local consumed = math.min(remaining, line_count)
+          -- This cell shifts left by the rows consumed BEFORE it
+          -- (i.e. -delta - remaining), and its end shrinks by `consumed`.
+          local shift_before = -delta - remaining
+          c.start_row = c.start_row - shift_before
+          c.end_row = c.end_row - shift_before - consumed
+          remaining = remaining - consumed
+          j = j + 1
+        end
+
+        -- Cells past the deletion shift uniformly by the full delta.
+        while j <= #nb.cells do
+          nb.cells[j].start_row = nb.cells[j].start_row + delta
+          nb.cells[j].end_row = nb.cells[j].end_row + delta
+          j = j + 1
+        end
+      end
     end
   end
 
+  -- Negative ranges (end < start) on cells fully consumed by a cross-cell
+  -- delete are intentional — prune_phantoms below removes them. The old
+  -- clamp left zombie cells claiming rows the buffer no longer had, which
+  -- visually stacked with whichever cell now actually occupied that row.
   require("neo-marimo.notebook").prune_phantoms(nb)
 
   -- Refresh code text + cell-type detection from the new buffer state.
