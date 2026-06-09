@@ -108,13 +108,17 @@ function M.write_to_file(nb)
   -- Sync cell code from buffer content
   buffer.sync_cells_from_buffer(nb)
 
-  -- Build cell list for the bridge
+  -- Build cell list for the bridge. The `id` field rides through so the
+  -- bridge can emit a `# id: XXXX` comment above each @app.cell —
+  -- subsequent parses pick the same id back up so a reload-from-disk
+  -- doesn't orphan in-flight cell-op messages (Phase 7.5.7).
   local cells = {}
   for _, cell in ipairs(nb.cells) do
     table.insert(cells, {
       name = cell.name,
       code = cell.code,
       options = cell.options or {},
+      id = cell.id,
     })
   end
 

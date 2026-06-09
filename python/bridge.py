@@ -8,8 +8,62 @@ Usage:
   bridge.py check               -> stdout: JSON {ok, python_version, marimo_version}
 """
 import json
+import re
 import sys
 from pathlib import Path
+
+
+# Stable cell-id comments. The Lua side stores per-cell `id` strings and
+# we round-trip them through the file via `# id: XXXX\n@app.cell` so a
+# reload from disk doesn't mint fresh ids and orphan in-flight cell-op
+# messages (Phase 7.5.7). Matches the 4-letter random shape used by
+# utils.generate_cell_id() but is tolerant of any [A-Za-z0-9_]+ ids.
+ID_COMMENT_RE = re.compile(r"^#\s*id:\s*([A-Za-z0-9_]+)\s*$")
+
+
+def extract_cell_ids(content: str) -> list:
+    """Walk file content and return a list (one entry per cell) of stable
+    cell ids parsed from `# id: XXXX` comments immediately preceding each
+    `@app.cell` line. Cells without a preceding id comment get None and
+    will be minted fresh on the Lua side.
+    """
+    ids = []
+    pending = None
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue  # blank lines preserve the pending id binding
+        m = ID_COMMENT_RE.match(stripped)
+        if m:
+            pending = m.group(1)
+        elif stripped.startswith("@app.cell"):
+            ids.append(pending)
+            pending = None
+        else:
+            # Any other content breaks the id-comment → @app.cell binding,
+            # so a stray comment further up doesn't get glued onto the
+            # next cell down.
+            pending = None
+    return ids
+
+
+def inject_cell_ids(content: str, ids: list) -> str:
+    """Insert `# id: XXXX` comments before each `@app.cell` line. Uses the
+    decorator's own indentation so the comment lines up. Cells whose id
+    is None or empty are left alone (parse will mint one next read).
+    """
+    out_lines = []
+    cell_idx = 0
+    for line in content.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if stripped.startswith("@app.cell") and cell_idx < len(ids):
+            cid = ids[cell_idx]
+            if cid:
+                indent = line[: len(line) - len(stripped)]
+                out_lines.append(f"{indent}# id: {cid}\n")
+            cell_idx += 1
+        out_lines.append(line)
+    return "".join(out_lines)
 
 
 def cmd_check() -> None:
@@ -44,13 +98,18 @@ def cmd_parse(filepath: str) -> None:
         json.dump({"error": "Empty file", "cells": [], "valid": False, "app_options": {}}, sys.stdout)
         return
 
+    ids = extract_cell_ids(content)
+
     cells = []
-    for cell in result.cells:
-        cells.append({
+    for i, cell in enumerate(result.cells):
+        entry = {
             "name": cell.name,
             "code": cell.code,
             "options": cell.options,
-        })
+        }
+        if i < len(ids) and ids[i]:
+            entry["id"] = ids[i]
+        cells.append(entry)
 
     json.dump({
         "cells": cells,
@@ -82,6 +141,7 @@ def cmd_generate() -> None:
     codes = [c["code"] for c in cells]
     names = [c.get("name", "_") for c in cells]
     cell_configs = [CellConfig.from_dict(_opts(c), warn=False) for c in cells]
+    ids = [c.get("id") for c in cells]
 
     header_comments = get_header_comments(filepath)
 
@@ -91,6 +151,14 @@ def cmd_generate() -> None:
         cell_configs,
         header_comments=header_comments,
     )
+
+    # Inject `# id: XXXX` comments before each @app.cell so a subsequent
+    # parse can recover the original ids and avoid the "cell-op for unknown
+    # cell" warnings that fire after a reload-from-disk replaces our local
+    # ids with freshly-minted ones (Phase 7.5.7).
+    if any(ids):
+        contents = inject_cell_ids(contents, ids)
+
     sys.stdout.write(contents)
 
 
