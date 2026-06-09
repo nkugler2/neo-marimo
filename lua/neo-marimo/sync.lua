@@ -73,6 +73,35 @@ function M.is_writing(nb)
   return (nb._suppress_watcher or 0) > 0
 end
 
+-- Ring of SHA256 hashes of every file payload we've written in the
+-- recent past. Backs the file-watcher's "is this change ours echoing
+-- back through marimo's --watch?" check (Phase 7.5.8). Bounded so a
+-- pathological save loop can't grow the list without limit.
+local RECENT_WRITES_CAP = 16
+
+local function record_write_hash(nb, content)
+  if not content then return end
+  nb._recent_write_hashes = nb._recent_write_hashes or {}
+  local hash = vim.fn.sha256(content)
+  table.insert(nb._recent_write_hashes, 1, hash)
+  while #nb._recent_write_hashes > RECENT_WRITES_CAP do
+    table.remove(nb._recent_write_hashes)
+  end
+end
+
+-- Returns true if the given file content matches the hash of any of the
+-- last few writes we performed. Used by the watcher to short-circuit
+-- prompts when marimo's --watch re-emits our own file after a dependent
+-- cell run.
+function M.matches_recent_write(nb, content)
+  if not content or not nb._recent_write_hashes then return false end
+  local hash = vim.fn.sha256(content)
+  for _, h in ipairs(nb._recent_write_hashes) do
+    if h == hash then return true end
+  end
+  return false
+end
+
 -- Write the notebook state back to the .py file on disk.
 -- Called from BufWriteCmd.
 function M.write_to_file(nb)
@@ -140,6 +169,18 @@ function M.write_to_file(nb)
   if not ok then
     utils.error("Failed to write notebook: " .. tostring(err))
     return false
+  end
+
+  -- Hash the bytes that actually landed on disk so the file-watcher can
+  -- distinguish our own write echoing back (through marimo --watch's
+  -- dependent-cell rewrite) from a genuinely external edit.
+  do
+    local f = io.open(nb.filepath, "rb")
+    if f then
+      local content = f:read("*a")
+      f:close()
+      record_write_hash(nb, content)
+    end
   end
 
   -- Mark buffer as unmodified

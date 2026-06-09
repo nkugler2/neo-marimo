@@ -272,6 +272,17 @@ function M.attach(source_bufnr)
       if sync.is_writing(nb) then return end
       if not vim.api.nvim_buf_is_valid(nb_bufnr) then return end
 
+      -- Hash the file on disk. If it matches one of our recent writes
+      -- this is our own change echoing back (e.g. marimo --watch
+      -- rewriting the file after a dependent cell re-ran). Skip the
+      -- prompt and the reparse entirely.
+      local f = io.open(filepath, "rb")
+      if f then
+        local content = f:read("*a")
+        f:close()
+        if sync.matches_recent_write(nb, content) then return end
+      end
+
       -- Re-parse from disk, then patch the buffer with the delta.
       local ok, data = pcall(parser.parse_file, filepath, config.options.python_path)
       if not ok or not data or not data.cells then return end
