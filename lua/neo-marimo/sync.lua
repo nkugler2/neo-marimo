@@ -285,10 +285,14 @@ function M.apply_remote_changes(nb, new_cells_data)
   buffer.with_suppressed_bytes(nb, function()
     vim.api.nvim_set_option_value("modifiable", true, { buf = bufnr })
 
-    -- Walk front-to-back. Each replacement shifts subsequent cells by
-    -- (#new_lines - #old_lines); we propagate the delta forward as we
-    -- go so each cell's start_row/end_row stays accurate for the next
-    -- nvim_buf_set_lines call.
+    -- Walk front-to-back. After each replacement we recompute the offsets
+    -- of every cell from their cell.code line counts. The cells we haven't
+    -- patched yet still hold their original code (matching the rows they
+    -- already occupy in the buffer), so the rebuild gives them the right
+    -- new start/end for the next iteration's set_lines call. Replaces the
+    -- old per-iteration manual shift, which had the same compounding-drift
+    -- potential as the delete/insert paths and only ever set
+    -- start_row/end_row by ±delta instead of from the source of truth.
     for i, new in ipairs(new_cells_data) do
       local cell = nb.cells[i]
       local new_code = new.code or ""
@@ -300,19 +304,12 @@ function M.apply_remote_changes(nb, new_cells_data)
           bufnr, cell.start_row, cell.end_row + 1, false, new_lines
         )
 
-        local old_count = cell.end_row - cell.start_row + 1
-        local delta = #new_lines - old_count
-
         cell.code = new_code
         if new.name then cell.name = new.name end
         if new.options then cell.options = new.options end
         cell.type = cell_mod.detect_type(cell.code)
-        cell.end_row = cell.start_row + #new_lines - 1
 
-        for j = i + 1, #nb.cells do
-          nb.cells[j].start_row = nb.cells[j].start_row + delta
-          nb.cells[j].end_row = nb.cells[j].end_row + delta
-        end
+        notebook.recompute_offsets(nb)
       end
     end
 
