@@ -117,18 +117,17 @@ function M.setup(bufnr, nb)
 
         notebook.delete_cell(nb, idx)
 
-        -- Drop any phantom cell that survived a prior bad state (e.g. a
-        -- pre-existing 1-line empty cell whose row was reclaimed by an
-        -- on_bytes delete before that path learned to remove it). Runs
-        -- before recompute so the rebuilt offsets reflect only real cells.
-        notebook.prune_phantoms(nb)
-
         -- Rebuild row offsets from each remaining cell's code length instead
         -- of subtracting the deleted cell's line count from subsequent cells.
         -- The manual shift compounded any pre-existing offset drift (e.g.
         -- from a misattributed on_bytes delta) into overlapping ranges, which
         -- is what produced the "5 cells stacked on 2 rows" corruption that
         -- repeated deletes exhibited.
+        --
+        -- prune_phantoms is intentionally NOT called here. on_bytes_changed
+        -- is the only path that can produce phantoms (post-byte-delta
+        -- collapses); the action paths drive offsets directly so calling
+        -- prune here would just risk dropping the cell we want to keep.
         notebook.recompute_offsets(nb)
 
         buffer.render_all_borders(bufnr, nb)

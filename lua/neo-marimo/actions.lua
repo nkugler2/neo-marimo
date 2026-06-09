@@ -72,7 +72,11 @@ function M.new_cell_below(bufnr, nb)
     -- Rebuild offsets from cell.code line counts. Avoids the manual shift
     -- math (which only added +1 to cells past idx+1) silently compounding
     -- with any pre-existing drift.
-    notebook.prune_phantoms(nb)
+    --
+    -- Do NOT call prune_phantoms here: the just-inserted cell defaults to
+    -- start_row=0/end_row=0 (cell.lua), so prune_phantoms would see it
+    -- "overlap" whatever cell already lives at row 0 and remove it as the
+    -- empty overlapper. recompute_offsets sets the right rows next.
     notebook.recompute_offsets(nb)
 
     buffer.render_all_borders(bufnr, nb)
@@ -94,7 +98,8 @@ function M.new_cell_above(bufnr, nb)
     vim.api.nvim_buf_set_lines(bufnr, insert_row, insert_row, false, { "" })
 
     new_cell = notebook.insert_cell_before(nb, idx)
-    notebook.prune_phantoms(nb)
+    -- See new_cell_below: prune_phantoms here would discard the fresh
+    -- cell because of its 0/0 default offsets.
     notebook.recompute_offsets(nb)
 
     buffer.render_all_borders(bufnr, nb)
