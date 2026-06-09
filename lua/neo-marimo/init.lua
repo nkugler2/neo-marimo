@@ -162,7 +162,23 @@ function M.attach(source_bufnr)
     if #pending_changes == 0 then return end
     local changes = pending_changes
     pending_changes = {}
-    buffer.on_bytes_changed(nb_bufnr, nb, changes)
+
+    -- Catch `u` after `<leader>md`: the trashed cell snapshot is matched
+    -- against the +N insertion vim just replayed. Restoring sets nb.cells
+    -- back to its pre-delete shape; any change consumed here is dropped
+    -- from the batch so on_bytes_changed doesn't also try to absorb it.
+    local pre_count = #changes
+    changes = notebook.try_undo_restore(nb, changes)
+    local restored = pre_count > #changes
+
+    if #changes > 0 then
+      buffer.on_bytes_changed(nb_bufnr, nb, changes)
+    elseif restored then
+      -- We only restored cells; no remaining deltas to apply. Still need
+      -- to redraw borders so the brought-back cell paints, and refresh
+      -- the shadow LSP so completion sees the restored content.
+      buffer.render_all_borders(nb_bufnr, nb)
+    end
   end
   local flush_changes = utils.debounce(nb._flush_pending, 300)
 

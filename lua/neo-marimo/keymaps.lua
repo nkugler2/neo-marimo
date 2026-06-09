@@ -8,6 +8,34 @@ local lsp = require("neo-marimo.lsp")
 local dataframe = require("neo-marimo.dataframe")
 local widgets = require("neo-marimo.widgets")
 local highlights = require("neo-marimo.highlights")
+local cell_mod = require("neo-marimo.cell")
+
+-- Bounded ring of cells deleted via <leader>md. We hold onto enough state
+-- to splice them back into nb.cells when the user undoes the deletion —
+-- without this, vim restores the buffer rows but our model has lost the
+-- original cell's id/options/output, and the restored rows get glued onto
+-- whichever cell now occupies that position.
+local UNDO_TRASH_CAP = 5
+
+local function push_undo_trash(nb, cell)
+  nb._undo_trash = nb._undo_trash or {}
+  table.insert(nb._undo_trash, 1, {
+    id = cell.id,
+    name = cell.name,
+    code = cell.code,
+    options = cell.options,
+    status = cell.status,
+    output = cell.output,
+    console = cell.console,
+    type = cell.type,
+    start_row = cell.start_row,
+    line_count = cell_mod.line_count(cell),
+    trashed_at = vim.uv.hrtime() / 1e6,
+  })
+  while #nb._undo_trash > UNDO_TRASH_CAP do
+    table.remove(nb._undo_trash)
+  end
+end
 
 local M = {}
 
@@ -100,6 +128,12 @@ function M.setup(bufnr, nb)
       end
 
       local idx = cell.index
+
+      -- Snapshot the cell BEFORE we mutate the buffer so a subsequent `u`
+      -- can splice it back with its original id / options / cached output.
+      -- The matching happens in init.lua's flush_pending (the +N delta from
+      -- vim's restore is paired against this trash entry).
+      push_undo_trash(nb, cell)
 
       buffer.with_suppressed_bytes(nb, function()
         -- ns_output isn't wiped by render_all_borders (only ns_border is),

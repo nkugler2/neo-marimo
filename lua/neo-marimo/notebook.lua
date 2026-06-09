@@ -185,6 +185,72 @@ function M.prune_phantoms(nb)
   return removed
 end
 
+-- Try to match an on_bytes change set against a recently-trashed cell
+-- (`nb._undo_trash`, populated by the `<leader>md` handler). If the user
+-- just did `<leader>md` then `u`, vim restores the deleted rows and on_bytes
+-- fires with a single +N insertion at the same row the cell originally
+-- occupied. Splice the cell back into nb.cells with its original id and
+-- consume the matching change so on_bytes_changed doesn't double-count.
+--
+-- Returns the (possibly shortened) change list. The buffer state is already
+-- correct when this runs (vim restored it); only the model needs updating.
+function M.try_undo_restore(nb, changes)
+  if not nb._undo_trash or #nb._undo_trash == 0 then return changes end
+  if #changes == 0 then return changes end
+
+  local now = vim.uv.hrtime() / 1e6
+  local TTL = 60000
+  local cell_mod = require("neo-marimo.cell")
+  local filtered = {}
+
+  for _, change in ipairs(changes) do
+    local matched = false
+    if change.delta > 0 then
+      for ti, t in ipairs(nb._undo_trash) do
+        if (now - t.trashed_at) > TTL then
+          -- entry is too old; leave it for the LRU eviction below
+        elseif t.start_row == change.start_row
+            and t.line_count == change.delta then
+          -- delta is `new_end_row - old_end_row`; for an insertion of N
+          -- whole rows it equals N. line_count is the cell's prior row
+          -- count, which is exactly the number of rows vim re-inserts.
+          local restored = cell_mod.new({
+            id = t.id, name = t.name, code = t.code, options = t.options,
+          }, 0)
+          restored.status = t.status or "idle"
+          restored.output = t.output
+          restored.console = t.console
+          if t.type then restored.type = t.type end
+
+          local insert_idx = 1
+          for j, c in ipairs(nb.cells) do
+            if c.start_row >= t.start_row then break end
+            insert_idx = j + 1
+          end
+          table.insert(nb.cells, insert_idx, restored)
+          nb.cell_by_id[restored.id] = restored
+          for k, c in ipairs(nb.cells) do c.index = k end
+          M.recompute_offsets(nb)
+
+          table.remove(nb._undo_trash, ti)
+          matched = true
+          break
+        end
+      end
+    end
+    if not matched then table.insert(filtered, change) end
+  end
+
+  -- Drop expired trash so it can't shadow a future legitimate match.
+  for i = #nb._undo_trash, 1, -1 do
+    if (now - nb._undo_trash[i].trashed_at) > TTL then
+      table.remove(nb._undo_trash, i)
+    end
+  end
+
+  return filtered
+end
+
 -- Walk nb.cells and check three invariants that, when violated, cause the
 -- "stacked borders / multiple `py #N` labels on the same row" visual bug:
 --   1) cells[1].start_row == 0
