@@ -2,8 +2,48 @@ local buffer = require("neo-marimo.buffer")
 local parser = require("neo-marimo.parser")
 local utils = require("neo-marimo.utils")
 local config = require("neo-marimo.config")
+local notebook = require("neo-marimo.notebook")
 
 local M = {}
+
+-- Walk every cell, compare cell.code to the buffer slice the cell claims to
+-- cover. When they disagree, nb.cells has drifted from the buffer and any
+-- save would commit garbage to disk (cells split or merged across the wrong
+-- rows). Returns ok, errors. Called from write_to_file before we hand the
+-- cell list to the bridge.
+local function validate_cells_match_buffer(nb, bufnr)
+  local errors = {}
+  if not nb.cells or #nb.cells == 0 then return true, errors end
+
+  -- Structural cover check (start at 0, contiguous, last cell ends at last
+  -- buffer line). Catches the dominant drift shapes — overlapping cells,
+  -- gaps, off-by-N after a mis-attributed delete.
+  local ok, offset_errs = notebook.validate_offsets(nb, bufnr)
+  if not ok then
+    for _, e in ipairs(offset_errs) do
+      table.insert(errors, e)
+    end
+  end
+
+  -- Per-cell content check. Even when offsets look contiguous, the slice
+  -- they point at may not be what cell.code thinks it is (e.g. a missed
+  -- on_bytes flush or an undo that vim rewound but our model didn't).
+  for i, cell in ipairs(nb.cells) do
+    local s = cell.start_row
+    local e = cell.end_row + 1
+    if s >= 0 and e > s and e <= vim.api.nvim_buf_line_count(bufnr) then
+      local slice = vim.api.nvim_buf_get_lines(bufnr, s, e, false)
+      local slice_text = table.concat(slice, "\n")
+      if slice_text ~= (cell.code or "") then
+        table.insert(errors, string.format(
+          "cell[%d] (id=%s) code disagrees with buffer rows %d–%d",
+          i, tostring(cell.id), s, e - 1))
+      end
+    end
+  end
+
+  return #errors == 0, errors
+end
 
 -- Suppression window (ms) for the file watcher around our own writes.
 -- After we writefile() the .py both our local fs_event AND marimo's
@@ -46,6 +86,24 @@ function M.write_to_file(nb)
   -- :w fired right after typing would generate the .py from stale start_row/
   -- end_row values and split or merge lines across cell boundaries.
   if nb._flush_pending then nb._flush_pending() end
+
+  -- Refuse to save if nb.cells has drifted from the buffer. The flush above
+  -- normally leaves them in sync; if they're still out of sync something
+  -- (an unhandled undo, a sync-bypass, a runaway action) has corrupted the
+  -- model. Committing it to disk would silently overwrite the .py with the
+  -- wrong code split across the wrong cells.
+  local valid, errors = validate_cells_match_buffer(nb, bufnr)
+  if not valid then
+    local lines = {
+      "[neo-marimo] Refusing to save — cell offsets drifted from buffer:",
+    }
+    for _, e in ipairs(errors) do
+      table.insert(lines, "  - " .. e)
+    end
+    table.insert(lines, "Run :MarimoCheck for details or :MarimoReload to discard local drift.")
+    utils.error(table.concat(lines, "\n"))
+    return false
+  end
 
   -- Sync cell code from buffer content
   buffer.sync_cells_from_buffer(nb)
