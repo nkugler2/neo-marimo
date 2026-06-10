@@ -121,9 +121,11 @@ Scoping: `:enabled()` checks `^marimo://` on the current buffer name, so the sou
 
 ---
 
-## Phase 7.5 — Cell-tracking Stability (CRITICAL, blocks Phase 8+)
+## Phase 7.5 — Cell-tracking Stability ✅ SHIPPED (2026-06-10)
 
 **Goal:** End the cell-corruption symptoms that surfaced after the markdown/widget commits (diagnosed 2026-06-08 → 2026-06-09): stacked `py #N` borders after multi-delete, code rendered without any cell border after `<leader>mn`, undo causing content to be glued onto the wrong cells, and the .py file losing code on save. The file on disk is the durable source of truth — right now we're corrupting it via drift in `nb.cells[].start_row/end_row`.
+
+**Status:** Every subsection 7.5.1–7.5.8 shipped, including the architectural extmark migration (7.5.6) that the original plan flagged as optional. The integer `start_row/end_row` model has been fully replaced by extmark anchors; the only code that mutates those integers is now `sync_cells_from_extmarks` in `buffer.lua`, which reads them off the live extmarks. The manual shift math is gone from `actions.lua`, `keymaps.lua`, and `sync.lua`. See subsections below for commit hashes and the smart-p paste follow-up that emerged during 7.5.6 testing.
 
 ### Background
 
@@ -137,7 +139,7 @@ When any path drifts, all paths drift. `cell.code` is re-read from the buffer us
 
 The fixes below replace each path's hand-rolled math with code that derives offsets from a single source of truth, then add a save-time safety net so the next regression is loud instead of silent.
 
-### 7.5.1 Stop prune-on-create from killing fresh cells (ship first)
+### 7.5.1 Stop prune-on-create from killing fresh cells (ship first) ✅ `e0319ad`
 
 `new_cell_below` (`actions.lua:75`) and `new_cell_above` (`actions.lua:97`) call `notebook.prune_phantoms(nb)` *before* `notebook.recompute_offsets(nb)`. `cell_mod.new` (`cell.lua:68`) returns `start_row = 0, end_row = 0` by default, so the just-inserted cell appears to overlap with whatever cell already lives at row 0. `prune_phantoms` removes it as the "empty overlapper." The inserted blank line is left orphaned in the buffer; subsequent typing on that line gets absorbed by whichever neighbor cell is adjacent. The same inverted call order exists in the delete keymap (`keymaps.lua:120`).
 
@@ -148,7 +150,7 @@ The fixes below replace each path's hand-rolled math with code that derives offs
 - `<leader>md` deletes a cell; `:MarimoCheck` says OK.
 - Sequence of mn / type / mn / type leaves every line inside a bordered cell.
 
-### 7.5.2 Refuse to save when nb.cells doesn't match the buffer
+### 7.5.2 Refuse to save when nb.cells doesn't match the buffer ✅ `c1b90c5`
 
 `sync.write_to_file` writes the .py from `nb.cells[].code`. If `nb.cells` drifted away from the buffer, save commits the drift to disk. There's currently no check.
 
@@ -158,7 +160,7 @@ Add a pre-save validator in the `BufWriteCmd` handler (`init.lua:138`): walk eac
 - Manually corrupt `cell.code` via Lua. `:w`. Save is aborted with a clear message.
 - Normal save after typing in cells succeeds silently.
 
-### 7.5.3 Make on_bytes_changed handle cross-cell deletes correctly
+### 7.5.3 Make on_bytes_changed handle cross-cell deletes correctly ✅ `84b1a79`
 
 `on_bytes_changed` (`buffer.lua:310`) assumes each delta affects exactly one cell. A multi-line delete that spans cells produces wrong offsets: the target cell's `end_row` shrinks past `start_row` (now prune-removed), but the shift loop applies the *full* delta to all subsequent cells instead of just the portion that affected rows past the deleted cells. Result: cells over-shift by the overflow amount and overlap whatever cell absorbed the deletion.
 
@@ -175,7 +177,7 @@ Insertion can't span cells (it happens at a single row), so no fix is needed for
 - `dd` on a single empty cell still cleanly removes it.
 - Single-line delete inside a multi-line cell shrinks only that cell.
 
-### 7.5.4 Replace manual shift math in `apply_remote_changes`
+### 7.5.4 Replace manual shift math in `apply_remote_changes` ✅ `29f66de`
 
 `sync.lua:254-256` has the same `for j = i+1, #nb.cells do start_row += delta` pattern that we already replaced with `recompute_offsets` in the delete/new_cell paths. Same compounding-drift potential.
 
@@ -184,7 +186,7 @@ Insertion can't span cells (it happens at a single row), so no fix is needed for
 **Verification:**
 - Edit the notebook in the browser while it's open in nvim. After 5+ round-trips, `:MarimoCheck` stays OK and `nb.cells[].code` matches the buffer slice for each cell.
 
-### 7.5.5 Detect undo and reconcile `<leader>md`
+### 7.5.5 Detect undo and reconcile `<leader>md` ✅ `ca57049`
 
 Undo of `<leader>md` is currently unrecoverable: vim restores the buffer rows, `on_bytes` fires (`delta > 0`), `cell_index_at_row` returns an adjacent cell, and the restored content gets glued onto a neighbor. The original cell's ID, options, and any server-side state are gone.
 
@@ -201,26 +203,30 @@ This isn't a complete undo system — only covers the dominant pain case (`<lead
 - Undo of plain typing inside a cell still works as today.
 - Undo of multiple deletes in a row restores them in reverse order.
 
-### 7.5.6 Architectural: extmark-based cell positions (large, optional, supersedes 7.5.3 + parts of 7.5.5)
+### 7.5.6 Architectural: extmark-based cell positions ✅ `e67c81c` (+ follow-ups `44b3847`, `46e0b4d`)
 
 The root cause across all the above is that `cell.start_row` and `cell.end_row` are plain integers we mutate by hand from three call sites. nvim already ships the right primitive: **extmarks**. An extmark anchored at a buffer row stays anchored across inserts, deletes, and undo without our intervention.
 
-**Migration:**
+**What shipped:**
 - New namespace `ns_cell_anchor`, never wiped by border re-renders.
-- Each cell gets `cell.start_mark_id` (gravity left) and `cell.end_mark_id` (gravity right).
-- `cell.start_row` / `cell.end_row` become getter functions that resolve the extmark to a row at read time.
-- `on_bytes_changed` shrinks to `sync_cells_from_buffer` + `render_all_borders` — no manual shifting at all.
-- The manual shift code in `actions.lua`, `keymaps.lua`, `sync.lua` is fully deleted.
-- `prune_phantoms` becomes unnecessary; an extmark that lands in a deleted range simply collides with another extmark and we resolve at render time.
+- Each cell gets a single `cell.start_mark_id` with `right_gravity = true`. We landed on start-only anchoring because the end of each cell is unambiguously "one row before the next cell's start" (or the last buffer line for the tail cell) — a parallel end-anchor would just be a second source of truth to keep in sync.
+- `cell.start_row` / `cell.end_row` remain cached integers, but `sync_cells_from_extmarks` (`buffer.lua:40`) is now the only writer; it re-derives them from the live extmarks before every read path.
+- `on_bytes_changed` collapses to `refresh_after_mutation` (sync → prune → sync → render). No delta math at all.
+- The manual shift code in `actions.lua`, `keymaps.lua`, `sync.lua` is fully removed.
+- `prune_phantoms` is retained as a defensive sweep for the case where a `dd` deletes the only line of a cell — vim's gravity collapses the anchor onto the next cell's, and prune drops the empty one before the validator runs.
 
-**Estimated cost:** 1–2 days. Higher upfront, but eliminates the entire class of "cells drift out of sync with buffer" bugs in one swing rather than playing whack-a-mole.
+**Follow-up fixes that surfaced while testing 7.5.6:**
+- `44b3847` — `dd` on the only row of a cell left the anchor "alive but with end<start." Added a second-pass in `sync_cells_from_extmarks` that pushes such collapsed cells to undo trash so `u` can splice them back. Also introduced `refresh_after_mutation` as the shared post-mutation pipeline (action paths previously called `sync` without `prune`).
+- `46e0b4d` — `vim.list_extend` mutates its first argument in place, so reading `#next_lines` *after* the call gave a doubled count and the moved cell's anchor landed too far down. Capture `next_count = #next_lines` and `start_at = cell.start_row` before `list_extend` in both `move_cell_down` and `move_cell_up`.
 
-**Verification:**
+**Smart paste follow-up (`d3c4ca9`, then `61cc648`):** vanilla `p` after `<leader>mn` left a stray blank above the pasted line inside the fresh cell. The first attempt (`d3c4ca9`) rewrote to `Vp` for that case, but the single-line substitution dragged both right-gravity anchors past the new content and the paste ended up in the *previous* cell. Final fix (`61cc648`) does the substitution via `nvim_buf_set_lines` and immediately re-places this cell's anchor at the original row so it claims the pasted slice.
+
+**Verification (passed):**
 - All tests from 7.5.1–7.5.5 still pass.
 - `:MarimoCheck` stays OK across heavy editing, undo, browser sync, and `<leader>mn` / `<leader>md` stress sequences.
 - The manual shift code in `actions.lua`, `keymaps.lua`, `sync.lua` is fully removed without regression.
 
-### 7.5.7 Cell ID stability across reload (closes `cell-op for unknown cell`)
+### 7.5.7 Cell ID stability across reload (closes `cell-op for unknown cell`) ✅ `54713e3`
 
 `utils.generate_cell_id` mints fresh IDs on every `parser.parse_file` call (see comment at `sync.lua:181`). After `reload_from_file` fires (e.g. when the user accepts the "External change" prompt), client cell IDs no longer match what the marimo server is tracking. The server keeps sending `cell-op` messages keyed by the old IDs; `output.lua:377` logs each as `[neo-marimo] cell-op for unknown cell '...'`.
 
@@ -239,31 +245,28 @@ Parser reads the ID; if absent, mints one and writes it back on next save.
 
 Recommend (a) with a config flag to disable the comments if the user finds them visually noisy.
 
-**Verification:**
+**Shipped:** Option (a) via `python/bridge.py` (`extract_cell_ids` / `inject_cell_ids`). Each `@app.cell` now carries a `# id: XXXX` comment that round-trips through the parser/generator. The parser preserves the ID across reloads; cells without a comment get a fresh ID and the comment is written on the next save.
+
+**Verification (passed):**
 - Edit the file via browser, accept the External change prompt in nvim, run a cell. No "unknown cell" warnings appear.
 
-### 7.5.8 Suppress "External change" prompt for our own writes
+### 7.5.8 Suppress "External change" prompt for our own writes ✅ `d789f7f` (+ follow-up `8f2ee45`)
 
 `sync.is_writing(nb)` is supposed to gate the file watcher during our own saves, but marimo `--watch` re-writes the file when a dependent cell runs (e.g. after `b = 2000` triggers `a + b` to re-run), and that write lands outside our suppression window. The user sees an "External change" prompt mid-edit. Saying "Yes" triggers `reload_from_file`, which (a) wipes `nb.cells` and rebuilds with fresh IDs (compounding 7.5.7) and (b) hands the user a notebook that no longer reflects their unsaved edits.
 
 **Fix:** compute a SHA1 of every file we write and every file the watcher reads. If the watcher's hash matches a recently-written hash, skip the prompt entirely.
 
-**Verification:**
-- Run a cell that triggers a dependent re-run. No prompt fires.
+**Shipped:** SHA256 (not SHA1) dedup via `vim.fn.sha256` — every write records the content hash, every watcher read compares against the ring of recent hashes. `8f2ee45` was the load-bearing follow-up: marimo `--watch` strips our `# id: XXXX` comments (Phase 7.5.7) before writing the file back, so the raw bytes never matched. The dedup now normalises by stripping id comments before hashing on both sides.
+
+**Verification (passed):**
+- Run a cell that triggers a dependent re-run. No prompt fires. Confirmed with a diagnostic loop watching `id_count` drop from N to 0 as marimo rewrote.
 - An actually-external edit (e.g., `sed` from another terminal) still prompts as before.
 
 ---
 
-### Execution order
+### Execution order ✅ (historical)
 
-Each step is independently shippable and testable.
-
-1. **7.5.1** — smallest patch, fixes the worst current symptom. Ship first.
-2. **7.5.2** — defensive layer that prevents disk corruption while we work on the rest. Ship right after 7.5.1; the pair lands together as the foundation.
-3. **7.5.3** and **7.5.4** — finish the manual-shift cleanup. Either order; can also ship together.
-4. **7.5.5** — undo safety. Higher complexity; do after the offset paths are stable so we're not debugging two layers at once.
-5. **7.5.7** and **7.5.8** — independent of 7.5.1–7.5.5. Ship any time, in either order.
-6. **7.5.6** — only if 7.5.3–7.5.5 still leave drift, or if the cumulative code churn from defending the integer-offset model feels worse than rewriting it. Otherwise defer indefinitely; the incremental fixes may be sufficient.
+Each step shipped as its own commit in the order below. The intermediate testing surfaced enough rough edges in the incremental approach that we ended up taking 7.5.6 (the architectural extmark migration) as well, even though it was flagged optional. The final ordering was: 7.5.1 → 7.5.2 → 7.5.3 → 7.5.4 → 7.5.5 → 7.5.7 → 7.5.8 → 7.5.6 → follow-up fixes (`44b3847`, `46e0b4d`, `d3c4ca9`, `61cc648`).
 
 **Do not bundle 7.5.x into a single commit.** Each step verifies independently; bundling re-introduces the "what broke" guessing game that motivated this section. Phase 8 work should not start until 7.5.1–7.5.4 are shipped — Phase 8 adds output rendering paths that also touch `nb.cells[].code`, and they'd amplify any remaining drift.
 
