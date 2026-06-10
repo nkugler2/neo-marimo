@@ -79,10 +79,29 @@ end
 -- pathological save loop can't grow the list without limit.
 local RECENT_WRITES_CAP = 16
 
+-- Strip lines that look like our `# id: XXXX` cell-id comments. Marimo's
+-- --watch reads our save, reactively re-runs dependent cells, then
+-- rewrites the file *without* those comments — so a raw byte-for-byte
+-- hash of our write never matches the rewrite we get back. Hashing the
+-- comment-free version of both sides makes the rewrite look identical
+-- to our original write, which is what we want for dedup purposes
+-- (the stable-id round trip from 7.5.7 lives in the .py *source*, not
+-- in marimo's in-memory state, and is restored on the next save).
+local function strip_id_comments(content)
+  if not content or content == "" then return content end
+  local out = {}
+  for line in (content .. "\n"):gmatch("([^\n]*)\n") do
+    if not line:match("^%s*#%s*id:%s*[%w_]+%s*$") then
+      table.insert(out, line)
+    end
+  end
+  return table.concat(out, "\n")
+end
+
 local function record_write_hash(nb, content)
   if not content then return end
   nb._recent_write_hashes = nb._recent_write_hashes or {}
-  local hash = vim.fn.sha256(content)
+  local hash = vim.fn.sha256(strip_id_comments(content))
   table.insert(nb._recent_write_hashes, 1, hash)
   while #nb._recent_write_hashes > RECENT_WRITES_CAP do
     table.remove(nb._recent_write_hashes)
@@ -95,7 +114,7 @@ end
 -- cell run.
 function M.matches_recent_write(nb, content)
   if not content or not nb._recent_write_hashes then return false end
-  local hash = vim.fn.sha256(content)
+  local hash = vim.fn.sha256(strip_id_comments(content))
   for _, h in ipairs(nb._recent_write_hashes) do
     if h == hash then return true end
   end
