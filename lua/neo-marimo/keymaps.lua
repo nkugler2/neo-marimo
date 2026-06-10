@@ -354,6 +354,31 @@ function M.setup(bufnr, nb)
     )
   end
 
+  -- Smart paste: when the cursor sits on the only row of a cell and that
+  -- row is empty (typical right after `<leader>mn`), vanilla `p` would
+  -- put the yanked content *below* the empty row, leaving a stray blank
+  -- line above the paste inside the cell. Rewrite to `Vp` in that case
+  -- so the empty row is replaced by the paste content. Every other
+  -- invocation falls through to vanilla `p` / `P`.
+  local function paste_in_empty_cell(default_key)
+    return function()
+      local row = vim.api.nvim_win_get_cursor(0)[1] - 1
+      local cell = notebook.get_cell_at_row(nb, row)
+      if cell and cell.start_row == cell.end_row then
+        local line = vim.api.nvim_buf_get_lines(bufnr, row, row + 1, false)[1]
+        if line == "" then
+          vim.cmd("normal! Vp")
+          return
+        end
+      end
+      vim.cmd("normal! " .. vim.v.count1 .. default_key)
+    end
+  end
+  vim.keymap.set("n", "p", paste_in_empty_cell("p"),
+    vim.tbl_extend("force", opts, { desc = "Marimo: smart paste (p)" }))
+  vim.keymap.set("n", "P", paste_in_empty_cell("P"),
+    vim.tbl_extend("force", opts, { desc = "Marimo: smart paste (P)" }))
+
   -- Phase 8.5: DataFrame side-panel for the cell under the cursor.
   if km.dataframe_panel then
     vim.keymap.set("n", km.dataframe_panel, function()
