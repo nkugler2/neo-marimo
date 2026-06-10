@@ -25,7 +25,7 @@ local MAX_DATAFRAME_INLINE_ROWS = 5
 -- variable since render is called from a hot path and threading it through
 -- every renderer signature would be a lot of plumbing for one optional
 -- side-effect.
-local _render_ctx = { bufnr = nil, cell_id = nil, row = nil }
+local _render_ctx = { bufnr = nil, cell_id = nil, row = nil, image_drawn = false }
 
 -- ── Renderer registry ──────────────────────────────────────────────────────
 --
@@ -123,7 +123,8 @@ local function render_html(data)
   if image.has_embedded_image(data) then
     local mime, b64 = image.extract_data_uri(data)
     if mime and b64 then
-      return image.render_base64(_render_ctx.bufnr, _render_ctx.row or 0, mime, b64)
+      _render_ctx.image_drawn = true
+      return image.render_base64(_render_ctx.bufnr, _render_ctx.row or 0, mime, b64, _render_ctx.cell_id)
     end
   end
 
@@ -156,8 +157,9 @@ end
 
 local function render_image(data, _opts, mime)
   -- Marimo encodes image/* payloads as base64 strings.
+  _render_ctx.image_drawn = true
   return image.render_base64(_render_ctx.bufnr, _render_ctx.row or 0,
-    mime or "image/png", tostring(data or ""))
+    mime or "image/png", tostring(data or ""), _render_ctx.cell_id)
 end
 
 local function render_svg(data)
@@ -167,8 +169,9 @@ local function render_svg(data)
   -- the SVG to a file — backends that can rasterize it will, the rest will
   -- show the file-path placeholder.
   if type(data) ~= "string" then return {} end
+  _render_ctx.image_drawn = true
   return image.render_at(_render_ctx.bufnr, _render_ctx.row or 0,
-    "image/svg+xml", data)
+    "image/svg+xml", data, _render_ctx.cell_id)
 end
 
 local function render_markdown_mime(data)
@@ -269,7 +272,8 @@ local function output_to_virt_lines(output)
   -- fall back to dumping as text.
   local img_mime, img_data = extract_embedded_image(data)
   if img_mime and img_data then
-    return image.render_base64(_render_ctx.bufnr, _render_ctx.row or 0, img_mime, img_data)
+    _render_ctx.image_drawn = true
+    return image.render_base64(_render_ctx.bufnr, _render_ctx.row or 0, img_mime, img_data, _render_ctx.cell_id)
   end
 
   if type(data) == "string" then
@@ -315,6 +319,10 @@ function M.render(bufnr, cell)
   _render_ctx.bufnr = bufnr
   _render_ctx.cell_id = cell.id
   _render_ctx.row = cell.end_row
+  -- Track whether this pass draws an inline image. If not, any image this
+  -- cell drew on a previous run (e.g. it now returns a DataFrame instead of a
+  -- plot) must be torn down so it doesn't linger as an orphaned placement.
+  _render_ctx.image_drawn = false
 
   local virt_lines = {}
 
@@ -356,6 +364,11 @@ function M.render(bufnr, cell)
     end
   end
 
+  -- No image this pass → drop any placement this cell left behind earlier.
+  if not _render_ctx.image_drawn then
+    image.clear_for_cell(bufnr, cell.id)
+  end
+
   if #virt_lines == 0 then return end
 
   -- Attach at end_row so the output moves with the cell as it grows
@@ -378,6 +391,9 @@ end
 -- Clear output for all cells.
 function M.clear_all(bufnr)
   vim.api.nvim_buf_clear_namespace(bufnr, hl.ns_output, 0, -1)
+  -- Tear down every inline-image placement in this buffer — they live in the
+  -- backend's own namespace, so the clear above doesn't touch them.
+  image.clear_for_cell(bufnr)
   -- Drop the entire widget registry for this buffer so stale entries don't
   -- survive a kernel restart / output clear.
   for k, _ in pairs(widgets._by_cell) do

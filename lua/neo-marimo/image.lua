@@ -110,21 +110,68 @@ local function pick_backend()
   return _backend_cache
 end
 
+-- ── placement registry ────────────────────────────────────────────────────
+--
+-- Inline-image backends (snacks.image, image.nvim) draw via their own
+-- extmarks/placements, which live outside our ns_output namespace. If we just
+-- create a fresh placement on every M.render (and a cell re-renders on every
+-- queued/running/idle cell-op), they stack — the user sees a row of duplicate
+-- image glyphs. We key each placement by its owning cell and tear the previous
+-- one down before drawing the next, mirroring widgets.clear_for_cell.
+--
+-- `_placements[bufnr][key]` holds `{ path = <temp file>, close = <fn> }`. The
+-- `close` fn tears down whatever the backend created (stays backend-agnostic);
+-- `path` lets us recognise "this cell already shows exactly this image" and
+-- skip a needless close/recreate, which would otherwise flicker.
+local _placements = {}
+
+local function register_placement(bufnr, key, path, closer)
+  if not key then return end
+  _placements[bufnr] = _placements[bufnr] or {}
+  _placements[bufnr][key] = { path = path, close = closer }
+end
+
+-- Close and forget the placement(s) for a buffer. With `key`, only that cell's
+-- placement; without, every placement in the buffer.
+function M.clear_for_cell(bufnr, key)
+  local buf_pl = _placements[bufnr]
+  if not buf_pl then return end
+  if key ~= nil then
+    local entry = buf_pl[key]
+    if entry then pcall(entry.close) end
+    buf_pl[key] = nil
+  else
+    for _, entry in pairs(buf_pl) do pcall(entry.close) end
+    _placements[bufnr] = nil
+  end
+end
+
 -- ── public API ────────────────────────────────────────────────────────────
 
 -- Render an inline image at the given (bufnr, row) using whatever backend is
 -- available. Falls back to writing the file and returning virt_lines that
 -- name it. `row` is 0-indexed (the buffer row the image should attach to).
+-- `key` (optional) ties the placement to a cell so the next render of that
+-- cell can close it first instead of stacking.
 --
 -- Returns a list of virt_line chunks (possibly empty when the backend draws
 -- the image itself and doesn't need a placeholder).
-function M.render_at(bufnr, row, mime, bytes)
+function M.render_at(bufnr, row, mime, bytes, key)
   if not bytes or bytes == "" then return {} end
 
   local path = write_temp(mime, bytes)
   if not path then
     return { { { "  [image — decode failed]", "MarimoOutputError" } } }
   end
+
+  -- If this cell already shows exactly this image, leave the live placement
+  -- alone (write_temp hashes bytes, so an unchanged image yields the same
+  -- path). Avoids the close/recreate flicker on repeated status re-renders.
+  local existing = key and _placements[bufnr] and _placements[bufnr][key]
+  if existing and existing.path == path then return {} end
+
+  -- Otherwise drop any prior placement this cell owns before drawing the new.
+  M.clear_for_cell(bufnr, key)
 
   local backend = pick_backend()
 
@@ -139,6 +186,9 @@ function M.render_at(bufnr, row, mime, bytes)
       })
       if ok_create and img then
         pcall(function() img:render() end)
+        register_placement(bufnr, key, path, function()
+          pcall(function() img:clear() end)
+        end)
         -- image.nvim handles its own placeholder rows; return an empty
         -- list so we don't double-up with our own.
         return {}
@@ -158,7 +208,10 @@ function M.render_at(bufnr, row, mime, bytes)
         pos = { row + 1, 0 },
         inline = true,
       })
-      if ok_create and placement ~= nil then return {} end
+      if ok_create and placement ~= nil then
+        register_placement(bufnr, key, path, function() placement:close() end)
+        return {}
+      end
       if not ok_create then
         vim.notify("[neo-marimo] snacks.image failed: " .. tostring(placement),
           vim.log.levels.WARN)
@@ -176,13 +229,14 @@ function M.render_at(bufnr, row, mime, bytes)
 end
 
 -- Decode a base64 payload and render it. `data` may include or omit
--- whitespace; `mime` is the MIME type of the encoded payload.
-function M.render_base64(bufnr, row, mime, data)
+-- whitespace; `mime` is the MIME type of the encoded payload. `key` (optional)
+-- ties the placement to a cell so re-renders replace rather than stack.
+function M.render_base64(bufnr, row, mime, data, key)
   local bytes = b64_decode(data)
   if not bytes then
     return { { { "  [image — invalid base64]", "MarimoOutputError" } } }
   end
-  return M.render_at(bufnr, row, mime, bytes)
+  return M.render_at(bufnr, row, mime, bytes, key)
 end
 
 -- Extract a data:image/...;base64,... URI from a string. Returns
