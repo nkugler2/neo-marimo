@@ -357,9 +357,13 @@ function M.setup(bufnr, nb)
   -- Smart paste: when the cursor sits on the only row of a cell and that
   -- row is empty (typical right after `<leader>mn`), vanilla `p` would
   -- put the yanked content *below* the empty row, leaving a stray blank
-  -- line above the paste inside the cell. Rewrite to `Vp` in that case
-  -- so the empty row is replaced by the paste content. Every other
-  -- invocation falls through to vanilla `p` / `P`.
+  -- line above the paste inside the cell. Both `Vp` and a plain
+  -- nvim_buf_set_lines substitution at the cell's row drag this cell's
+  -- start anchor onto the next cell's (the single-line substitution
+  -- moves both right-gravity marks past the new content), so the paste
+  -- ends up swallowed by the *previous* cell. Do the substitution
+  -- ourselves and immediately re-place this cell's anchor at the
+  -- original row so it claims the pasted lines.
   local function paste_in_empty_cell(default_key)
     return function()
       local row = vim.api.nvim_win_get_cursor(0)[1] - 1
@@ -367,8 +371,27 @@ function M.setup(bufnr, nb)
       if cell and cell.start_row == cell.end_row then
         local line = vim.api.nvim_buf_get_lines(bufnr, row, row + 1, false)[1]
         if line == "" then
-          vim.cmd("normal! Vp")
-          return
+          local reg = vim.fn.getreg('"')
+          local regtype = vim.fn.getregtype('"')
+          -- Only linewise yanks (yy, dd, <leader>md trash) need the
+          -- empty-row replacement dance. Charwise / blockwise paste
+          -- inserts bytes at the cursor and the empty row absorbs them
+          -- without leaving a stray blank.
+          if reg ~= "" and regtype:sub(1, 1) == "V" then
+            local content = reg:gsub("\n$", "")
+            local lines = vim.split(content, "\n", { plain = true })
+            buffer.with_suppressed_bytes(nb, function()
+              vim.api.nvim_buf_set_lines(bufnr, row, row + 1, false, lines)
+              -- The substitution collapsed cell.start_mark_id onto the
+              -- next cell's anchor at row + #lines. Re-create it at the
+              -- original row so this cell owns the pasted slice; the
+              -- next cell's anchor is already where it needs to be.
+              buffer.place_cell_anchor(bufnr, cell, row)
+              buffer.refresh_after_mutation(bufnr, nb)
+            end)
+            vim.api.nvim_win_set_cursor(0, { row + 1, 0 })
+            return
+          end
         end
       end
       vim.cmd("normal! " .. vim.v.count1 .. default_key)
