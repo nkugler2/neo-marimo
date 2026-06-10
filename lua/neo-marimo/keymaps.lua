@@ -146,24 +146,20 @@ function M.setup(bufnr, nb)
         )
         widgets.clear_for_cell(bufnr, cell.id)
 
+        -- Drop the cell anchor before set_lines so vim doesn't try to
+        -- move it to the collapsed range's boundary. A leftover anchor
+        -- would attach to whichever cell now occupies the row, creating
+        -- two overlapping anchors at the same position.
+        buffer.clear_cell_anchor(bufnr, cell)
+
         -- Remove lines from buffer (0-indexed start, exclusive end)
         vim.api.nvim_buf_set_lines(bufnr, cell.start_row, cell.end_row + 1, false, {})
 
         notebook.delete_cell(nb, idx)
 
-        -- Rebuild row offsets from each remaining cell's code length instead
-        -- of subtracting the deleted cell's line count from subsequent cells.
-        -- The manual shift compounded any pre-existing offset drift (e.g.
-        -- from a misattributed on_bytes delta) into overlapping ranges, which
-        -- is what produced the "5 cells stacked on 2 rows" corruption that
-        -- repeated deletes exhibited.
-        --
-        -- prune_phantoms is intentionally NOT called here. on_bytes_changed
-        -- is the only path that can produce phantoms (post-byte-delta
-        -- collapses); the action paths drive offsets directly so calling
-        -- prune here would just risk dropping the cell we want to keep.
-        notebook.recompute_offsets(nb)
-
+        -- The remaining cells' anchors moved themselves via extmark
+        -- gravity; just refresh the cached start_row/end_row.
+        buffer.sync_cells_from_extmarks(bufnr, nb)
         buffer.render_all_borders(bufnr, nb)
       end)
 
@@ -191,20 +187,25 @@ function M.setup(bufnr, nb)
         local cell_lines = vim.api.nvim_buf_get_lines(bufnr, cell.start_row, cell.end_row + 1, false)
         local next_lines = vim.api.nvim_buf_get_lines(bufnr, next_cell.start_row, next_cell.end_row + 1, false)
 
+        -- Drop both anchors before set_lines; we re-place them at the
+        -- swapped positions below. Letting set_lines deal with anchors
+        -- inside the replaced range would leave them at unpredictable
+        -- positions.
+        buffer.clear_cell_anchor(bufnr, cell)
+        buffer.clear_cell_anchor(bufnr, next_cell)
+
         vim.api.nvim_buf_set_lines(bufnr, cell.start_row, next_cell.end_row + 1, false,
           vim.list_extend(next_lines, cell_lines))
 
         -- Swap in notebook state
         notebook.move_cell_down(nb, idx)
 
-        -- Fix row offsets: next_cell is now first, cell is second
         local new_next = nb.cells[idx]      -- was next_cell, now at idx
         local new_cell = nb.cells[idx + 1]  -- was cell, now at idx+1
 
-        new_next.start_row = cell.start_row
-        new_next.end_row = cell.start_row + #next_lines - 1
-        new_cell.start_row = new_next.end_row + 1
-        new_cell.end_row = new_cell.start_row + #cell_lines - 1
+        buffer.place_cell_anchor(bufnr, new_next, cell.start_row)
+        buffer.place_cell_anchor(bufnr, new_cell, cell.start_row + #next_lines)
+        buffer.sync_cells_from_extmarks(bufnr, nb)
 
         buffer.render_all_borders(bufnr, nb)
       end)
@@ -227,6 +228,9 @@ function M.setup(bufnr, nb)
         local cell_lines = vim.api.nvim_buf_get_lines(bufnr, cell.start_row, cell.end_row + 1, false)
         local prev_lines = vim.api.nvim_buf_get_lines(bufnr, prev_cell.start_row, prev_cell.end_row + 1, false)
 
+        buffer.clear_cell_anchor(bufnr, cell)
+        buffer.clear_cell_anchor(bufnr, prev_cell)
+
         vim.api.nvim_buf_set_lines(bufnr, prev_cell.start_row, cell.end_row + 1, false,
           vim.list_extend(cell_lines, prev_lines))
 
@@ -235,10 +239,9 @@ function M.setup(bufnr, nb)
         local new_cell = nb.cells[idx - 1]
         local new_prev = nb.cells[idx]
 
-        new_cell.start_row = prev_cell.start_row
-        new_cell.end_row = prev_cell.start_row + #cell_lines - 1
-        new_prev.start_row = new_cell.end_row + 1
-        new_prev.end_row = new_prev.start_row + #prev_lines - 1
+        buffer.place_cell_anchor(bufnr, new_cell, prev_cell.start_row)
+        buffer.place_cell_anchor(bufnr, new_prev, prev_cell.start_row + #cell_lines)
+        buffer.sync_cells_from_extmarks(bufnr, nb)
 
         buffer.render_all_borders(bufnr, nb)
       end)

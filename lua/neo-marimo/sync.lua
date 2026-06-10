@@ -241,6 +241,13 @@ function M.reload_from_file(nb)
     return false
   end
 
+  -- Tear down every existing anchor before we rebuild the cells list.
+  -- The old extmarks would otherwise survive in the ns_cell_anchor
+  -- namespace and shadow the fresh ones we place below.
+  local hl = require("neo-marimo.highlights")
+  vim.api.nvim_buf_clear_namespace(bufnr, hl.ns_cell_anchor, 0, -1)
+  for _, c in ipairs(nb.cells) do c.start_mark_id = nil end
+
   -- Rebuild cells
   local cell_mod = require("neo-marimo.cell")
   nb.cells = {}
@@ -251,9 +258,10 @@ function M.reload_from_file(nb)
     nb.cell_by_id[c.id] = c
   end
 
-  -- Rewrite buffer content
+  -- Rewrite buffer content and remember each cell's start_row so we can
+  -- place its anchor at the right position.
   local lines = {}
-  for i, cell in ipairs(nb.cells) do
+  for _, cell in ipairs(nb.cells) do
     local cell_lines = vim.split(cell.code, "\n", { plain = true })
     if #cell_lines == 0 then cell_lines = { "" } end
     local start_row = #lines
@@ -268,6 +276,10 @@ function M.reload_from_file(nb)
     vim.api.nvim_set_option_value("modifiable", true, { buf = bufnr })
     vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
     vim.api.nvim_set_option_value("modified", false, { buf = bufnr })
+
+    for _, cell in ipairs(nb.cells) do
+      buffer.place_cell_anchor(bufnr, cell, cell.start_row)
+    end
 
     buffer.render_all_borders(bufnr, nb)
   end)
@@ -349,14 +361,13 @@ function M.apply_remote_changes(nb, new_cells_data)
   buffer.with_suppressed_bytes(nb, function()
     vim.api.nvim_set_option_value("modifiable", true, { buf = bufnr })
 
-    -- Walk front-to-back. After each replacement we recompute the offsets
-    -- of every cell from their cell.code line counts. The cells we haven't
-    -- patched yet still hold their original code (matching the rows they
-    -- already occupy in the buffer), so the rebuild gives them the right
-    -- new start/end for the next iteration's set_lines call. Replaces the
-    -- old per-iteration manual shift, which had the same compounding-drift
-    -- potential as the delete/insert paths and only ever set
-    -- start_row/end_row by ±delta instead of from the source of truth.
+    -- Walk front-to-back. For each cell whose code changed, replace its
+    -- rows in the buffer. With extmark anchors in place we don't need to
+    -- shift subsequent cells manually — their anchors moved themselves
+    -- by vim's extmark machinery. We do explicitly re-anchor the patched
+    -- cell because nvim_buf_set_lines may invalidate marks inside the
+    -- replaced range; placing a fresh anchor at the same start_row keeps
+    -- the model consistent.
     for i, new in ipairs(new_cells_data) do
       local cell = nb.cells[i]
       local new_code = new.code or ""
@@ -364,16 +375,19 @@ function M.apply_remote_changes(nb, new_cells_data)
         local new_lines = vim.split(new_code, "\n", { plain = true })
         if #new_lines == 0 then new_lines = { "" } end
 
+        local at = cell.start_row
+        buffer.clear_cell_anchor(bufnr, cell)
         vim.api.nvim_buf_set_lines(
           bufnr, cell.start_row, cell.end_row + 1, false, new_lines
         )
+        buffer.place_cell_anchor(bufnr, cell, at)
 
         cell.code = new_code
         if new.name then cell.name = new.name end
         if new.options then cell.options = new.options end
         cell.type = cell_mod.detect_type(cell.code)
 
-        notebook.recompute_offsets(nb)
+        buffer.sync_cells_from_extmarks(bufnr, nb)
       end
     end
 

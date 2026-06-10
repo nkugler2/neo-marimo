@@ -2,6 +2,11 @@ local M = {}
 
 M.ns_border = vim.api.nvim_create_namespace("neo_marimo_border")
 M.ns_output = vim.api.nvim_create_namespace("neo_marimo_output")
+-- Cell start-row anchors. Each cell owns one extmark in this namespace,
+-- placed at its start_row with right_gravity so insertions at the
+-- boundary extend the previous cell (paste-after-end-of-A intuition).
+-- Never cleared by border re-renders.
+M.ns_cell_anchor = vim.api.nvim_create_namespace("neo_marimo_cell_anchor")
 
 function M.setup()
   -- Cell border colors by type

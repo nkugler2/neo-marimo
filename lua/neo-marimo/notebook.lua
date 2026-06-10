@@ -201,6 +201,7 @@ function M.try_undo_restore(nb, changes)
   local now = vim.uv.hrtime() / 1e6
   local TTL = 60000
   local cell_mod = require("neo-marimo.cell")
+  local buffer = require("neo-marimo.buffer")
   local filtered = {}
 
   for _, change in ipairs(changes) do
@@ -230,7 +231,15 @@ function M.try_undo_restore(nb, changes)
           table.insert(nb.cells, insert_idx, restored)
           nb.cell_by_id[restored.id] = restored
           for k, c in ipairs(nb.cells) do c.index = k end
-          M.recompute_offsets(nb)
+          if nb.bufnr and vim.api.nvim_buf_is_valid(nb.bufnr) then
+            -- Place a fresh anchor at the row vim just restored. Other
+            -- cells' anchors already moved themselves via gravity, so a
+            -- post-anchor sync picks up the new contiguous layout.
+            buffer.place_cell_anchor(nb.bufnr, restored, t.start_row)
+            buffer.sync_cells_from_extmarks(nb.bufnr, nb)
+          else
+            M.recompute_offsets(nb)
+          end
 
           table.remove(nb._undo_trash, ti)
           matched = true

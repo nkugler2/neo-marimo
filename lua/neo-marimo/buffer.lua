@@ -4,6 +4,105 @@ local config = require("neo-marimo.config")
 
 local M = {}
 
+-- Place a fresh start-anchor extmark for `cell` at buffer row `row`. The
+-- extmark sits in `ns_cell_anchor` (never wiped by border re-renders) with
+-- right_gravity = true so an insertion at the boundary row pushes B down
+-- and grows A. cell.start_mark_id stores the mark for later resolution.
+function M.place_cell_anchor(bufnr, cell, row)
+  if cell.start_mark_id then
+    pcall(vim.api.nvim_buf_del_extmark, bufnr, hl.ns_cell_anchor, cell.start_mark_id)
+    cell.start_mark_id = nil
+  end
+  cell.start_mark_id = vim.api.nvim_buf_set_extmark(bufnr, hl.ns_cell_anchor, row, 0, {
+    right_gravity = true,
+  })
+end
+
+-- Drop a cell's anchor. Used when the cell is removed (delete keymap, full
+-- buffer rebuild before reload). Safe to call when no anchor is present.
+function M.clear_cell_anchor(bufnr, cell)
+  if cell.start_mark_id then
+    pcall(vim.api.nvim_buf_del_extmark, bufnr, hl.ns_cell_anchor, cell.start_mark_id)
+    cell.start_mark_id = nil
+  end
+end
+
+-- Re-derive cell.start_row / cell.end_row / cell.code / cell.type from the
+-- live extmark positions and the current buffer content. This is the only
+-- code path that mutates cell.start_row/end_row after the initial create;
+-- the old manual delta math (across actions.lua, keymaps.lua, sync.lua)
+-- has been removed in favour of letting vim's own extmark machinery track
+-- where each cell now lives.
+--
+-- Cells with no anchor yet (e.g. freshly minted, anchor not placed) are
+-- left alone; the caller is expected to place an anchor before calling
+-- sync.
+function M.sync_cells_from_extmarks(bufnr, nb)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
+  local total_lines = vim.api.nvim_buf_line_count(bufnr)
+
+  -- First pass: read start_row from each anchor. If an anchor came back
+  -- empty (vim removed it because its row range was wiped by a
+  -- nvim_buf_set_lines), the cell is dead — drop it from the list before
+  -- we try to compute end_row, otherwise we'd keep a phantom cell with a
+  -- stale cached start_row.
+  local i = 1
+  while i <= #nb.cells do
+    local cell = nb.cells[i]
+    local dead = false
+    if cell.start_mark_id then
+      local mark = vim.api.nvim_buf_get_extmark_by_id(
+        bufnr, hl.ns_cell_anchor, cell.start_mark_id, {}
+      )
+      if mark and mark[1] then
+        cell.start_row = mark[1]
+      else
+        dead = true
+      end
+    end
+    if dead then
+      nb.cell_by_id[cell.id] = nil
+      table.remove(nb.cells, i)
+    else
+      i = i + 1
+    end
+  end
+  for k, c in ipairs(nb.cells) do c.index = k end
+
+  -- Sort cells by their current start_row so end_row computation (next
+  -- cell's start - 1) works even if two cells momentarily share a row
+  -- after a paste-then-immediate-something edge case. The reorder is
+  -- only a defensive measure; in steady state the order is preserved
+  -- by vim's gravity-respecting extmark movement.
+  table.sort(nb.cells, function(a, b)
+    if a.start_row == b.start_row then
+      return (a.index or 0) < (b.index or 0)
+    end
+    return a.start_row < b.start_row
+  end)
+  for i, c in ipairs(nb.cells) do c.index = i end
+
+  -- Second pass: end_row = next cell's start - 1; last cell ends at the
+  -- buffer's last line.
+  for i, cell in ipairs(nb.cells) do
+    if i < #nb.cells then
+      cell.end_row = nb.cells[i + 1].start_row - 1
+    else
+      cell.end_row = total_lines - 1
+    end
+    if cell.end_row < cell.start_row then
+      -- Cell collapsed (e.g. a cross-cell delete consumed all its rows).
+      -- Leave the offsets so prune_phantoms / a follow-up cleanup can act
+      -- on it; render_all_borders won't draw a border for invalid ranges.
+      cell.code = ""
+    else
+      local lines = vim.api.nvim_buf_get_lines(bufnr, cell.start_row, cell.end_row + 1, false)
+      cell.code = table.concat(lines, "\n")
+    end
+    cell.type = cell_mod.detect_type(cell.code)
+  end
+end
+
 -- Minimum usable border width. Below this we just stop drawing dashes rather
 -- than producing wrapped/broken borders.
 local MIN_BORDER_WIDTH = 40
@@ -236,6 +335,14 @@ function M.create(nb, source_bufnr)
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
   vim.api.nvim_set_option_value("modified", false, { buf = bufnr })
 
+  -- Anchor each cell with an extmark at its start_row. From this moment
+  -- on, vim's extmark machinery tracks where the cell lives across every
+  -- subsequent buffer mutation — the integer start_row/end_row become
+  -- cached values refreshed by sync_cells_from_extmarks.
+  for _, cell in ipairs(nb.cells) do
+    M.place_cell_anchor(bufnr, cell, cell.start_row)
+  end
+
   -- Render cell borders as virtual lines
   M.render_all_borders(bufnr, nb)
 
@@ -246,18 +353,23 @@ end
 
 -- Read current buffer lines and extract per-cell code.
 -- Updates each cell's .code field and recomputes row offsets.
--- `nb.cells` line counts must already be known or we re-derive them.
+-- With Phase 7.5.6 anchors in place this dispatches to the extmark
+-- resolver; without anchors (during the brief window of initial create)
+-- it falls back to reading the cached start_row/end_row directly.
 function M.sync_cells_from_buffer(nb)
   local bufnr = nb.bufnr
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
     return false
   end
 
+  if nb.cells[1] and nb.cells[1].start_mark_id then
+    M.sync_cells_from_extmarks(bufnr, nb)
+    return true
+  end
+
   local all_lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
   local total = #all_lines
 
-  -- We need to know the line-count per cell. The row offsets stored on cells
-  -- are the source of truth (maintained by recompute_offsets_from_delta).
   for i, cell in ipairs(nb.cells) do
     local s = cell.start_row + 1     -- 1-indexed for slice
     local e = cell.end_row + 1
@@ -274,7 +386,6 @@ function M.sync_cells_from_buffer(nb)
       cell.code = table.concat(cell_lines, "\n")
     end
 
-    -- Update type detection in case user changed cell type
     cell.type = cell_mod.detect_type(cell.code)
   end
 
@@ -295,97 +406,28 @@ local function cell_index_at_row(nb, row)
   return #nb.cells
 end
 
--- Apply a list of byte-level changes (captured by nvim_buf_attach's
--- on_bytes hook) to the notebook's cell row offsets, then re-sync code
--- and re-render borders.
+-- Refresh cell offsets after vim has applied buffer changes. With cell
+-- anchors in place (Phase 7.5.6), vim's own extmark machinery already
+-- moved each cell's start_row to the correct position — we just need to
+-- pull those positions back into cell.start_row/end_row and re-derive
+-- cell.code from the buffer slice each cell now covers.
 --
--- `changes` is an ordered list of { start_row = ..., delta = ... } where
--- `delta = new_end_row - old_end_row` — i.e. how many rows the change added
--- (positive) or removed (negative). `start_row` is the row position *before*
--- the change in 0-indexed buffer coordinates, which is exactly the row whose
--- containing cell should absorb the delta.
---
--- Walking changes in order matters: each delta shifts subsequent cells,
--- so later changes need to be located against the updated offsets.
---
--- Cross-cell deletes (delta < 0 spanning multiple cells) need special care:
--- the simple "subtract delta from the target cell, shift the rest" model
--- over-shifts subsequent cells by the portion of the delete that they
--- themselves absorbed, producing overlapping ranges. We cascade the
--- deletion through cells until the row count is consumed, then apply a
--- uniform shift to the cells past the deleted range.
-function M.on_bytes_changed(bufnr, nb, changes)
+-- This replaces the old per-change delta math (insertion / cross-cell
+-- delete cascade) entirely. The `changes` argument is kept for parity
+-- with the previous signature but no longer used — extmarks need no
+-- per-event reconciliation.
+function M.on_bytes_changed(bufnr, nb, _changes)
   if not vim.api.nvim_buf_is_valid(bufnr) then return end
 
-  for _, change in ipairs(changes) do
-    local delta = change.delta
-    if delta == 0 then
-      -- nothing to do
-    elseif delta > 0 then
-      -- Pure insertion: rows added at change.start_row stay in one cell.
-      local idx = cell_index_at_row(nb, change.start_row)
-      if idx then
-        local cell = nb.cells[idx]
-        cell.end_row = cell.end_row + delta
-        for j = idx + 1, #nb.cells do
-          nb.cells[j].start_row = nb.cells[j].start_row + delta
-          nb.cells[j].end_row = nb.cells[j].end_row + delta
-        end
-      end
-    else
-      -- Deletion of `-delta` rows starting at change.start_row. The rows
-      -- may span several cells. Walk forward, consuming rows from each
-      -- cell until the delete is exhausted, then apply a uniform shift
-      -- to the cells past the deleted range.
-      local idx = cell_index_at_row(nb, change.start_row)
-      if idx then
-        local remaining = -delta  -- positive count of rows to consume
-
-        -- First cell: rows lost = min(end_row, start_row + remaining - 1)
-        --                       - change.start_row + 1
-        local first = nb.cells[idx]
-        local rows_in_first =
-          math.min(first.end_row, change.start_row + remaining - 1)
-          - change.start_row + 1
-        if rows_in_first < 0 then rows_in_first = 0 end
-        first.end_row = first.end_row - rows_in_first
-        remaining = remaining - rows_in_first
-
-        -- Cascade through following cells until remaining hits 0.
-        local j = idx + 1
-        while remaining > 0 and j <= #nb.cells do
-          local c = nb.cells[j]
-          local line_count = c.end_row - c.start_row + 1
-          local consumed = math.min(remaining, line_count)
-          -- This cell shifts left by the rows consumed BEFORE it
-          -- (i.e. -delta - remaining), and its end shrinks by `consumed`.
-          local shift_before = -delta - remaining
-          c.start_row = c.start_row - shift_before
-          c.end_row = c.end_row - shift_before - consumed
-          remaining = remaining - consumed
-          j = j + 1
-        end
-
-        -- Cells past the deletion shift uniformly by the full delta.
-        while j <= #nb.cells do
-          nb.cells[j].start_row = nb.cells[j].start_row + delta
-          nb.cells[j].end_row = nb.cells[j].end_row + delta
-          j = j + 1
-        end
-      end
-    end
-  end
-
-  -- Negative ranges (end < start) on cells fully consumed by a cross-cell
-  -- delete are intentional — prune_phantoms below removes them. The old
-  -- clamp left zombie cells claiming rows the buffer no longer had, which
-  -- visually stacked with whichever cell now actually occupied that row.
+  M.sync_cells_from_extmarks(bufnr, nb)
+  -- Drop cells whose anchor collided with another (e.g. a delete that
+  -- consumed an entire cell's row range left two anchors at the same
+  -- row). prune_phantoms removes the empty overlapper.
   require("neo-marimo.notebook").prune_phantoms(nb)
+  -- Resync once more after pruning so the cell.code of any survivors is
+  -- read from the post-prune offsets.
+  M.sync_cells_from_extmarks(bufnr, nb)
 
-  -- Refresh code text + cell-type detection from the new buffer state.
-  M.sync_cells_from_buffer(nb)
-
-  -- Re-render borders at the new positions.
   M.render_all_borders(bufnr, nb)
   nb.dirty = true
 end
