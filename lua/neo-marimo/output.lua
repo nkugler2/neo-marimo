@@ -216,6 +216,31 @@ M.register_renderer("image/*", render_image)
 -- delegate to the registered handler for a nested mimetype.
 function M._lookup_renderer(mime) return lookup_renderer(mime) end
 
+-- Some rich outputs (matplotlib via `_repr_mimebundle_`, and other libraries
+-- that emit a mimebundle) arrive under a non-HTML mimetype carrying their
+-- image as a `data:image/...;base64,...` URI — e.g. the data field is the
+-- string `{"image/png": "data:image/png;base64,..."}`, or a decoded table
+-- keyed by mimetype. render_html only extracts data URIs from text/html, so
+-- these slip through to the plain-text dump. Detect and unwrap them here.
+local function extract_embedded_image(data)
+  if type(data) == "string" then
+    return image.extract_data_uri(data)
+  end
+  if type(data) == "table" then
+    for _, key in ipairs({ "image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp" }) do
+      local v = data[key]
+      if type(v) == "string" and v ~= "" then
+        -- The value is either a full data: URI or bare base64 under the
+        -- mimetype key. Try the URI form first, fall back to bare base64.
+        local mime, b64 = image.extract_data_uri(v)
+        if mime then return mime, b64 end
+        return key, v
+      end
+    end
+  end
+  return nil
+end
+
 -- Convert a CellOutput object (from the WS message) to virt_lines chunks.
 local function output_to_virt_lines(output)
   if not output then return {} end
@@ -231,13 +256,22 @@ local function output_to_virt_lines(output)
   end
 
   local renderer = lookup_renderer(mimetype)
-  if renderer then
+  -- render_text_plain is the only renderer we let an embedded-image probe
+  -- override — every other renderer (html, markdown, dataframe, image/*) does
+  -- its own, more specific routing that we must not pre-empt.
+  if renderer and renderer ~= render_text_plain then
     -- Pass the matched mimetype as the third arg so pattern renderers
     -- (image/*) can branch on the specific subtype.
     return renderer(data, {}, mimetype)
   end
 
-  -- Unknown mime: try to render as text
+  -- text/plain or unknown mime: unwrap an embedded image if present, else
+  -- fall back to dumping as text.
+  local img_mime, img_data = extract_embedded_image(data)
+  if img_mime and img_data then
+    return image.render_base64(_render_ctx.bufnr, _render_ctx.row or 0, img_mime, img_data)
+  end
+
   if type(data) == "string" then
     return render_text_plain(data)
   end
