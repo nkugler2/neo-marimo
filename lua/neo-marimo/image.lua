@@ -147,11 +147,17 @@ function M.render_at(bufnr, row, mime, bytes)
   elseif backend == "snacks.image" then
     local ok, snacks = pcall(require, "snacks")
     if ok and snacks.image and snacks.image.placement then
+      -- Signature is `placement.new(buf, src, opts)` where `src` is a *string*
+      -- path (snacks asserts `type(src) == "string"`). `inline = true` draws
+      -- the image into the buffer via virtual-padding extmarks (the mode
+      -- snacks itself uses for markdown images); `pos` is (1,0)-indexed.
       -- pcall returns ok_create=true whenever the call doesn't *raise* — but
-      -- placement.new can run and still return nil (no placement made). Only
-      -- suppress the text fallback when a real placement comes back.
-      local ok_create, placement = pcall(snacks.image.placement.new, bufnr,
-        { src = path, pos = { row + 1, 0 } })
+      -- placement.new can run and still return nil, so require a real object
+      -- before we suppress the text fallback.
+      local ok_create, placement = pcall(snacks.image.placement.new, bufnr, path, {
+        pos = { row + 1, 0 },
+        inline = true,
+      })
       if ok_create and placement ~= nil then return {} end
       if not ok_create then
         vim.notify("[neo-marimo] snacks.image failed: " .. tostring(placement),
