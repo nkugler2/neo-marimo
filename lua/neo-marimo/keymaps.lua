@@ -158,9 +158,9 @@ function M.setup(bufnr, nb)
         notebook.delete_cell(nb, idx)
 
         -- The remaining cells' anchors moved themselves via extmark
-        -- gravity; just refresh the cached start_row/end_row.
-        buffer.sync_cells_from_extmarks(bufnr, nb)
-        buffer.render_all_borders(bufnr, nb)
+        -- gravity; refresh_after_mutation does sync + prune + sync +
+        -- render so any anchor that collided gets pruned before we paint.
+        buffer.refresh_after_mutation(bufnr, nb)
       end)
 
       -- Move cursor to a valid position
@@ -205,9 +205,7 @@ function M.setup(bufnr, nb)
 
         buffer.place_cell_anchor(bufnr, new_next, cell.start_row)
         buffer.place_cell_anchor(bufnr, new_cell, cell.start_row + #next_lines)
-        buffer.sync_cells_from_extmarks(bufnr, nb)
-
-        buffer.render_all_borders(bufnr, nb)
+        buffer.refresh_after_mutation(bufnr, nb)
       end)
       jump_to_cell(nb.cells[idx + 1])
     end, o("Marimo: move cell down"))
@@ -241,9 +239,7 @@ function M.setup(bufnr, nb)
 
         buffer.place_cell_anchor(bufnr, new_cell, prev_cell.start_row)
         buffer.place_cell_anchor(bufnr, new_prev, prev_cell.start_row + #cell_lines)
-        buffer.sync_cells_from_extmarks(bufnr, nb)
-
-        buffer.render_all_borders(bufnr, nb)
+        buffer.refresh_after_mutation(bufnr, nb)
       end)
       jump_to_cell(nb.cells[idx - 1])
     end, o("Marimo: move cell up"))

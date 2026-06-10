@@ -61,6 +61,28 @@ function M.sync_cells_from_extmarks(bufnr, nb)
       end
     end
     if dead then
+      -- Push to undo trash before dropping. A `dd` on the only row of a
+      -- 1-line cell removes the cell's anchor along with the line; the
+      -- cell's id, options and code would be lost forever otherwise. With
+      -- this push, the trash-matching path in notebook.try_undo_restore
+      -- can splice the cell back when the user hits `u`. Mirrors the
+      -- push that <leader>md does explicitly.
+      nb._undo_trash = nb._undo_trash or {}
+      table.insert(nb._undo_trash, 1, {
+        id = cell.id,
+        name = cell.name,
+        code = cell.code,
+        options = cell.options,
+        status = cell.status,
+        output = cell.output,
+        console = cell.console,
+        type = cell.type,
+        start_row = cell.start_row,
+        line_count = cell_mod.line_count(cell),
+        trashed_at = vim.uv.hrtime() / 1e6,
+      })
+      while #nb._undo_trash > 5 do table.remove(nb._undo_trash) end
+
       nb.cell_by_id[cell.id] = nil
       table.remove(nb.cells, i)
     else
@@ -83,7 +105,12 @@ function M.sync_cells_from_extmarks(bufnr, nb)
   for i, c in ipairs(nb.cells) do c.index = i end
 
   -- Second pass: end_row = next cell's start - 1; last cell ends at the
-  -- buffer's last line.
+  -- buffer's last line. Cells that come out collapsed (end < start) here
+  -- get stashed to undo trash before prune_phantoms kills them, so a
+  -- subsequent `u` can splice them back. This handles the `dd` case
+  -- where vim moves the anchor to a collision with the next cell rather
+  -- than deleting it outright — the cell isn't "dead" (anchor is fine)
+  -- but its claimed range collapsed.
   for i, cell in ipairs(nb.cells) do
     if i < #nb.cells then
       cell.end_row = nb.cells[i + 1].start_row - 1
@@ -91,9 +118,29 @@ function M.sync_cells_from_extmarks(bufnr, nb)
       cell.end_row = total_lines - 1
     end
     if cell.end_row < cell.start_row then
-      -- Cell collapsed (e.g. a cross-cell delete consumed all its rows).
-      -- Leave the offsets so prune_phantoms / a follow-up cleanup can act
-      -- on it; render_all_borders won't draw a border for invalid ranges.
+      -- Snapshot the cell as it stood before its rows were consumed.
+      -- We use the original (pre-collapse) cell.code which still holds
+      -- the deleted content from the last successful sync.
+      local original_line_count = cell_mod.line_count(cell)
+      -- Pick the row vim is about to reuse — it's the cell's start_row,
+      -- which is what `u` will restore to.
+      local restore_row = cell.start_row
+      nb._undo_trash = nb._undo_trash or {}
+      table.insert(nb._undo_trash, 1, {
+        id = cell.id,
+        name = cell.name,
+        code = cell.code,
+        options = cell.options,
+        status = cell.status,
+        output = cell.output,
+        console = cell.console,
+        type = cell.type,
+        start_row = restore_row,
+        line_count = original_line_count,
+        trashed_at = vim.uv.hrtime() / 1e6,
+      })
+      while #nb._undo_trash > 5 do table.remove(nb._undo_trash) end
+
       cell.code = ""
     else
       local lines = vim.api.nvim_buf_get_lines(bufnr, cell.start_row, cell.end_row + 1, false)
@@ -406,6 +453,21 @@ local function cell_index_at_row(nb, row)
   return #nb.cells
 end
 
+-- Resync cell offsets, prune phantoms, and re-render borders. Shared
+-- between on_bytes_changed and the action paths (new/delete/move) so
+-- every structural mutation goes through the same post-mutation
+-- cleanup pipeline — sync → prune → sync → render.
+function M.refresh_after_mutation(bufnr, nb)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
+  M.sync_cells_from_extmarks(bufnr, nb)
+  -- Drop cells whose anchor collided with another (e.g. a swap that left
+  -- two anchors at the same row) or whose range collapsed. Without this
+  -- a phantom with end<start lingers and produces stacked borders.
+  require("neo-marimo.notebook").prune_phantoms(nb)
+  M.sync_cells_from_extmarks(bufnr, nb)
+  M.render_all_borders(bufnr, nb)
+end
+
 -- Refresh cell offsets after vim has applied buffer changes. With cell
 -- anchors in place (Phase 7.5.6), vim's own extmark machinery already
 -- moved each cell's start_row to the correct position — we just need to
@@ -418,17 +480,7 @@ end
 -- per-event reconciliation.
 function M.on_bytes_changed(bufnr, nb, _changes)
   if not vim.api.nvim_buf_is_valid(bufnr) then return end
-
-  M.sync_cells_from_extmarks(bufnr, nb)
-  -- Drop cells whose anchor collided with another (e.g. a delete that
-  -- consumed an entire cell's row range left two anchors at the same
-  -- row). prune_phantoms removes the empty overlapper.
-  require("neo-marimo.notebook").prune_phantoms(nb)
-  -- Resync once more after pruning so the cell.code of any survivors is
-  -- read from the post-prune offsets.
-  M.sync_cells_from_extmarks(bufnr, nb)
-
-  M.render_all_borders(bufnr, nb)
+  M.refresh_after_mutation(bufnr, nb)
   nb.dirty = true
 end
 

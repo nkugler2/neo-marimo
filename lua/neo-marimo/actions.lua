@@ -73,9 +73,7 @@ function M.new_cell_below(bufnr, nb)
     -- have already been pushed down by extmark gravity from the set_lines
     -- call above, so insert_row is now the empty row we just created.
     buffer.place_cell_anchor(bufnr, new_cell, insert_row)
-    buffer.sync_cells_from_extmarks(bufnr, nb)
-
-    buffer.render_all_borders(bufnr, nb)
+    buffer.refresh_after_mutation(bufnr, nb)
   end)
   jump_to_cell(new_cell)
 end
@@ -95,9 +93,7 @@ function M.new_cell_above(bufnr, nb)
 
     new_cell = notebook.insert_cell_before(nb, idx)
     buffer.place_cell_anchor(bufnr, new_cell, insert_row)
-    buffer.sync_cells_from_extmarks(bufnr, nb)
-
-    buffer.render_all_borders(bufnr, nb)
+    buffer.refresh_after_mutation(bufnr, nb)
   end)
   jump_to_cell(new_cell)
 end
