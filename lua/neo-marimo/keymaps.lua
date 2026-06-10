@@ -186,6 +186,13 @@ function M.setup(bufnr, nb)
         -- Swap lines in the buffer
         local cell_lines = vim.api.nvim_buf_get_lines(bufnr, cell.start_row, cell.end_row + 1, false)
         local next_lines = vim.api.nvim_buf_get_lines(bufnr, next_cell.start_row, next_cell.end_row + 1, false)
+        -- Capture BEFORE the list_extend below — list_extend mutates its
+        -- first argument in place, so #next_lines after the call would be
+        -- (next_count + cell_count), which would push the moved cell's
+        -- anchor too far down and its content would flow into the cell
+        -- after it.
+        local next_count = #next_lines
+        local start_at = cell.start_row
 
         -- Drop both anchors before set_lines; we re-place them at the
         -- swapped positions below. Letting set_lines deal with anchors
@@ -203,8 +210,8 @@ function M.setup(bufnr, nb)
         local new_next = nb.cells[idx]      -- was next_cell, now at idx
         local new_cell = nb.cells[idx + 1]  -- was cell, now at idx+1
 
-        buffer.place_cell_anchor(bufnr, new_next, cell.start_row)
-        buffer.place_cell_anchor(bufnr, new_cell, cell.start_row + #next_lines)
+        buffer.place_cell_anchor(bufnr, new_next, start_at)
+        buffer.place_cell_anchor(bufnr, new_cell, start_at + next_count)
         buffer.refresh_after_mutation(bufnr, nb)
       end)
       jump_to_cell(nb.cells[idx + 1])
@@ -225,6 +232,10 @@ function M.setup(bufnr, nb)
       buffer.with_suppressed_bytes(nb, function()
         local cell_lines = vim.api.nvim_buf_get_lines(bufnr, cell.start_row, cell.end_row + 1, false)
         local prev_lines = vim.api.nvim_buf_get_lines(bufnr, prev_cell.start_row, prev_cell.end_row + 1, false)
+        -- Capture before list_extend mutates cell_lines (see move_cell_down
+        -- for the same trap).
+        local cell_count = #cell_lines
+        local start_at = prev_cell.start_row
 
         buffer.clear_cell_anchor(bufnr, cell)
         buffer.clear_cell_anchor(bufnr, prev_cell)
@@ -237,8 +248,8 @@ function M.setup(bufnr, nb)
         local new_cell = nb.cells[idx - 1]
         local new_prev = nb.cells[idx]
 
-        buffer.place_cell_anchor(bufnr, new_cell, prev_cell.start_row)
-        buffer.place_cell_anchor(bufnr, new_prev, prev_cell.start_row + #cell_lines)
+        buffer.place_cell_anchor(bufnr, new_cell, start_at)
+        buffer.place_cell_anchor(bufnr, new_prev, start_at + cell_count)
         buffer.refresh_after_mutation(bufnr, nb)
       end)
       jump_to_cell(nb.cells[idx - 1])
