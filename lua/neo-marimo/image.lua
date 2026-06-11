@@ -37,6 +37,18 @@ local function ext_for_mime(mime)
   return "bin"
 end
 
+-- Inverse of ext_for_mime: best-effort mimetype from a file extension, used
+-- when we render a downloaded virtual file whose mimetype isn't otherwise known.
+local function mime_for_ext(ext)
+  ext = (ext or ""):lower()
+  if ext == "png" then return "image/png" end
+  if ext == "jpg" or ext == "jpeg" then return "image/jpeg" end
+  if ext == "gif" then return "image/gif" end
+  if ext == "webp" then return "image/webp" end
+  if ext == "svg" then return "image/svg+xml" end
+  return "image/" .. (ext ~= "" and ext or "png")
+end
+
 -- Pick a deterministic filename for a given (mime, data) pair so repeated
 -- renders of the same image don't fill the temp dir. We hash the base64 prefix
 -- because hashing the full payload for every render is wasteful, and the
@@ -148,25 +160,15 @@ end
 
 -- ── public API ────────────────────────────────────────────────────────────
 
--- Render an inline image at the given (bufnr, row) using whatever backend is
--- available. Falls back to writing the file and returning virt_lines that
--- name it. `row` is 0-indexed (the buffer row the image should attach to).
--- `key` (optional) ties the placement to a cell so the next render of that
--- cell can close it first instead of stacking.
---
--- Returns a list of virt_line chunks (possibly empty when the backend draws
--- the image itself and doesn't need a placeholder).
-function M.render_at(bufnr, row, mime, bytes, key)
-  if not bytes or bytes == "" then return {} end
-
-  local path = write_temp(mime, bytes)
-  if not path then
-    return { { { "  [image — decode failed]", "MarimoOutputError" } } }
-  end
-
-  -- If this cell already shows exactly this image, leave the live placement
-  -- alone (write_temp hashes bytes, so an unchanged image yields the same
-  -- path). Avoids the close/recreate flicker on repeated status re-renders.
+-- Draw an image that already lives on disk at `path`, using whatever backend
+-- is available and registering the placement under `key`. Shared by render_at
+-- (bytes written to a temp file) and render_url (bytes downloaded from the
+-- server). `row` is 0-indexed. Returns virt_line chunks (empty when the
+-- backend draws the image itself and needs no placeholder).
+local function render_path(bufnr, row, mime, path, key)
+  -- If this cell already shows exactly this file, leave the live placement
+  -- alone (paths are content- or URL-hashed, so an unchanged image yields the
+  -- same path). Avoids the close/recreate flicker on repeated status renders.
   local existing = key and _placements[bufnr] and _placements[bufnr][key]
   if existing and existing.path == path then return {} end
 
@@ -228,6 +230,38 @@ function M.render_at(bufnr, row, mime, bytes, key)
   }
 end
 
+-- Render raw image bytes at (bufnr, row). Writes them to a content-hashed temp
+-- file (so identical images dedupe), then draws. `key` (optional) ties the
+-- placement to a cell so the next render of that cell replaces rather than
+-- stacks. Returns virt_line chunks (empty when the backend draws the image).
+function M.render_at(bufnr, row, mime, bytes, key)
+  if not bytes or bytes == "" then return {} end
+
+  local path = write_temp(mime, bytes)
+  if not path then
+    return { { { "  [image — decode failed]", "MarimoOutputError" } } }
+  end
+  return render_path(bufnr, row, mime, path, key)
+end
+
+-- Render a server-hosted image referenced by `vf_path` (a marimo virtual-file
+-- reference such as "./@file/123-name.jpeg"). The actual download is performed
+-- by `fetch(dest_path) -> bool`, injected by the caller so this module stays
+-- free of server/auth coupling. The download is cached by a hash of vf_path,
+-- so repeated renders of the same output reuse the file and its placement.
+function M.render_url(bufnr, row, vf_path, key, fetch)
+  if type(vf_path) ~= "string" or vf_path == "" then return {} end
+
+  local ext = vf_path:match("%.([%w]+)$") or "png"
+  local dest = image_dir() .. "/vf_" .. sample_hash(vf_path) .. "." .. ext
+  if not vim.uv.fs_stat(dest) then
+    if not fetch(dest) then
+      return { { { "  [image — fetch failed]", "MarimoOutputError" } } }
+    end
+  end
+  return render_path(bufnr, row, mime_for_ext(ext), dest, key)
+end
+
 -- Decode a base64 payload and render it. `data` may include or omit
 -- whitespace; `mime` is the MIME type of the encoded payload. `key` (optional)
 -- ties the placement to a cell so re-renders replace rather than stack.
@@ -253,6 +287,26 @@ end
 -- True if the html payload contains an embedded data URI we can extract.
 function M.has_embedded_image(html)
   return M.extract_data_uri(html) ~= nil
+end
+
+-- Extract an inline <svg>…</svg> block from an HTML payload (e.g. mo.Html(svg)
+-- or mo.md with embedded SVG). Returns the SVG markup string or nil. Lua `.`
+-- spans newlines, so multi-line SVG is matched fine.
+function M.extract_inline_svg(html)
+  if type(html) ~= "string" then return nil end
+  return html:match("<svg.-</svg>")
+end
+
+-- Extract a marimo virtual-file image reference (an <img src> pointing at
+-- "./@file/…") from an HTML payload. mo.image and friends store the bytes on
+-- the server and reference them by URL rather than inlining them. Returns the
+-- reference string (e.g. "./@file/123-name.jpeg") or nil.
+function M.extract_virtual_file(html)
+  if type(html) ~= "string" then return nil end
+  for src in html:gmatch('<img[^>]-src="([^"]+)"') do
+    if src:find("@file", 1, true) then return src end
+  end
+  return nil
 end
 
 -- Reset the cached backend probe. Used by tests or by users who install

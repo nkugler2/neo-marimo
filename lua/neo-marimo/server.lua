@@ -202,6 +202,38 @@ function M.is_running(filepath)
   return status[1] == -1
 end
 
+-- Download a marimo virtual file to dest_path. Cell output references images
+-- created by mo.image/mo.audio/etc. as "./@file/<len>-<name>"; the bytes live
+-- on the server, not in the payload, so we fetch them over HTTP with the same
+-- auth headers our API calls use (the route is @requires("read") + skew-token).
+-- Binary-safe: curl writes straight to dest_path, bytes never transit a Lua
+-- string. Returns true on success.
+function M.fetch_virtual_file(filepath, vf_path, dest_path)
+  local srv = M._servers[filepath]
+  if not srv then return false end
+
+  -- Normalise the relative reference ("./@file/…" or "/@file/…") to an
+  -- absolute URL on this notebook's server.
+  local rel = vf_path:gsub("^%./", "")
+  if rel:sub(1, 1) ~= "/" then rel = "/" .. rel end
+  local url = "http://127.0.0.1:" .. tostring(srv.port) .. rel
+
+  local args = {
+    "curl", "-s", "-f", "--max-time", "10",
+    "-H", "Marimo-Session-Id: " .. srv.session_id,
+  }
+  if srv.server_token then
+    table.insert(args, "-H")
+    table.insert(args, "Marimo-Server-Token: " .. srv.server_token)
+  end
+  table.insert(args, "-o")
+  table.insert(args, dest_path)
+  table.insert(args, url)
+
+  local r = vim.system(args):wait()
+  return r.code == 0
+end
+
 -- Start a headless marimo server for the given notebook.
 -- Returns the server state table, or nil on failure.
 function M.start(filepath, port, on_message)

@@ -7,6 +7,7 @@ local markdown = require("neo-marimo.markdown")
 local image = require("neo-marimo.image")
 local widgets = require("neo-marimo.widgets")
 local dataframe = require("neo-marimo.dataframe")
+local server = require("neo-marimo.server")
 
 local M = {}
 
@@ -25,7 +26,7 @@ local MAX_DATAFRAME_INLINE_ROWS = 5
 -- variable since render is called from a hot path and threading it through
 -- every renderer signature would be a lot of plumbing for one optional
 -- side-effect.
-local _render_ctx = { bufnr = nil, cell_id = nil, row = nil, image_drawn = false }
+local _render_ctx = { bufnr = nil, cell_id = nil, row = nil, image_drawn = false, filepath = nil }
 
 -- ── Renderer registry ──────────────────────────────────────────────────────
 --
@@ -126,6 +127,25 @@ local function render_html(data)
       _render_ctx.image_drawn = true
       return image.render_base64(_render_ctx.bufnr, _render_ctx.row or 0, mime, b64, _render_ctx.cell_id)
     end
+  end
+
+  -- Inline <svg> markup (mo.Html(svg), mo.md with embedded SVG). Rasterise it
+  -- through the image path rather than stripping the tags to nothing.
+  local svg = image.extract_inline_svg(data)
+  if svg then
+    _render_ctx.image_drawn = true
+    return image.render_at(_render_ctx.bufnr, _render_ctx.row or 0,
+      "image/svg+xml", svg, _render_ctx.cell_id)
+  end
+
+  -- Server-hosted virtual-file image (mo.image, etc.): the <img src> points at
+  -- "./@file/…" and the bytes live on the marimo server. Fetch and render them.
+  local vf = image.extract_virtual_file(data)
+  if vf and _render_ctx.filepath then
+    _render_ctx.image_drawn = true
+    local filepath = _render_ctx.filepath
+    return image.render_url(_render_ctx.bufnr, _render_ctx.row or 0, vf, _render_ctx.cell_id,
+      function(dest) return server.fetch_virtual_file(filepath, vf, dest) end)
   end
 
   -- Fallback: strip remaining tags. Surface SVG/<img> as a placeholder so
@@ -301,8 +321,9 @@ end
 -- ── Public API ──────────────────────────────────────────────────────────────
 
 -- Render (or clear) the output for a cell.
--- `cell` must have `.end_row` set correctly.
-function M.render(bufnr, cell)
+-- `cell` must have `.end_row` set correctly. `filepath` (optional) is the
+-- notebook path, used to fetch server-hosted virtual-file images.
+function M.render(bufnr, cell, filepath)
   if not vim.api.nvim_buf_is_valid(bufnr) then return end
 
   -- Clear previous output marks for this cell's row range
@@ -319,6 +340,7 @@ function M.render(bufnr, cell)
   _render_ctx.bufnr = bufnr
   _render_ctx.cell_id = cell.id
   _render_ctx.row = cell.end_row
+  _render_ctx.filepath = filepath
   -- Track whether this pass draws an inline image. If not, any image this
   -- cell drew on a previous run (e.g. it now returns a DataFrame instead of a
   -- plot) must be torn down so it doesn't linger as an orphaned placement.
@@ -480,7 +502,7 @@ function M.handle_cell_op(bufnr, nb, msg)
   -- Re-render output for this cell
   vim.schedule(function()
     if vim.api.nvim_buf_is_valid(bufnr) then
-      M.render(bufnr, cell)
+      M.render(bufnr, cell, nb.filepath)
     end
   end)
 end
