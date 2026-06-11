@@ -53,7 +53,9 @@ local function commit(nb, cell, w, value)
   widgets.set_override(w.object_id, value)
   w.value = value
   if widgets.set_value(nb.filepath, w.object_id, value) then
-    require("neo-marimo.output").render(nb.bufnr, cell)
+    -- filepath matters: without it a re-render drops any virtual-file
+    -- image this cell's output also contains.
+    require("neo-marimo.output").render(nb.bufnr, cell, nb.filepath)
   end
 end
 

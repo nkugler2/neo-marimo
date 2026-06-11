@@ -1,19 +1,22 @@
--- Phase 8.3 — interactive widget rendering for mo.ui.* outputs.
+-- Interactive widget state + ASCII renderers for mo.ui.* outputs.
 --
--- Marimo serializes UI elements as `<marimo-{name} object-id="…"
--- data-{attr}="…" …>` custom elements inside the cell's HTML payload. We
--- parse those out, render an ASCII representation, and keep a registry per
--- cell so :MarimoWidget can list them and POST value updates to the kernel
--- via /api/kernel/set_ui_element_value.
+-- Parsing lives elsewhere since Phase 9: html.lua builds the element tree
+-- and tree_render.lua walks it, calling back into this module to (a) build
+-- and register widget entries per cell and (b) render each widget type as
+-- virt_line chunks. This module owns:
 --
--- Why a side command instead of cursor-on-row keymaps:
---   Virt_lines don't accept cursor focus, so the plan's "key dispatcher
---   keyed on cursor row" can't reach a widget that lives entirely inside
---   a virt_line attached to the cell's end_row. We expose interaction via
---   `:MarimoWidget` (and `<leader>mw` by default), which opens a picker for
---   the widgets in the current cell's output. The picker drives the same
---   set_ui_element_value endpoint the browser uses, so dependent cells
---   re-run as soon as a value changes.
+--   * the per-(bufnr, cell_id) widget registry that :MarimoWidget lists
+--   * persistent value overrides (so a slider the user moved doesn't snap
+--     back to data-initial-value on the next re-render)
+--   * the per-type ASCII renderers
+--   * set_value — the POST to /api/kernel/set_ui_element_value
+--
+-- Why interaction is a side command instead of cursor-on-row keymaps:
+-- virt_lines don't accept cursor focus, so a "key dispatcher keyed on
+-- cursor row" can't reach a widget that lives inside a virt_line. We expose
+-- interaction via :MarimoWidget (<leader>mw), which drives the same
+-- set_ui_element_value endpoint the browser uses, so dependent cells re-run
+-- as soon as a value changes.
 
 local utils = require("neo-marimo.utils")
 
@@ -21,12 +24,12 @@ local M = {}
 
 -- ── per-notebook widget registry ──────────────────────────────────────────
 --
--- Keyed by (bufnr, cell_id) so cell-op re-renders blow away the old set
--- before the new one lands. Widget table fields:
+-- Keyed by (bufnr, cell_id) so cell re-renders blow away the old set before
+-- the new one lands. Widget table fields:
 --   name           - "slider", "button", "checkbox", etc.
 --   object_id      - marimo's stable id for set_ui_element_value
---   value          - current value (best-effort from data-initial-value)
---   options        - parsed attribute map (start, stop, step, label, …)
+--   value          - current value (initial-value, or the user's override)
+--   options        - parsed data-* attribute map (start, stop, label, …)
 --   label          - human-readable label for pickers
 
 M._by_cell = {}
@@ -36,9 +39,8 @@ M._by_cell = {}
 -- picker would update the value, POST it to the kernel, then the very next
 -- cell re-render would parse the original `data-initial-value` from the
 -- cached output HTML and snap the displayed thumb back to where it started.
--- Overrides are cleared when a fresh cell-op delivers a new output for the
--- cell (see output.handle_cell_op): real re-executions reset the slider,
--- silent value-change pokes do not.
+-- Overrides persist for the lifetime of the cell; the user clears them by
+-- re-running the cell or via :MarimoResetWidgets.
 M._value_overrides = {}
 
 local function registry_key(bufnr, cell_id) return bufnr .. ":" .. cell_id end
@@ -51,9 +53,15 @@ function M.list_for_cell(bufnr, cell_id)
   return M._by_cell[registry_key(bufnr, cell_id)] or {}
 end
 
+-- Add a parsed widget to the cell's registry (called by tree_render during
+-- the render walk, in document order).
+function M.register_widget(bufnr, cell_id, widget)
+  local key = registry_key(bufnr, cell_id)
+  M._by_cell[key] = M._by_cell[key] or {}
+  table.insert(M._by_cell[key], widget)
+end
+
 -- Drop overrides for every widget previously registered against this cell.
--- Called when a fresh cell-op replaces cell.output so the post-execution
--- display matches the new HTML, not the user's stale interaction state.
 function M.clear_overrides_for_cell(bufnr, cell_id)
   local list = M._by_cell[registry_key(bufnr, cell_id)]
   if not list then return end
@@ -67,142 +75,68 @@ function M.set_override(object_id, value)
   M._value_overrides[object_id] = value
 end
 
--- Clear every value override the notebook holds. Wired to :MarimoResetWidgets
--- so the user has an explicit knob when an override has gotten stale
--- (typically: they changed the slider's code range and want the new initial
--- value back).
+function M.get_override(object_id)
+  if not object_id then return nil end
+  return M._value_overrides[object_id]
+end
+
+-- Clear every value override the notebook holds. Wired to
+-- :MarimoResetWidgets so the user has an explicit knob when an override has
+-- gotten stale (typically: they changed the slider's code range and want
+-- the new initial value back).
 function M.clear_all_overrides()
   M._value_overrides = {}
 end
 
-local function register(bufnr, cell_id, widget)
-  local key = registry_key(bufnr, cell_id)
-  M._by_cell[key] = M._by_cell[key] or {}
-  table.insert(M._by_cell[key], widget)
-end
-
--- ── HTML helpers ──────────────────────────────────────────────────────────
-
--- Decode the named entities marimo uses (amp/lt/gt/quot/apos) AND the
--- generic numeric character references (&#92; for backslash is the one
--- that bites — marimo entity-encodes embedded backslashes in JSON-encoded
--- attribute values, so without this the JSON decode downstream sees
--- `&#92;"` instead of `\"` and bails on a malformed escape).
-local function decode_entities(s)
-  if type(s) ~= "string" then return s end
-  return (s:gsub("&amp;", "&")
-           :gsub("&lt;", "<")
-           :gsub("&gt;", ">")
-           :gsub("&quot;", '"')
-           :gsub("&apos;", "'")
-           :gsub("&#x(%x+);", function(hex)
-             local n = tonumber(hex, 16)
-             if n then return vim.fn.nr2char(n) end
-           end)
-           :gsub("&#(%d+);", function(dec)
-             local n = tonumber(dec)
-             if n then return vim.fn.nr2char(n) end
-           end))
-end
-
--- Parse a key="value" / key='value' / key=value (unquoted) attribute string
--- into a Lua table. Marimo's HTML is well-formed so we don't need to handle
--- broken markup — but we do see both quoting styles depending on what's
--- inside the value.
-local function parse_attrs(attr_str)
-  local out = {}
-  for k, v in attr_str:gmatch('([%w%-_:]+)%s*=%s*"([^"]*)"') do
-    out[k] = decode_entities(v)
-  end
-  for k, v in attr_str:gmatch("([%w%-_:]+)%s*=%s*'([^']*)'") do
-    if out[k] == nil then out[k] = decode_entities(v) end
-  end
-  return out
-end
-
-local function to_num(s, default)
-  if s == nil then return default end
-  return tonumber(s) or default
-end
+-- ── value coercion helpers (used by renderers) ────────────────────────────
 
 local function to_bool(s, default)
   if s == nil then return default end
-  if s == "true" or s == "1" or s == "yes" then return true end
-  if s == "false" or s == "0" or s == "no" then return false end
+  if s == true or s == "true" or s == "1" or s == "yes" then return true end
+  if s == false or s == "false" or s == "0" or s == "no" then return false end
   return default
-end
-
--- Best-effort JSON unmarshal for marimo's `data-initial-value` payload,
--- which is sometimes a primitive string and sometimes a JSON-encoded one
--- (e.g. for dropdown/multiselect that carry arrays). Returns the parsed
--- value, falling back to the raw string.
-local function parse_initial_value(raw)
-  if raw == nil then return nil end
-  if raw == "true" then return true end
-  if raw == "false" then return false end
-  local n = tonumber(raw)
-  if n then return n end
-  -- Looks like JSON?
-  if raw:sub(1, 1) == "[" or raw:sub(1, 1) == "{" or raw:sub(1, 1) == '"' then
-    local data, err = utils.json_decode(raw)
-    if not err then return data end
-  end
-  return raw
-end
-
--- Clean up a string attribute value that marimo might have triple-wrapped
--- as: HTML-attribute-encoded ⇒ JSON-string ⇒ HTML-markup. For widget
--- labels marimo runs the label text through its markdown renderer first
--- (so headings/inline-code in labels work), JSON-encodes the result for
--- transport, and HTML-entity-encodes that for the attribute value. We undo
--- all three so the picker shows "alpha", not the literal
--- `"<span class=\"markdown prose…\">alpha</span>"` block the user reported.
-local function clean_label(s)
-  if type(s) ~= "string" or s == "" then return s end
-  s = decode_entities(s)
-  if s:sub(1, 1) == '"' and s:sub(-1) == '"' then
-    local ok, decoded = pcall(vim.json.decode, s)
-    if ok and type(decoded) == "string" then s = decoded end
-  end
-  s = s:gsub("<[^>]+>", "")
-  s = s:match("^%s*(.-)%s*$") or s
-  return s
 end
 
 -- ── per-type renderers ────────────────────────────────────────────────────
 --
--- Each renderer takes the parsed widget table and returns a list of virt_line
--- chunks (i.e. a list of {text, hl_group}-tuple lists). Multi-line widgets
--- (text_area, dropdown with picker indicator) emit several lines.
+-- Each renderer takes the parsed widget table and returns a list of
+-- virt_line chunks (i.e. a list of {text, hl_group}-tuple lists).
 
 local function render_slider(w)
   local start = w.options.start or 0
   local stop = w.options.stop or 1
-  local value = tonumber(w.value) or start
   local label = w.options.label or "slider"
+
+  -- range_slider carries a {lo, hi} table; position the thumb at the low
+  -- end and display the pair.
+  local value = w.value
+  local display, pos_value
+  if type(value) == "table" then
+    display = tostring(value[1]) .. "‥" .. tostring(value[2] or value[1])
+    pos_value = tonumber(value[1]) or start
+  else
+    pos_value = tonumber(value) or start
+    display = tostring(pos_value)
+  end
 
   local width = 24
   local denom = (stop - start)
   local pos = 0
   if denom ~= 0 then
-    pos = math.floor(((value - start) / denom) * (width - 1) + 0.5)
+    pos = math.floor(((pos_value - start) / denom) * (width - 1) + 0.5)
     if pos < 0 then pos = 0 end
     if pos > width - 1 then pos = width - 1 end
   end
-
-  local before = string.rep("━", pos)
-  local thumb = "●"
-  local after = string.rep("━", width - pos - 1)
 
   return { {
     { "  ", "MarimoOutputText" },
     { label .. ": ", "MarimoWidgetLabel" },
     { "[", "MarimoWidgetTrack" },
-    { before, "MarimoWidgetTrack" },
-    { thumb, "MarimoWidgetThumb" },
-    { after, "MarimoWidgetTrack" },
+    { string.rep("━", pos), "MarimoWidgetTrack" },
+    { "●", "MarimoWidgetThumb" },
+    { string.rep("━", width - pos - 1), "MarimoWidgetTrack" },
     { "] ", "MarimoWidgetTrack" },
-    { tostring(value), "MarimoWidgetValue" },
+    { display, "MarimoWidgetValue" },
     { "  (" .. start .. "‥" .. stop .. ")", "Comment" },
   } }
 end
@@ -217,7 +151,7 @@ local function render_button(w)
 end
 
 local function render_checkbox(w)
-  local checked = to_bool(tostring(w.value), false)
+  local checked = to_bool(w.value, false)
   local label = w.options.label or "checkbox"
   local mark = checked and "[x]" or "[ ]"
   return { {
@@ -295,7 +229,7 @@ local function render_multiselect(w)
   local value = w.value
   local repr
   if type(value) == "table" then
-    repr = table.concat(value, ", ")
+    repr = table.concat(vim.tbl_map(tostring, value), ", ")
     if repr == "" then repr = "…" end
   else
     repr = tostring(value or "…")
@@ -341,6 +275,18 @@ local function render_radio(w)
   } }
 end
 
+local function render_refresh(w)
+  -- data-default-interval arrives JSON-encoded ('"1m"').
+  local interval = w.options.default_interval or ""
+  interval = interval:gsub('^"', ""):gsub('"$', "")
+  return { {
+    { "  ", "MarimoOutputText" },
+    { "↻ refresh", "MarimoWidgetLabel" },
+    { interval ~= "" and ("  every " .. interval) or "", "MarimoWidgetValue" },
+    { "  (runs in browser)", "Comment" },
+  } }
+end
+
 local function render_unknown(w)
   return { {
     { "  ", "MarimoOutputText" },
@@ -350,14 +296,14 @@ local function render_unknown(w)
   } }
 end
 
--- Renderer table keyed on the widget name. `name` here is the suffix of
--- `<marimo-{name}>` (e.g. "slider", "text-area"). Marimo uses kebab-case
--- in tag names but snake_case in the Python API; we normalise via
--- `name:gsub("-", "_")` before lookup.
+-- Renderer table keyed on the widget name: the suffix of `<marimo-{name}>`
+-- normalised to snake_case ("text-area" → "text_area").
 local RENDERERS = {
   slider       = render_slider,
+  range_slider = render_slider,
   button       = render_button,
   checkbox     = render_checkbox,
+  switch       = render_checkbox,
   text         = render_text,
   text_area    = render_text_area,
   dropdown     = render_dropdown,
@@ -366,393 +312,29 @@ local RENDERERS = {
   date         = render_date,
   datetime     = render_date,
   radio        = render_radio,
-  range_slider = render_slider,
-  switch       = render_checkbox,
+  refresh      = render_refresh,
 }
 
--- ── parsing pass ──────────────────────────────────────────────────────────
-
-local WIDGET_PATTERN = "<marimo%-([%w%-]+)([^>]*)>"
-
--- Marimo wraps every UI element in `<marimo-ui-element object-id="…">…
--- <marimo-{kind} data-…></marimo-{kind}>…</marimo-ui-element>`. The wrapper
--- carries the kernel-stable `object-id` (the thing set_ui_element_value
--- needs); the inner tag carries `data-initial-value`, `data-start`, etc.
---
--- Pre-process the input so each `<marimo-{kind}>` tag inherits the wrapper's
--- `object-id`. After this pass the wrapper is gone, the inner tag has both
--- the id and the data attributes, and the main parser can treat it as a
--- single self-contained widget — fixes the picker showing "ui_element ·
--- ui_element = nil" alongside the real widget.
-local UI_ELEMENT_PATTERN = "<marimo%-ui%-element([^>]*)>(.-)</marimo%-ui%-element>"
-
-local function inject_object_id(inner_html, object_id)
-  if not object_id or object_id == "" then return inner_html end
-  -- Inject onto the first `<marimo-{kind}>` opener we find inside the
-  -- wrapper (typically just one). Skip if the tag already has its own.
-  local replaced = false
-  return inner_html:gsub("(<marimo%-[%w%-]+)([^>]*)>", function(open_tag, attrs)
-    if replaced then return open_tag .. attrs .. ">" end
-    replaced = true
-    if attrs:find("object%-id=", 1, true) then
-      return open_tag .. attrs .. ">"
-    end
-    return open_tag .. attrs .. ' object-id="' .. object_id .. '">'
-  end, 1)
+-- Render one widget table into virt_line chunks.
+function M.render_widget(w)
+  local renderer = RENDERERS[w.name] or render_unknown
+  return renderer(w)
 end
 
--- Extract widgets from an HTML payload. Returns:
---   widgets : list of parsed widget tables
---   stripped: html with the widget tags substituted by ASCII placeholders
---             ("[slider]") so any surrounding text/structure renders cleanly.
-local function parse_widgets(html)
-  -- First pass: hoist object-id from each <marimo-ui-element> wrapper onto
-  -- its inner widget tag, then remove the wrapper.
-  html = html:gsub(UI_ELEMENT_PATTERN, function(attr_str, inner)
-    local outer = parse_attrs(attr_str)
-    return inject_object_id(inner, outer["object-id"] or outer.object_id)
-  end)
-
-  local widgets = {}
-  local stripped = html:gsub(WIDGET_PATTERN, function(name, attr_str)
-    -- Skip the wrapper itself if any survived the first pass (e.g. an
-    -- unclosed wrapper). The wrapper isn't a renderable widget.
-    if name == "ui-element" then return "" end
-
-    local attrs = parse_attrs(attr_str)
-    local key = name:gsub("-", "_")
-    local options = {}
-    for k, v in pairs(attrs) do
-      if k:sub(1, 5) == "data-" then
-        options[k:sub(6):gsub("%-", "_")] = v
-      end
-    end
-    if options.start then options.start = to_num(options.start, options.start) end
-    if options.stop  then options.stop  = to_num(options.stop,  options.stop)  end
-    if options.step  then options.step  = to_num(options.step,  options.step)  end
-    if options.label then options.label = clean_label(options.label) end
-
-    local object_id = attrs["object-id"] or attrs.object_id
-    local parsed_value = parse_initial_value(options.initial_value)
-    -- Apply any persistent override from a prior picker interaction so the
-    -- displayed slider thumb / number field reflects the user's last set
-    -- value, not the original initial-value from the parsed HTML.
-    if object_id and M._value_overrides[object_id] ~= nil then
-      parsed_value = M._value_overrides[object_id]
-    end
-
-    local w = {
-      name = key,
-      object_id = object_id,
-      label = (options.label and options.label ~= "") and options.label or key,
-      value = parsed_value,
-      options = options,
-    }
-    table.insert(widgets, w)
-    return "[" .. key .. "]"
-  end)
-
-  -- Close any trailing </marimo-name> tags now that we've stripped the
-  -- openers — leaving them in would show as literal "</marimo-slider>".
-  stripped = stripped:gsub("</marimo%-[%w%-]+>", "")
-  return widgets, stripped
+-- Public extension point: register (or replace) the renderer for a widget
+-- name. `fn(w) -> virt_lines` where w is the widget table described at the
+-- top of this file.
+function M.register_renderer(name, fn)
+  RENDERERS[name] = fn
 end
 
--- ── Phase 8.4 layout primitives ───────────────────────────────────────────
---
--- mo.hstack / mo.vstack / mo.tabs / mo.accordion render as ASCII boxes. The
--- layouts share the same HTML rail as widgets (custom elements + helper
--- divs), so detection lives next to the widget parser and the renderer is
--- recursive: a layout's children may contain more layouts or widgets.
-
-local LAYOUT_PATTERN = "<marimo%-(h?vstack)([^>]*)>(.-)</marimo%-%1>"
-
--- Walk a layout's inner HTML, breaking it into "slot" strings on the
--- top-level child elements. Marimo wraps each child in a `<div>` or
--- another `<marimo-*>` element, so we match balanced angle-bracket pairs.
--- A real HTML parser would be safer; this regex chain handles the layouts
--- marimo emits because they don't nest plain `<` inside attribute values.
-local function split_layout_children(inner)
-  local children = {}
-  local i = 1
-  while i <= #inner do
-    -- Skip whitespace between children.
-    local s, e = inner:find("^%s+", i)
-    if s then i = e + 1 end
-
-    -- Match either a <marimo-*>…</marimo-*> child or a <div …>…</div> child.
-    local tag_open = inner:match("^<([%w%-]+)", i)
-    if not tag_open then break end
-    local close_tag = "</" .. tag_open .. ">"
-    local content_start = inner:find(">", i, true)
-    if not content_start then break end
-    local content_end = inner:find(close_tag, content_start + 1, true)
-    if not content_end then break end
-    table.insert(children, inner:sub(content_start + 1, content_end - 1))
-    i = content_end + #close_tag
-  end
-  return children
-end
-
--- Render a vertical stack: each child is a block of virt_lines, separated
--- by a blank-ish spacer so the user can tell where one ends and the next
--- starts.
-local function render_vstack(_attrs, inner, ctx)
-  local out = {}
-  local children = split_layout_children(inner)
-  for idx, child in ipairs(children) do
-    local lines = M.render(child, ctx.bufnr, ctx.cell_id) or {}
-    for _, l in ipairs(lines) do table.insert(out, l) end
-    if idx < #children then
-      table.insert(out, { { "  ", "MarimoOutputText" } })
-    end
-  end
-  return out
-end
-
--- Render a horizontal stack as side-by-side ASCII boxes. Each child is
--- rendered into its own list of virt_line chunks, then stitched into a
--- column. Width is computed from the surrounding window, capped so each
--- column gets at least 12 visible characters.
-local function render_hstack(_attrs, inner, ctx)
-  local children = split_layout_children(inner)
-  if #children == 0 then return {} end
-
-  -- Render each child into a string-only column. We can't carry per-character
-  -- highlights through a side-by-side stitch without exploding the chunk
-  -- count, so the column body uses MarimoOutputText. The border keeps its
-  -- own colour.
-  local columns = {}
-  local max_height = 0
-  local total_pad = 4   -- two outer spaces + the leading "  " indent
-  for _, child in ipairs(children) do
-    local virt = M.render(child, ctx.bufnr, ctx.cell_id) or {}
-    local strs = {}
-    for _, chunks in ipairs(virt) do
-      local s = ""
-      for _, ch in ipairs(chunks) do s = s .. ch[1] end
-      -- Drop the leading two-space indent each renderer adds, otherwise
-      -- it stacks and the columns are pushed off the right edge.
-      s = s:gsub("^%s%s", "")
-      table.insert(strs, s)
-    end
-    table.insert(columns, strs)
-    if #strs > max_height then max_height = #strs end
-  end
-
-  local wins = vim.fn.win_findbuf(ctx.bufnr or 0)
-  local total_width = 80
-  if #wins > 0 then total_width = vim.api.nvim_win_get_width(wins[1]) end
-  local col_width = math.max(12, math.floor((total_width - total_pad - 4) / #columns))
-
-  local out = {}
-  local top = "  "
-  local bot = "  "
-  for j = 1, #columns do
-    top = top .. (j == 1 and "┌" or "┬") .. string.rep("─", col_width)
-  end
-  top = top .. "┐"
-  for j = 1, #columns do
-    bot = bot .. (j == 1 and "└" or "┴") .. string.rep("─", col_width)
-  end
-  bot = bot .. "┘"
-
-  -- Truncate a string to fit within `cells` display cells without slicing
-  -- through a multi-byte codepoint. Box-drawing chars are 3 bytes / 1 cell
-  -- so a naïve s:sub(1, n) lops them in half and shows replacement glyphs.
-  -- vim.fn.strcharpart counts in codepoints, then we measure display width
-  -- after the fact.
-  local function fit(s, cells)
-    local total_chars = vim.fn.strchars(s)
-    local lo, hi = 0, total_chars
-    while lo < hi do
-      local mid = math.floor((lo + hi + 1) / 2)
-      local candidate = vim.fn.strcharpart(s, 0, mid)
-      if vim.fn.strdisplaywidth(candidate) <= cells then
-        lo = mid
-      else
-        hi = mid - 1
-      end
-    end
-    local fitted = vim.fn.strcharpart(s, 0, lo)
-    return fitted, vim.fn.strdisplaywidth(fitted)
-  end
-
-  table.insert(out, { { top, "MarimoWidgetBoxBorder" } })
-  for row = 1, max_height do
-    local chunks = { { "  ", "MarimoOutputText" } }
-    for j, col in ipairs(columns) do
-      table.insert(chunks, { "│", "MarimoWidgetBoxBorder" })
-      local cell = col[row] or ""
-      local visible, visible_w = fit(cell, col_width - 1)
-      local pad = string.rep(" ", math.max(0, col_width - 1 - visible_w))
-      table.insert(chunks, { " ", "MarimoOutputText" })
-      table.insert(chunks, { visible, "MarimoOutputText" })
-      table.insert(chunks, { pad, "MarimoOutputText" })
-      if j == #columns then
-        table.insert(chunks, { "│", "MarimoWidgetBoxBorder" })
-      end
-    end
-    table.insert(out, chunks)
-  end
-  table.insert(out, { { bot, "MarimoWidgetBoxBorder" } })
-  return out
-end
-
--- Tabs: marimo emits a list of <marimo-tab-content data-label="…">…</…>
--- entries. Render every tab in vertical succession with a labeled divider —
--- the alternative (showing only the first tab plus a "switch with <Tab>"
--- hint) requires cursor focus on a virt_line, which doesn't work.
-local function render_tabs(_attrs, inner, _ctx)
-  local tabs = {}
-  for label, body in inner:gmatch('<marimo%-tab%-content[^>]*data%-label="([^"]*)"[^>]*>(.-)</marimo%-tab%-content>') do
-    table.insert(tabs, { label = label, body = body })
-  end
-  if #tabs == 0 then return {} end
-
-  local out = {}
-  for i, tab in ipairs(tabs) do
-    local hl_group = i == 1 and "MarimoWidgetTabActive" or "MarimoWidgetTabInactive"
-    table.insert(out, { { "  ", "MarimoOutputText" },
-                        { "▎ tab: ", "MarimoWidgetBoxBorder" },
-                        { tab.label, hl_group } })
-    local body_lines = M.render(tab.body) or {}
-    for _, l in ipairs(body_lines) do table.insert(out, l) end
-    if i < #tabs then table.insert(out, { { "  ", "MarimoOutputText" } }) end
-  end
-  return out
-end
-
--- Accordion: each `<marimo-accordion-item data-label="…">…</…>` becomes a
--- collapsed header followed by its body inline. Real fold-style collapsing
--- isn't worth it inside virt_lines.
-local function render_accordion(_attrs, inner, _ctx)
-  local out = {}
-  for label, body in inner:gmatch('<marimo%-accordion%-item[^>]*data%-label="([^"]*)"[^>]*>(.-)</marimo%-accordion%-item>') do
-    table.insert(out, { { "  ", "MarimoOutputText" },
-                        { "▾ ", "MarimoWidgetBoxBorder" },
-                        { label, "MarimoWidgetLabel" } })
-    local body_lines = M.render(body) or {}
-    for _, l in ipairs(body_lines) do
-      -- Re-indent the body so it visually belongs to the header.
-      table.insert(out, l)
-    end
-  end
-  return out
-end
-
-local LAYOUTS = {
-  ["marimo%-hstack"]    = render_hstack,
-  ["marimo%-vstack"]    = render_vstack,
-  ["marimo%-tabs"]      = render_tabs,
-  ["marimo%-accordion"] = render_accordion,
-}
-
--- Strip one (and only one) layout wrapper from `html`, returning the
--- inner body and the renderer function — or nil if no layout matches.
-local function try_match_layout(html)
-  for tag, fn in pairs(LAYOUTS) do
-    local open, attr_str, inner_start = html:match("^%s*(<" .. tag .. ")(([^>]*))>")
-    if open then
-      local content_start = html:find(">", 1, true)
-      local close_tag = "</" .. tag:gsub("%%", "") .. ">"
-      local content_end = html:find(close_tag, content_start + 1, true)
-      if content_end then
-        local inner = html:sub(content_start + 1, content_end - 1)
-        return fn, attr_str or "", inner
-      end
-    end
-  end
-  return nil
-end
-
--- ── public API ────────────────────────────────────────────────────────────
-
--- True if the html payload contains any marimo widget custom elements.
-function M.has_widgets(html)
-  if type(html) ~= "string" then return false end
-  return html:find(WIDGET_PATTERN) ~= nil
-end
-
--- True if the html payload is wrapped in a layout primitive that we render
--- (hstack/vstack/tabs/accordion). Containers without recognised children
--- still match — the renderer falls through to the widget pass on the body.
-function M.has_layout(html)
-  if type(html) ~= "string" then return false end
-  return html:find("<marimo%-hstack") ~= nil
-      or html:find("<marimo%-vstack") ~= nil
-      or html:find("<marimo%-tabs") ~= nil
-      or html:find("<marimo%-accordion") ~= nil
-end
-
--- Render `html` (containing any combination of marimo widgets and/or
--- layout primitives) into virt_line chunks. Also registers each parsed
--- widget with the (bufnr, cell_id) cell-scoped registry so :MarimoWidget
--- can act on it.
---
--- `bufnr` and `cell_id` are optional — only the outermost call clears the
--- cell registry; recursive calls from layout renderers reuse the same ctx
--- so children widgets accumulate into the same registry list.
-function M.render(html, bufnr, cell_id)
-  if type(html) ~= "string" then return {} end
-
-  -- Track recursion: only the *outermost* render call should clear the
-  -- cell registry and reset the in-render flag. A naïve boolean guard
-  -- would let recursive sibling calls inside an hstack/vstack each clear
-  -- the registry between iterations, dropping every widget but the last.
-  local is_outer = false
-  if bufnr and cell_id and not M._in_render then
-    M.clear_for_cell(bufnr, cell_id)
-    M._in_render = true
-    is_outer = true
-  end
-
-  local ctx = { bufnr = bufnr, cell_id = cell_id }
-
-  -- Layout match: render the wrapper and return early. The inner body is
-  -- rendered recursively (which may itself match a layout, hit widgets, or
-  -- both).
-  local layout_fn, attr_str, inner = try_match_layout(html)
-  if layout_fn then
-    local out = layout_fn(attr_str, inner, ctx)
-    if is_outer then M._in_render = false end
-    return out
-  end
-
-  local widgets, stripped = parse_widgets(html)
-  local virt_lines = {}
-  for _, w in ipairs(widgets) do
-    if bufnr and cell_id then register(bufnr, cell_id, w) end
-    local renderer = RENDERERS[w.name] or render_unknown
-    local chunks_list = renderer(w)
-    for _, chunks in ipairs(chunks_list) do
-      table.insert(virt_lines, chunks)
-    end
-  end
-
-  -- If there's residual non-tag text (e.g. a label paragraph that wrapped
-  -- the widget), append it as a final dim line so we don't lose context.
-  local trimmed = stripped:gsub("<[^>]+>", ""):gsub("%s+", " "):match("^%s*(.-)%s*$") or ""
-  for _, w in ipairs(widgets) do
-    trimmed = trimmed:gsub("%[" .. w.name .. "%]", "")
-  end
-  trimmed = trimmed:gsub("%s+", " "):match("^%s*(.-)%s*$") or ""
-  if trimmed ~= "" then
-    table.insert(virt_lines, {
-      { "  ", "MarimoOutputText" },
-      { trimmed, "Comment" },
-    })
-  end
-
-  if is_outer then M._in_render = false end
-  return virt_lines
-end
+-- ── kernel interaction ────────────────────────────────────────────────────
 
 -- POST a new value for a widget to /api/kernel/set_ui_element_value.
 -- Returns true on HTTP 200, false otherwise (with a [neo-marimo] warning).
 -- After a successful POST, marimo recomputes any cells that depend on
--- the widget and broadcasts cell-op for each — the slider's own cell does
--- NOT re-broadcast though, which is why we also stash an override in
+-- the widget and broadcasts cell-op for each — the widget's own cell does
+-- NOT re-broadcast though, which is why callers also stash an override in
 -- M._value_overrides so the next render of *this* cell shows the new value.
 function M.set_value(filepath, object_id, value)
   if not object_id or object_id == "" then
@@ -804,6 +386,8 @@ function M.set_value(filepath, object_id, value)
   end
   return true
 end
+
+-- ── picker labels ─────────────────────────────────────────────────────────
 
 -- Build a human-readable list-row label for use in pickers. Long string
 -- values (multiselect arrays, text_area bodies) get truncated to ~30 chars

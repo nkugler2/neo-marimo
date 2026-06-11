@@ -2,12 +2,12 @@
 -- Handles the cell-op messages from the marimo WebSocket.
 
 local hl = require("neo-marimo.highlights")
-local notebook_mod = require("neo-marimo.notebook")
 local markdown = require("neo-marimo.markdown")
 local image = require("neo-marimo.image")
 local widgets = require("neo-marimo.widgets")
 local dataframe = require("neo-marimo.dataframe")
 local server = require("neo-marimo.server")
+local tree_render = require("neo-marimo.tree_render")
 
 local M = {}
 
@@ -25,8 +25,11 @@ local MAX_DATAFRAME_INLINE_ROWS = 5
 -- the widget registry can be keyed properly. Stored as a module-level
 -- variable since render is called from a hot path and threading it through
 -- every renderer signature would be a lot of plumbing for one optional
--- side-effect.
-local _render_ctx = { bufnr = nil, cell_id = nil, row = nil, image_drawn = false, filepath = nil }
+-- side-effect. tree_render writes `image_drawn` and `skip_cap` back into it.
+local _render_ctx = {
+  bufnr = nil, cell_id = nil, row = nil, filepath = nil,
+  image_drawn = false, skip_cap = false,
+}
 
 -- ── Renderer registry ──────────────────────────────────────────────────────
 --
@@ -93,28 +96,21 @@ end
 
 local function render_html(data)
   -- Routing pass for HTML payloads. Marimo wraps a lot of different things
-  -- in text/html — we pick the best renderer based on the contents:
+  -- in text/html — payloads with *structure* (marimo custom elements, HTML
+  -- tables, flex layouts) parse into an element tree and render per node
+  -- (tree_render.lua), so e.g. a tabs container holding a table renders as
+  -- tabs with a table inside instead of the table hijacking the whole cell.
   --
-  --   1. Table / DataFrame  (<marimo-table>, <table>)    → dataframe inline
-  --   2. Layout primitive   (hstack/vstack/tabs/accordion) → widgets module
-  --   3. Marimo UI element  (slider, button, …)           → widgets module
-  --   4. Markdown wrapper   (mo.md output)                → markdown module
-  --   5. Embedded data:image/...;base64 (matplotlib)      → image module
-  --   6. Embedded <img src="..."> or <svg>                → placeholder line
-  --   7. Anything else                                    → strip tags fallback
-  --
-  -- Table check goes first because marimo wraps pandas/polars DataFrames as
-  -- `mo.ui.table(df)` automatically — without this special-case, the widget
-  -- pass below would catch `<marimo-table>` and render it as an unknown
-  -- widget placeholder ("[table]"), and `<leader>mD` would never see the
-  -- data either.
+  -- Everything else takes the fast string path:
+  --   1. Markdown wrapper   (mo.md output)                → markdown module
+  --   2. Embedded data:image/...;base64 (matplotlib)      → image module
+  --   3. Inline <svg> markup                              → image module
+  --   4. Server-hosted virtual-file <img> (mo.image)      → image module
+  --   5. Anything else                                    → strip tags fallback
   if type(data) ~= "string" then return {} end
 
-  local df = dataframe.extract_from_html(data)
-  if df then return dataframe.render_inline(df) end
-
-  if widgets.has_layout(data) or widgets.has_widgets(data) then
-    return widgets.render(data, _render_ctx.bufnr, _render_ctx.cell_id)
+  if tree_render.wants(data) then
+    return tree_render.render(data, _render_ctx)
   end
 
   if markdown.looks_like_marimo_md_html(data) then
@@ -345,6 +341,13 @@ function M.render(bufnr, cell, filepath)
   -- cell drew on a previous run (e.g. it now returns a DataFrame instead of a
   -- plot) must be torn down so it doesn't linger as an orphaned placement.
   _render_ctx.image_drawn = false
+  -- Set by tree_render when the payload renders widgets/layouts (which
+  -- expand to many virt_lines and must not be chopped by the line cap).
+  _render_ctx.skip_cap = false
+  -- The render walk re-registers every widget it encounters, so the cell's
+  -- previous set is dropped up front — a cell whose output stops containing
+  -- widgets also stops listing them in :MarimoWidget.
+  widgets.clear_for_cell(bufnr, cell.id)
 
   local virt_lines = {}
 
@@ -358,11 +361,10 @@ function M.render(bufnr, cell, filepath)
   -- payload — those expand to many virt_lines per widget and the cap
   -- would chop the bottom of a stacked layout, leaving a misleading
   -- partial display. Plain text/dataframe output keeps the cap as before.
+  -- (_render_ctx.skip_cap is set during output_to_virt_lines by tree_render.)
   if cell.output then
     local output_lines = output_to_virt_lines(cell.output)
-    local skip_cap = (cell.output.mimetype == "text/html")
-      and type(cell.output.data) == "string"
-      and (widgets.has_layout(cell.output.data) or widgets.has_widgets(cell.output.data))
+    local skip_cap = _render_ctx.skip_cap
     local shown = 0
     for _, vl in ipairs(output_lines) do
       if not skip_cap and shown >= MAX_LINES then
