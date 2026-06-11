@@ -399,6 +399,7 @@ local function short(v, n)
   else
     s = tostring(v)
   end
+  s = s:gsub("[\n\r]", " ")
   n = n or 30
   if #s > n then s = s:sub(1, n - 1) .. "…" end
   return s
