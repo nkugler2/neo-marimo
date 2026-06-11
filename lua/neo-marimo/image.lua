@@ -303,7 +303,9 @@ end
 -- reference string (e.g. "./@file/123-name.jpeg") or nil.
 function M.extract_virtual_file(html)
   if type(html) ~= "string" then return nil end
-  for src in html:gmatch('<img[^>]-src="([^"]+)"') do
+  -- marimo's HTML builder quotes every attribute with single quotes
+  -- (`_join_params` → `k='v'`), so match either quote style to be safe.
+  for src in html:gmatch("<img[^>]-src=['\"]([^'\"]+)['\"]") do
     if src:find("@file", 1, true) then return src end
   end
   return nil
