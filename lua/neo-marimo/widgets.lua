@@ -8,13 +8,16 @@
 --   * the per-(bufnr, cell_id) widget registry that :MarimoWidget lists
 --   * persistent value overrides (so a slider the user moved doesn't snap
 --     back to data-initial-value on the next re-render)
+--   * the per-buffer focus model (]w / [w cycling, the ▸ marker)
+--   * last-edited-widget tracking and per-notebook pins (Phase 10.4)
 --   * the per-type ASCII renderers
---   * set_value — the POST to /api/kernel/set_ui_element_value
+--   * set_value — the async POST to /api/kernel/set_ui_element_value
 --
--- Why interaction is a side command instead of cursor-on-row keymaps:
+-- Why interaction is keymap-driven instead of cursor-on-row dispatch:
 -- virt_lines don't accept cursor focus, so a "key dispatcher keyed on
--- cursor row" can't reach a widget that lives inside a virt_line. We expose
--- interaction via :MarimoWidget (<leader>mw), which drives the same
+-- cursor row" can't reach a widget that lives inside a virt_line. Focus is
+-- therefore plugin state (cycled with ]w / [w) and acting goes through
+-- widget_picker.lua (<leader>mw and friends), which drives the same
 -- set_ui_element_value endpoint the browser uses, so dependent cells re-run
 -- as soon as a value changes.
 
@@ -54,11 +57,15 @@ function M.list_for_cell(bufnr, cell_id)
 end
 
 -- Add a parsed widget to the cell's registry (called by tree_render during
--- the render walk, in document order).
+-- the render walk, in document order). Stamps the widget with its 1-based
+-- position so focus can fall back to "same slot" when an object-id vanishes
+-- across re-renders. Returns the index.
 function M.register_widget(bufnr, cell_id, widget)
   local key = registry_key(bufnr, cell_id)
   M._by_cell[key] = M._by_cell[key] or {}
   table.insert(M._by_cell[key], widget)
+  widget.index = #M._by_cell[key]
+  return widget.index
 end
 
 -- Drop overrides for every widget previously registered against this cell.
@@ -86,6 +93,117 @@ end
 -- the new initial value back).
 function M.clear_all_overrides()
   M._value_overrides = {}
+end
+
+-- ── focus model (Phase 10.1) ──────────────────────────────────────────────
+--
+-- One focused widget per buffer: { cell_id, object_id, index }. object_id is
+-- the primary key (it survives re-renders); index is the fallback when the
+-- cell's output changed shape and the id vanished.
+
+M._focus = {}
+
+function M.set_focus(bufnr, cell_id, object_id, index)
+  M._focus[bufnr] = { cell_id = cell_id, object_id = object_id, index = index }
+end
+
+function M.get_focus(bufnr)
+  return M._focus[bufnr]
+end
+
+function M.clear_focus(bufnr)
+  M._focus[bufnr] = nil
+end
+
+-- Is this (widget, slot) the focused one? Called during the render walk for
+-- every registered widget, so it has to be cheap.
+function M.is_focused(bufnr, cell_id, widget, index)
+  local f = M._focus[bufnr]
+  if not f or f.cell_id ~= cell_id then return false end
+  if f.object_id and widget.object_id then
+    return f.object_id == widget.object_id
+  end
+  return f.index == index
+end
+
+-- Resolve the buffer's focus to a live registry entry (or nil if the focused
+-- cell/widget no longer exists). Returns widget, cell_id.
+function M.focused_widget(bufnr)
+  local f = M._focus[bufnr]
+  if not f then return nil end
+  local list = M.list_for_cell(bufnr, f.cell_id)
+  for i, w in ipairs(list) do
+    if M.is_focused(bufnr, f.cell_id, w, i) then
+      return w, f.cell_id
+    end
+  end
+  return nil
+end
+
+-- ── last-edited widget (Phase 10.4) ───────────────────────────────────────
+--
+-- Updated on every committed value change; <leader>m. re-opens the edit
+-- prompt for it without hunting for the cell. Stores the nb reference (the
+-- same table init.lua keeps in _attached) so the shortcut works across
+-- notebook buffers.
+
+M._last_widget = nil
+
+function M.set_last(nb, cell_id, object_id)
+  M._last_widget = { nb = nb, cell_id = cell_id, object_id = object_id }
+end
+
+function M.get_last()
+  return M._last_widget
+end
+
+-- ── pinned widgets (Phase 10.4) ───────────────────────────────────────────
+--
+-- Per-notebook (keyed by filepath) ordered list of
+-- { cell_id, object_id, label, name } so favourite widgets anywhere in the
+-- notebook are one keystroke away. Matching against the live registry is by
+-- object_id; entries whose widget disappeared render greyed-out in the panel
+-- until unpinned. State is session-scoped — it dies with nvim.
+
+M._pins = {}
+
+function M.pins_for(filepath)
+  return M._pins[filepath] or {}
+end
+
+local function find_pin(filepath, object_id)
+  for i, p in ipairs(M._pins[filepath] or {}) do
+    if p.object_id == object_id then return i end
+  end
+  return nil
+end
+
+function M.is_pinned(filepath, object_id)
+  return find_pin(filepath, object_id) ~= nil
+end
+
+-- Toggle a pin. Returns true if the widget is now pinned, false if
+-- unpinned, nil if it can't be pinned (no object-id to re-find it by).
+function M.toggle_pin(filepath, cell_id, widget)
+  if not widget.object_id then return nil end
+  M._pins[filepath] = M._pins[filepath] or {}
+  local at = find_pin(filepath, widget.object_id)
+  if at then
+    table.remove(M._pins[filepath], at)
+    return false
+  end
+  table.insert(M._pins[filepath], {
+    cell_id = cell_id,
+    object_id = widget.object_id,
+    label = widget.label,
+    name = widget.name,
+  })
+  return true
+end
+
+function M.unpin(filepath, index)
+  local pins = M._pins[filepath]
+  if pins and pins[index] then table.remove(pins, index) end
 end
 
 -- ── value coercion helpers (used by renderers) ────────────────────────────
@@ -315,10 +433,26 @@ local RENDERERS = {
   refresh      = render_refresh,
 }
 
--- Render one widget table into virt_line chunks.
+-- Render one widget table into virt_line chunks. When the widget is the
+-- buffer's focused one (w.focused, set during the tree_render walk), the
+-- leading indent becomes a ▸ marker and the first labeled chunk flips to
+-- the MarimoWidgetFocused highlight — same display width, so columns in
+-- hstacks and vstack alignment don't shift.
 function M.render_widget(w)
   local renderer = RENDERERS[w.name] or render_unknown
-  return renderer(w)
+  local lines = renderer(w)
+  if w.focused and lines[1] then
+    local first = lines[1]
+    if first[1] and first[1][1] == "  " then
+      first[1] = { "▸ ", "MarimoWidgetFocused" }
+    else
+      table.insert(first, 1, { "▸ ", "MarimoWidgetFocused" })
+    end
+    if first[2] then
+      first[2] = { first[2][1], "MarimoWidgetFocused" }
+    end
+  end
+  return lines
 end
 
 -- Public extension point: register (or replace) the renderer for a widget
@@ -331,22 +465,29 @@ end
 -- ── kernel interaction ────────────────────────────────────────────────────
 
 -- POST a new value for a widget to /api/kernel/set_ui_element_value.
--- Returns true on HTTP 200, false otherwise (with a [neo-marimo] warning).
--- After a successful POST, marimo recomputes any cells that depend on
--- the widget and broadcasts cell-op for each — the widget's own cell does
--- NOT re-broadcast though, which is why callers also stash an override in
--- M._value_overrides so the next render of *this* cell shows the new value.
-function M.set_value(filepath, object_id, value)
+-- Asynchronous: `on_done(ok)` is called on the main loop once the request
+-- finishes (HTTP 200 → true, anything else → false after a [neo-marimo]
+-- warning). The old synchronous form froze the UI for up to 10 s on a slow
+-- kernel — fatal for slider nudging, where keypresses arrive faster than
+-- round-trips. After a successful POST, marimo recomputes any cells that
+-- depend on the widget and broadcasts cell-op for each — the widget's own
+-- cell does NOT re-broadcast though, which is why callers also stash an
+-- override in M._value_overrides so the next render of *this* cell shows
+-- the new value.
+function M.set_value(filepath, object_id, value, on_done)
+  on_done = on_done or function() end
   if not object_id or object_id == "" then
     utils.warn("Widget has no object-id; can't update its value.")
-    return false
+    on_done(false)
+    return
   end
 
   local server = require("neo-marimo.server")
   local srv = server._servers and server._servers[filepath]
   if not srv then
     utils.warn("No server running for this notebook — cannot set widget value.")
-    return false
+    on_done(false)
+    return
   end
 
   -- Field names use camelCase. Marimo's other kernel endpoints
@@ -371,20 +512,24 @@ function M.set_value(filepath, object_id, value)
   table.insert(args, "http://127.0.0.1:" .. tostring(srv.port)
                      .. "/api/kernel/set_ui_element_value")
 
-  local r = vim.system(args, { text = true }):wait()
-  if r.code ~= 0 then
-    utils.warn("set_ui_element_value: curl exit " .. tostring(r.code))
-    return false
-  end
-
-  local out_body, status = r.stdout:match("^(.*)\n(%d+)%s*$")
-  if not status then status = "?"; out_body = r.stdout end
-  if status ~= "200" then
-    utils.warn("set_ui_element_value → HTTP " .. status .. ": " ..
-      (out_body or ""):sub(1, 200))
-    return false
-  end
-  return true
+  vim.system(args, { text = true }, function(r)
+    vim.schedule(function()
+      if r.code ~= 0 then
+        utils.warn("set_ui_element_value: curl exit " .. tostring(r.code))
+        on_done(false)
+        return
+      end
+      local out_body, status = (r.stdout or ""):match("^(.*)\n(%d+)%s*$")
+      if not status then status = "?"; out_body = r.stdout end
+      if status ~= "200" then
+        utils.warn("set_ui_element_value → HTTP " .. status .. ": " ..
+          (out_body or ""):sub(1, 200))
+        on_done(false)
+        return
+      end
+      on_done(true)
+    end)
+  end)
 end
 
 -- ── picker labels ─────────────────────────────────────────────────────────

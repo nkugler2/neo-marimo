@@ -21,6 +21,8 @@
 --   skip_cap         out-param: payload renders widgets/layouts, don't
 --                    truncate at MAX_LINES
 --   object_id        transient: the <marimo-ui-element> wrapper id in scope
+--   tab              transient: { index, label } of the tabs body in scope
+--                    (shared per body — picker tab-groups widgets by it)
 
 local html = require("neo-marimo.html")
 local widgets = require("neo-marimo.widgets")
@@ -271,7 +273,18 @@ local function render_tabs(node, ctx)
     table.insert(out, { { "  ", "MarimoOutputText" },
                         { "▎ tab: ", "MarimoWidgetBoxBorder" },
                         { label, hl_group } })
-    append_all(out, render_children(body, ctx))
+    -- Scope the tab identity over this body: widgets registered inside
+    -- carry w.tab (one shared table per body — the picker groups by it),
+    -- and every body line gets a faint │ gutter so it reads as belonging
+    -- to the header above. Saved/restored so nested tabs stack correctly.
+    local prev_tab = ctx.tab
+    ctx.tab = { index = i, label = label }
+    local body_lines = render_children(body, ctx)
+    ctx.tab = prev_tab
+    for _, chunks in ipairs(body_lines) do
+      table.insert(chunks, 1, { "  │", "MarimoWidgetBoxBorder" })
+    end
+    append_all(out, body_lines)
     if i < #bodies then table.insert(out, { { "  ", "MarimoOutputText" } }) end
   end
   return out
@@ -415,8 +428,10 @@ render_node = function(node, ctx)
     if WIDGET_TAGS[kind] then
       ctx.skip_cap = true
       local w = widget_from_node(node, ctx)
+      w.tab = ctx.tab
       if ctx.bufnr and ctx.cell_id then
-        widgets.register_widget(ctx.bufnr, ctx.cell_id, w)
+        local idx = widgets.register_widget(ctx.bufnr, ctx.cell_id, w)
+        w.focused = widgets.is_focused(ctx.bufnr, ctx.cell_id, w, idx)
       end
       return widgets.render_widget(w)
     end
@@ -430,8 +445,10 @@ render_node = function(node, ctx)
     -- nested ui-elements inside an unknown container still render.
     ctx.skip_cap = true
     local w = widget_from_node(node, ctx)
+    w.tab = ctx.tab
     if ctx.bufnr and ctx.cell_id and w.object_id then
-      widgets.register_widget(ctx.bufnr, ctx.cell_id, w)
+      local idx = widgets.register_widget(ctx.bufnr, ctx.cell_id, w)
+      w.focused = widgets.is_focused(ctx.bufnr, ctx.cell_id, w, idx)
     end
     local out = widgets.render_widget(w)
     append_all(out, render_children(node, ctx))

@@ -412,16 +412,165 @@ function M.setup(bufnr, nb)
     end, o("Marimo: open DataFrame side-panel"))
   end
 
-  -- Phase 8.3: Widget interaction picker.
+  -- ── Phase 10: widget interaction UX ──────────────────────────────────────
+
+  local widget_picker = require("neo-marimo.widget_picker")
+
+  local function cell_at_cursor()
+    if nb._flush_pending then nb._flush_pending() end
+    local row = vim.api.nvim_win_get_cursor(0)[1] - 1
+    return notebook.get_cell_at_row(nb, row)
+  end
+
+  -- Smart act: focused widget → direct, single-widget cell → direct,
+  -- multi-widget cell → ordered picker.
   if km.widget_picker then
     vim.keymap.set("n", km.widget_picker, function()
-      if nb._flush_pending then nb._flush_pending() end
-      local row = vim.api.nvim_win_get_cursor(0)[1] - 1
-      local cell = notebook.get_cell_at_row(nb, row)
+      local cell = cell_at_cursor()
       if not cell then return end
-      require("neo-marimo.widget_picker").open(nb, cell)
-    end, o("Marimo: interact with widgets in cell"))
+      widget_picker.smart(nb, cell)
+    end, o("Marimo: act on widget(s) in cell"))
   end
+
+  if km.widget_picker_full then
+    vim.keymap.set("n", km.widget_picker_full, function()
+      local cell = cell_at_cursor()
+      if not cell then return end
+      widget_picker.open(nb, cell)
+    end, o("Marimo: open widget picker"))
+  end
+
+  -- Focus cycling: ]w / [w move the ▸ marker through the cell's widgets
+  -- (wrapping); from a widget-less cell they jump to the nearest cell that
+  -- has widgets. Both the previously-focused cell and the new one repaint.
+  local function focus_cycle(dir)
+    local cur_cell = cell_at_cursor()
+    local prev_focus = widgets.get_focus(bufnr)
+
+    local function focus_in(cell, idx)
+      local list = widgets.list_for_cell(bufnr, cell.id)
+      local w = list[idx]
+      widgets.set_focus(bufnr, cell.id, w.object_id, idx)
+      if prev_focus and prev_focus.cell_id ~= cell.id then
+        local pc = nb.cell_by_id[prev_focus.cell_id]
+        if pc then output.render(bufnr, pc, nb.filepath) end
+      end
+      output.render(bufnr, cell, nb.filepath)
+    end
+
+    local list = cur_cell and widgets.list_for_cell(bufnr, cur_cell.id) or {}
+    if cur_cell and #list > 0 then
+      local cur_idx = 0
+      if prev_focus and prev_focus.cell_id == cur_cell.id then
+        for i, w in ipairs(list) do
+          if widgets.is_focused(bufnr, cur_cell.id, w, i) then
+            cur_idx = i
+            break
+          end
+        end
+      end
+      local nxt
+      if cur_idx == 0 then
+        nxt = dir == 1 and 1 or #list
+      else
+        nxt = (cur_idx - 1 + dir) % #list + 1
+      end
+      focus_in(cur_cell, nxt)
+      return
+    end
+
+    local n = #nb.cells
+    local from = cur_cell and cur_cell.index or (dir == 1 and 0 or n + 1)
+    for step = 1, n do
+      local i = (from + dir * step - 1) % n + 1
+      local c = nb.cells[i]
+      if #widgets.list_for_cell(bufnr, c.id) > 0 then
+        jump_to_cell(c)
+        focus_in(c, dir == 1 and 1 or #widgets.list_for_cell(bufnr, c.id))
+        return
+      end
+    end
+    vim.notify("[neo-marimo] No widgets in any cell output.", vim.log.levels.INFO)
+  end
+
+  if km.next_widget then
+    vim.keymap.set("n", km.next_widget, function() focus_cycle(1) end,
+      o("Marimo: focus next widget"))
+  end
+  if km.prev_widget then
+    vim.keymap.set("n", km.prev_widget, function() focus_cycle(-1) end,
+      o("Marimo: focus previous widget"))
+  end
+
+  if km.widget_last then
+    vim.keymap.set("n", km.widget_last, function()
+      if nb._flush_pending then nb._flush_pending() end
+      widget_picker.act_last()
+    end, o("Marimo: edit last-edited widget"))
+  end
+
+  if km.widget_pins then
+    vim.keymap.set("n", km.widget_pins, function()
+      if nb._flush_pending then nb._flush_pending() end
+      widget_picker.open_pins(nb)
+    end, o("Marimo: pinned widgets panel"))
+  end
+
+  if km.widget_pin then
+    vim.keymap.set("n", km.widget_pin, function()
+      local cell = cell_at_cursor()
+      -- Pin target priority: the focused widget, else a single-widget
+      -- cursor cell, else the last-edited widget in this notebook.
+      local target, target_cell_id
+      local fw, fcell_id = widgets.focused_widget(bufnr)
+      if fw then
+        target, target_cell_id = fw, fcell_id
+      elseif cell then
+        local list = widgets.list_for_cell(bufnr, cell.id)
+        if #list == 1 then target, target_cell_id = list[1], cell.id end
+      end
+      if not target then
+        local last = widgets.get_last()
+        if last and last.nb == nb then
+          for _, w in ipairs(widgets.list_for_cell(bufnr, last.cell_id)) do
+            if w.object_id == last.object_id then
+              target, target_cell_id = w, last.cell_id
+              break
+            end
+          end
+        end
+      end
+      if not target then
+        vim.notify("[neo-marimo] Nothing to pin — focus a widget (]w) or edit one first.",
+          vim.log.levels.INFO)
+        return
+      end
+      local pinned = widgets.toggle_pin(nb.filepath, target_cell_id, target)
+      if pinned == nil then
+        vim.notify("[neo-marimo] Widget has no object-id; can't pin it.",
+          vim.log.levels.WARN)
+      else
+        vim.notify("[neo-marimo] " .. (pinned and "Pinned " or "Unpinned ")
+          .. target.label, vim.log.levels.INFO)
+      end
+    end, o("Marimo: pin/unpin widget"))
+  end
+
+  -- Nudge: step the focused slider/number/range with one key, no prompt.
+  -- When the cell has no nudgeable widget and the key is a single char
+  -- (the default + / -), replay the builtin motion so it keeps working.
+  local function bind_nudge(lhs, dir, desc)
+    if not lhs then return end
+    vim.keymap.set("n", lhs, function()
+      local cell = cell_at_cursor()
+      if cell and widget_picker.nudge(nb, cell, dir) then return end
+      if #lhs == 1 then
+        vim.cmd("normal! " .. vim.v.count1 .. lhs)
+      end
+    end, o(desc))
+  end
+  bind_nudge(km.widget_nudge_up, 1, "Marimo: nudge widget up")
+  bind_nudge(km.widget_nudge_down, -1, "Marimo: nudge widget down")
 end
 
 return M

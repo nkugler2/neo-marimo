@@ -68,6 +68,9 @@ function M.setup()
   vim.api.nvim_set_hl(0, "MarimoWidgetBoxBorder", { fg = "#54546D" })
   vim.api.nvim_set_hl(0, "MarimoWidgetTabActive", { fg = "#FFA066", bold = true, underline = true })
   vim.api.nvim_set_hl(0, "MarimoWidgetTabInactive", { fg = "#717C7C" })
+
+  -- ── Phase 10 widget focus ────────────────────────────────────────────────
+  vim.api.nvim_set_hl(0, "MarimoWidgetFocused", { fg = "#FFA066", bold = true, reverse = true })
 end
 
 -- Returns {border_hl, label_hl} for a given cell type

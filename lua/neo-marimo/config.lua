@@ -79,10 +79,31 @@ M.defaults = {
     -- Phase 8.5: open a side-split panel showing the full DataFrame
     -- output for the cell under the cursor (no row cap; `s` to sort).
     dataframe_panel = "<leader>mD",
-    -- Phase 8.3: interact with any UI widgets in the cell under the
-    -- cursor (slider, button, dropdown, …). Opens a picker that POSTs
-    -- the new value to /api/kernel/set_ui_element_value.
+    -- Phase 10: interact with the UI widgets in the cell under the
+    -- cursor (slider, button, dropdown, …). Smart: a focused widget (or a
+    -- cell with exactly one widget) is acted on directly with no menu;
+    -- multi-widget cells open the ordered picker, where digits 1-9 act
+    -- immediately and <Tab>/<S-Tab> cycle between mo.ui.tabs groups.
     widget_picker   = "<leader>mw",
+    -- Open the full tab-aware widget picker unconditionally.
+    widget_picker_full = "<leader>mW",
+    -- Focus the next/previous widget in the cell under the cursor (wraps;
+    -- jumps to the nearest cell with widgets when the current cell has
+    -- none). The focused widget shows a ▸ marker in the output.
+    next_widget     = "]w",
+    prev_widget     = "[w",
+    -- Re-open the edit prompt for the last-edited widget, wherever it
+    -- lives — one keystroke per iteration when tweaking a value.
+    widget_last     = "<leader>m.",
+    -- Pin/unpin the focused (or last-edited) widget, and open the panel
+    -- of pinned widgets across the whole notebook.
+    widget_pin      = "<leader>mP",
+    widget_pins     = "<leader>mp",
+    -- Nudge the focused slider/number/range_slider by its step without a
+    -- prompt. Falls back to the builtin +/- motions when the cell has no
+    -- nudgeable widget.
+    widget_nudge_up   = "+",
+    widget_nudge_down = "-",
   },
 }
 

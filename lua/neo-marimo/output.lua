@@ -470,6 +470,10 @@ function M.handle_cell_op(bufnr, nb, msg)
   -- (actions.run_cell_at_cursor) or by `:MarimoResetWidgets`.
   if msg.status then
     cell.status = msg.status
+    -- A real kernel status supersedes the optimistic ⟳ widget_picker.commit
+    -- paints while a set_ui_element_value POST is in flight; once this flag
+    -- is off, the POST callback knows not to roll the status back.
+    cell._optimistic_status = nil
     if msg.status == "idle" or msg.status == "error" then
       cell._has_run = true
     end

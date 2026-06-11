@@ -467,6 +467,18 @@ vim.api.nvim_create_user_command("MarimoWidget", function()
   require("neo-marimo.widget_picker").open(nb, cell)
 end, { desc = "Interact with UI widgets in the cell under cursor" })
 
+-- Phase 10: panel of pinned widgets across the whole notebook. Pin/unpin
+-- with the widget_pin keymap (<leader>mP by default).
+vim.api.nvim_create_user_command("MarimoWidgetPins", function()
+  local marimo = require("neo-marimo")
+  local nb = marimo.current_notebook()
+  if not nb then
+    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    return
+  end
+  require("neo-marimo.widget_picker").open_pins(nb)
+end, { desc = "Open the pinned-widgets panel" })
+
 vim.api.nvim_create_user_command("MarimoNew", function(opts)
   local filepath = opts.args ~= "" and opts.args
     or vim.fn.input("New notebook path: ", vim.fn.getcwd() .. "/", "file")
