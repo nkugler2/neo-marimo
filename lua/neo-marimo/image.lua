@@ -70,6 +70,30 @@ local function b64_decode(s)
   return decoded
 end
 
+-- Sniff an image's real mimetype from its leading magic bytes. marimo names
+-- every image virtual file ".png" regardless of the true format, and snacks'
+-- PNG fast-path keys off the file extension — so a JPEG in a .png file gets
+-- sent to the terminal as broken PNG and silently fails to draw. We read the
+-- header ourselves to give the file an honest extension. Returns a mimetype
+-- string or nil if unrecognised.
+local function sniff_image_mime(path)
+  local f = io.open(path, "rb")
+  if not f then return nil end
+  local head = f:read(16) or ""
+  f:close()
+  local b = { head:byte(1, 16) }
+  if b[1] == 0xFF and b[2] == 0xD8 and b[3] == 0xFF then return "image/jpeg" end
+  if b[1] == 0x89 and b[2] == 0x50 and b[3] == 0x4E and b[4] == 0x47 then return "image/png" end
+  if b[1] == 0x47 and b[2] == 0x49 and b[3] == 0x46 then return "image/gif" end -- GIF
+  if b[1] == 0x52 and b[2] == 0x49 and b[3] == 0x46 and b[4] == 0x46
+     and b[9] == 0x57 and b[10] == 0x45 and b[11] == 0x42 and b[12] == 0x50 then
+    return "image/webp" -- RIFF????WEBP
+  end
+  local txt = head:match("^%s*(.-)$") or head
+  if txt:find("<svg", 1, true) or txt:find("<?xml", 1, true) then return "image/svg+xml" end
+  return nil
+end
+
 -- Persist the decoded bytes to disk and return the path.
 local function write_temp(mime, bytes)
   local hash = sample_hash(bytes)
@@ -252,14 +276,27 @@ end
 function M.render_url(bufnr, row, vf_path, key, fetch)
   if type(vf_path) ~= "string" or vf_path == "" then return {} end
 
-  local ext = vf_path:match("%.([%w]+)$") or "png"
-  local dest = image_dir() .. "/vf_" .. sample_hash(vf_path) .. "." .. ext
-  if not vim.uv.fs_stat(dest) then
-    if not fetch(dest) then
-      return { { { "  [image — fetch failed]", "MarimoOutputError" } } }
+  local stem = image_dir() .. "/vf_" .. sample_hash(vf_path)
+
+  -- Reuse a previously downloaded + correctly-named file if one exists, so
+  -- repeated renders neither re-download nor re-sniff.
+  for _, ext in ipairs({ "png", "jpg", "gif", "webp", "svg" }) do
+    local p = stem .. "." .. ext
+    if vim.uv.fs_stat(p) then
+      return render_path(bufnr, row, mime_for_ext(ext), p, key)
     end
   end
-  return render_path(bufnr, row, mime_for_ext(ext), dest, key)
+
+  -- Download to a neutral name, then sniff the *real* format (the vf_path's
+  -- own extension is unreliable — marimo labels image virtual files .png).
+  local raw = stem .. ".raw"
+  if not fetch(raw) then
+    return { { { "  [image — fetch failed]", "MarimoOutputError" } } }
+  end
+  local mime = sniff_image_mime(raw) or "image/png"
+  local path = stem .. "." .. ext_for_mime(mime)
+  if not vim.uv.fs_rename(raw, path) then path = raw end
+  return render_path(bufnr, row, mime, path, key)
 end
 
 -- Decode a base64 payload and render it. `data` may include or omit
