@@ -156,10 +156,26 @@ data_explorer/altair/plotly cells show clean placeholders; no blank outputs.
 
 ---
 
-## Phase 10 — Widget interaction UX (focus cycling, no forced picker)
+## Phase 10 — Widget interaction UX (focus cycling, smart picker, history & pins) — **DONE (2026-06-11)**
 
-**Goal:** cycle through widgets with a key, *see* the selection in the output,
-act on it with another key — picker only as a fallback.
+> **Status:** shipped. Focus model in `widgets.lua` (object-id primary,
+> index fallback; ▸ marker via `MarimoWidgetFocused`), `]w`/`[w` cycling
+> with cross-cell jumps, `<leader>mw` smart act (focused → direct, single →
+> direct, multiple → ordered picker), `<leader>mW` full picker, digit 1-9
+> selection, `<Tab>`/`<S-Tab>` tab-group cycling with footer, tab bodies
+> gutter-prefixed (`│`) and widgets stamped with `w.tab` for grouping,
+> `<leader>m.` last-edited shortcut, `<leader>mP` pin toggle +
+> `<leader>mp` / `:MarimoWidgetPins` panel (stale pins greyed, `x` unpins),
+> `+`/`-` nudging (data-step / data-steps aware, clamped, 150 ms debounced
+> POST, builtin motion fallback), `widgets.set_value` converted to async
+> with an optimistic ⟳ that a real cell-op status supersedes. 108 tests
+> green via `make test` (15 new in `tests/spec/widget_ux_spec.lua`).
+> Manual in-editor verification still requires push → pull into the
+> vim.pack install path.
+
+**Goal:** reduce keystrokes to reach any widget — no forced picker for single
+widgets, number-key selection for multiple, tab-aware picker for layouts,
+and a fast path back to recently-used or pinned widgets.
 
 ### 10.1 Focus model
 
@@ -174,8 +190,10 @@ act on it with another key — picker only as a fallback.
 | Key (default) | Action |
 |---|---|
 | `]w` / `[w` | focus next/previous widget in the cell under the cursor (wraps; if cursor's cell has none, jump to next cell that has widgets) |
-| `<leader>mw` | **act on focused widget** (was: open picker). If no focus yet and the cell has exactly one widget, act on it directly; if several, focus the first (so the flow is `mw` → `]w]w` → `mw`) |
-| `<leader>mW` | old picker (kept as list-view fallback) |
+| `<leader>mw` | **smart act**: if the cell under the cursor has exactly one widget, act on it directly with no menu; if it has multiple, open the ordered picker (see 10.3) |
+| `<leader>mW` | open the tab-aware picker unconditionally (full list view) |
+| `<leader>m.` | re-act on the last-edited widget, wherever it lives (see 10.4) |
+| `<leader>mp` | open the pinned-widget panel (see 10.4) |
 | `+` / `-` on focused slider/number/range (via `<leader>m+`-style or direct, decide at impl) | nudge by `data-step` (default 1), POST immediately, update override, re-render — no prompt |
 | checkbox/switch/button focused + act | toggle / press immediately, no prompt |
 
@@ -183,7 +201,64 @@ Acting on text/dropdown/multiselect keeps the existing `vim.ui.input` /
 `vim.ui.select` prompts from `widget_picker.lua` — that part of the flow is
 fine; it's the mandatory list window that's jank.
 
-### 10.3 Supporting fixes
+### 10.3 Picker improvements — ordered selection and tab awareness
+
+**Ordered number selection (multiple widgets, no tabs)**
+
+When a cell has more than one widget, `<leader>mw` opens a compact picker that
+lists widgets in the order they appear in the rendered output (top to bottom,
+left to right within hstacks). Each entry is prefixed with its 1-based index.
+Pressing the corresponding digit (1–9) immediately acts on that widget without
+navigating to it in the list. Example for a cell with three widgets:
+
+```
+  1  slider  speed         [0 – 100]
+  2  dropdown  color       red
+  3  checkbox  normalize   ✓
+```
+
+Pressing `2` opens the dropdown editor directly.
+
+**Tab-aware picker (widgets inside `mo.ui.tabs`)**
+
+When the cell contains tabs that hold widgets:
+- The picker shows the current tab's widgets with number prefixes, same as
+  above.
+- A footer line reads `<tab> next tab · <S-tab> prev tab` and shows which tab
+  is active (e.g. `Tab: Data [1/3]`).
+- Pressing `<Tab>` / `<S-Tab>` cycles to the next/previous tab's widget list
+  without closing the picker; the number prefix assignments reset per-tab.
+- The rendered output (virtual lines) should already visually distinguish which
+  tab each widget belongs to — update the tab renderer in Phase 9 if needed
+  (e.g. prefix widget lines with a faint `│ Tab: Data` breadcrumb).
+
+### 10.4 Widget history and pinning
+
+**Last-edited shortcut**
+
+- Track `last_widget = { bufnr, cell_id, object_id }` whenever a widget value
+  is committed.
+- `<leader>m.` jumps the cursor to that cell (if needed) and immediately opens
+  the edit prompt for that widget. This makes iterating — e.g. tweaking a
+  slider and watching output change — a single keystroke after the first edit.
+
+**Pinned widgets panel**
+
+- Users can "pin" any widget: while focused (or after acting on it), a keymap
+  `<leader>mP` (capital P) toggles the pin for that widget. Pins are stored
+  per-notebook file in a buffer-local (or persistent) list of
+  `{ cell_id, object_id, label }` tuples.
+- `<leader>mp` opens a dedicated picker showing only pinned widgets, regardless
+  of which cell the cursor is in. The same ordered-number selection applies;
+  acting on a pinned widget jumps to its cell, edits it, then returns focus to
+  wherever the cursor was.
+- Pins survive re-renders (matched by `object_id`). If a pinned widget's
+  object-id disappears (cell deleted or rewritten), the entry is shown greyed
+  out and can be unpinned.
+- Pins are stored in a notebook-scoped state (e.g. a `pins` table keyed by
+  `filepath`) so they reset when the notebook is closed.
+
+### 10.5 Supporting fixes
 
 - `widgets.set_value` is synchronous (`vim.system(...):wait()`,
   `widgets.lua:792`, up to 10 s UI freeze on a slow kernel). Convert to async
