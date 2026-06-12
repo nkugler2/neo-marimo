@@ -458,7 +458,13 @@ function M.setup(bufnr, nb)
       if pc then output.render(bufnr, pc, nb.filepath) end
     end
     output.render(bufnr, target.cell, nb.filepath)
-    jump_to_cell(target.cell)
+    -- Park the cursor on the cell's LAST line, not its first: the widgets
+    -- are virt_lines attached below end_row, so jumping to the top of a
+    -- tall cell would scroll them out of view. zz centers, leaving half a
+    -- window for the output underneath.
+    local row = math.min(target.cell.end_row + 1, vim.api.nvim_buf_line_count(bufnr))
+    vim.api.nvim_win_set_cursor(0, { row, 0 })
+    vim.cmd("normal! zz")
     vim.cmd("redraw")
   end
 
