@@ -175,8 +175,39 @@ function M.prune_phantoms(nb)
   return removed
 end
 
+-- Bounded ring of cells deleted by any path. We hold onto enough state to
+-- splice a cell back into nb.cells when the user undoes its deletion —
+-- without this, vim restores the buffer rows but our model has lost the
+-- original cell's id/options/output, and the restored rows get glued onto
+-- whichever cell now occupies that position.
+local UNDO_TRASH_CAP = 5
+
+-- Snapshot `cell` onto nb._undo_trash so try_undo_restore can splice it back
+-- on undo. Every delete path pushes through here — the delete-cell action and
+-- both sweeps in buffer.sync_cells_from_extmarks (dead anchor, collapsed
+-- range) — so the entry shape can't drift between call sites.
+function M.push_undo_trash(nb, cell)
+  nb._undo_trash = nb._undo_trash or {}
+  table.insert(nb._undo_trash, 1, {
+    id = cell.id,
+    name = cell.name,
+    code = cell.code,
+    options = cell.options,
+    status = cell.status,
+    output = cell.output,
+    console = cell.console,
+    type = cell.type,
+    start_row = cell.start_row,
+    line_count = cell_mod.line_count(cell),
+    trashed_at = vim.uv.hrtime() / 1e6,
+  })
+  while #nb._undo_trash > UNDO_TRASH_CAP do
+    table.remove(nb._undo_trash)
+  end
+end
+
 -- Try to match an on_bytes change set against a recently-trashed cell
--- (`nb._undo_trash`, populated by the `<leader>md` handler). If the user
+-- (`nb._undo_trash`, populated by push_undo_trash above). If the user
 -- just did `<leader>md` then `u`, vim restores the deleted rows and on_bytes
 -- fires with a single +N insertion at the same row the cell originally
 -- occupied. Splice the cell back into nb.cells with its original id and

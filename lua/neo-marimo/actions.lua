@@ -10,6 +10,8 @@ local server = require("neo-marimo.server")
 local output = require("neo-marimo.output")
 local sync = require("neo-marimo.sync")
 local widgets = require("neo-marimo.widgets")
+local highlights = require("neo-marimo.highlights")
+local utils = require("neo-marimo.utils")
 
 local M = {}
 
@@ -96,6 +98,145 @@ function M.new_cell_above(bufnr, nb)
     buffer.refresh_after_mutation(bufnr, nb)
   end)
   jump_to_cell(new_cell)
+end
+
+-- Delete the cell containing the cursor. Snapshots the cell to undo trash
+-- first so `u` can splice it back with its original id / options / cached
+-- output (matched in buffer.attach_change_tracking's flush).
+function M.delete_cell_at_cursor(bufnr, nb)
+  if nb._flush_pending then nb._flush_pending() end
+  local row = vim.api.nvim_win_get_cursor(0)[1] - 1
+  local cell = notebook.get_cell_at_row(nb, row)
+  if not cell then return end
+
+  -- Mirror notebook.delete_cell's guard up here: if we'd refuse to delete
+  -- the only cell, also refuse to nuke its rows from the buffer. Running
+  -- set_lines first and only then asking the notebook to drop the cell
+  -- would leave the buffer empty while nb.cells still held the now-rowless
+  -- cell.
+  if #nb.cells <= 1 then
+    utils.warn("Cannot delete the only cell in a notebook.")
+    return
+  end
+
+  local idx = cell.index
+
+  notebook.push_undo_trash(nb, cell)
+
+  buffer.with_suppressed_bytes(nb, function()
+    -- ns_output isn't wiped by render_all_borders (only ns_border is),
+    -- so a "✓ ran" indicator anchored at the deleted cell's end_row
+    -- would migrate onto the previous row when set_lines collapses the
+    -- range, stacking on top of the previous cell's indicator. Clear it
+    -- first.
+    vim.api.nvim_buf_clear_namespace(
+      bufnr, highlights.ns_output, cell.start_row, cell.end_row + 1
+    )
+    widgets.clear_for_cell(bufnr, cell.id)
+
+    -- Drop the cell anchor before set_lines so vim doesn't try to
+    -- move it to the collapsed range's boundary. A leftover anchor
+    -- would attach to whichever cell now occupies the row, creating
+    -- two overlapping anchors at the same position.
+    buffer.clear_cell_anchor(bufnr, cell)
+
+    -- Remove lines from buffer (0-indexed start, exclusive end)
+    vim.api.nvim_buf_set_lines(bufnr, cell.start_row, cell.end_row + 1, false, {})
+
+    notebook.delete_cell(nb, idx)
+
+    -- The remaining cells' anchors moved themselves via extmark
+    -- gravity; refresh_after_mutation does sync + prune + sync +
+    -- render so any anchor that collided gets pruned before we paint.
+    buffer.refresh_after_mutation(bufnr, nb)
+  end)
+
+  -- Move cursor to a valid position
+  local target_idx = math.min(idx, #nb.cells)
+  if target_idx >= 1 then
+    jump_to_cell(nb.cells[target_idx])
+  end
+end
+
+-- Swap the cell containing the cursor with the one below it.
+function M.move_cell_down_at_cursor(bufnr, nb)
+  if nb._flush_pending then nb._flush_pending() end
+  local row = vim.api.nvim_win_get_cursor(0)[1] - 1
+  local cell = notebook.get_cell_at_row(nb, row)
+  if not cell or cell.index >= #nb.cells then return end
+
+  local idx = cell.index
+  local next_cell = nb.cells[idx + 1]
+
+  buffer.with_suppressed_bytes(nb, function()
+    -- Swap lines in the buffer
+    local cell_lines = vim.api.nvim_buf_get_lines(bufnr, cell.start_row, cell.end_row + 1, false)
+    local next_lines = vim.api.nvim_buf_get_lines(bufnr, next_cell.start_row, next_cell.end_row + 1, false)
+    -- Capture BEFORE the list_extend below — list_extend mutates its
+    -- first argument in place, so #next_lines after the call would be
+    -- (next_count + cell_count), which would push the moved cell's
+    -- anchor too far down and its content would flow into the cell
+    -- after it.
+    local next_count = #next_lines
+    local start_at = cell.start_row
+
+    -- Drop both anchors before set_lines; we re-place them at the
+    -- swapped positions below. Letting set_lines deal with anchors
+    -- inside the replaced range would leave them at unpredictable
+    -- positions.
+    buffer.clear_cell_anchor(bufnr, cell)
+    buffer.clear_cell_anchor(bufnr, next_cell)
+
+    vim.api.nvim_buf_set_lines(bufnr, cell.start_row, next_cell.end_row + 1, false,
+      vim.list_extend(next_lines, cell_lines))
+
+    -- Swap in notebook state
+    notebook.move_cell_down(nb, idx)
+
+    local new_next = nb.cells[idx]      -- was next_cell, now at idx
+    local new_cell = nb.cells[idx + 1]  -- was cell, now at idx+1
+
+    buffer.place_cell_anchor(bufnr, new_next, start_at)
+    buffer.place_cell_anchor(bufnr, new_cell, start_at + next_count)
+    buffer.refresh_after_mutation(bufnr, nb)
+  end)
+  jump_to_cell(nb.cells[idx + 1])
+end
+
+-- Swap the cell containing the cursor with the one above it.
+function M.move_cell_up_at_cursor(bufnr, nb)
+  if nb._flush_pending then nb._flush_pending() end
+  local row = vim.api.nvim_win_get_cursor(0)[1] - 1
+  local cell = notebook.get_cell_at_row(nb, row)
+  if not cell or cell.index <= 1 then return end
+
+  local idx = cell.index
+  local prev_cell = nb.cells[idx - 1]
+
+  buffer.with_suppressed_bytes(nb, function()
+    local cell_lines = vim.api.nvim_buf_get_lines(bufnr, cell.start_row, cell.end_row + 1, false)
+    local prev_lines = vim.api.nvim_buf_get_lines(bufnr, prev_cell.start_row, prev_cell.end_row + 1, false)
+    -- Capture before list_extend mutates cell_lines (see
+    -- move_cell_down_at_cursor for the same trap).
+    local cell_count = #cell_lines
+    local start_at = prev_cell.start_row
+
+    buffer.clear_cell_anchor(bufnr, cell)
+    buffer.clear_cell_anchor(bufnr, prev_cell)
+
+    vim.api.nvim_buf_set_lines(bufnr, prev_cell.start_row, cell.end_row + 1, false,
+      vim.list_extend(cell_lines, prev_lines))
+
+    notebook.move_cell_up(nb, idx)
+
+    local new_cell = nb.cells[idx - 1]
+    local new_prev = nb.cells[idx]
+
+    buffer.place_cell_anchor(bufnr, new_cell, start_at)
+    buffer.place_cell_anchor(bufnr, new_prev, start_at + cell_count)
+    buffer.refresh_after_mutation(bufnr, nb)
+  end)
+  jump_to_cell(nb.cells[idx - 1])
 end
 
 -- Start the marimo server (if needed) and open the notebook in the browser.

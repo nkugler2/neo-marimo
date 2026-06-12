@@ -140,64 +140,10 @@ function M.attach(source_bufnr)
     end,
   })
 
-  -- Track edits via nvim_buf_attach's on_bytes hook. This gives us the exact
-  -- row where each change happened (start_row, old_end_row, new_end_row),
-  -- so we can attribute line-count deltas to the cell that actually changed
-  -- — not the cell under the cursor. Pressing Enter mid-cell used to misroute
-  -- the delta to the next cell because the cursor moved before the autocmd
-  -- fired; on_bytes fixes that at the source.
-  --
-  -- Flushes are normally debounced 300ms, but keymap actions (delete cell,
-  -- insert cell, run cell, …) call nb._flush_pending() synchronously before
-  -- reading cell.start_row/end_row. Without that gate, typing then
-  -- immediately triggering an action would read stale offsets and either
-  -- crash (out-of-range extmarks) or corrupt cell boundaries — e.g. delete
-  -- chopping the wrong rows so neighbouring cells visually merged.
-  local pending_changes = {}
-  nb._flush_pending = function()
-    if not vim.api.nvim_buf_is_valid(nb_bufnr) then
-      pending_changes = {}
-      return
-    end
-    if #pending_changes == 0 then return end
-    local changes = pending_changes
-    pending_changes = {}
-
-    -- Catch `u` after `<leader>md`: the trashed cell snapshot is matched
-    -- against the +N insertion vim just replayed. Restoring sets nb.cells
-    -- back to its pre-delete shape; any change consumed here is dropped
-    -- from the batch so on_bytes_changed doesn't also try to absorb it.
-    local pre_count = #changes
-    changes = notebook.try_undo_restore(nb, changes)
-    local restored = pre_count > #changes
-
-    if #changes > 0 then
-      buffer.on_bytes_changed(nb_bufnr, nb, changes)
-    elseif restored then
-      -- We only restored cells; no remaining deltas to apply. Still need
-      -- to redraw borders so the brought-back cell paints, and refresh
-      -- the shadow LSP so completion sees the restored content.
-      buffer.render_all_borders(nb_bufnr, nb)
-    end
-  end
-  local flush_changes = utils.debounce(nb._flush_pending, 300)
-
-  vim.api.nvim_buf_attach(nb_bufnr, false, {
-    on_bytes = function(_, bnr, _changedtick,
-                        start_row, _start_col, _start_byte,
-                        old_end_row, _old_end_col, _old_end_byte,
-                        new_end_row, _new_end_col, _new_end_byte)
-      if bnr ~= nb_bufnr then return true end  -- detach if buffer mismatch
-      -- Skip changes driven by our own actions (cell insert/delete/swap,
-      -- reload). Those code paths update cell offsets by hand, so letting
-      -- on_bytes also queue a delta would double-count and corrupt the
-      -- offsets ~300ms later when the debounce fires.
-      if (nb._suppress_on_bytes or 0) > 0 then return end
-      local delta = new_end_row - old_end_row
-      table.insert(pending_changes, { start_row = start_row, delta = delta })
-      flush_changes()
-    end,
-  })
+  -- Track edits via nvim_buf_attach's on_bytes hook (debounced flush +
+  -- undo-restore matching). Lives in buffer.lua so the headless test
+  -- harness attaches the exact wiring production uses.
+  buffer.attach_change_tracking(nb_bufnr, nb)
 
   -- Clean up when notebook buffer is explicitly wiped (:bw). With
   -- bufhidden = "hide", this no longer fires on :q or :MarimoToggle —

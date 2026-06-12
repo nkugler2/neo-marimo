@@ -1,6 +1,8 @@
 local hl = require("neo-marimo.highlights")
 local cell_mod = require("neo-marimo.cell")
 local config = require("neo-marimo.config")
+local notebook = require("neo-marimo.notebook")
+local utils = require("neo-marimo.utils")
 
 local M = {}
 
@@ -66,22 +68,8 @@ function M.sync_cells_from_extmarks(bufnr, nb)
       -- cell's id, options and code would be lost forever otherwise. With
       -- this push, the trash-matching path in notebook.try_undo_restore
       -- can splice the cell back when the user hits `u`. Mirrors the
-      -- push that <leader>md does explicitly.
-      nb._undo_trash = nb._undo_trash or {}
-      table.insert(nb._undo_trash, 1, {
-        id = cell.id,
-        name = cell.name,
-        code = cell.code,
-        options = cell.options,
-        status = cell.status,
-        output = cell.output,
-        console = cell.console,
-        type = cell.type,
-        start_row = cell.start_row,
-        line_count = cell_mod.line_count(cell),
-        trashed_at = vim.uv.hrtime() / 1e6,
-      })
-      while #nb._undo_trash > 5 do table.remove(nb._undo_trash) end
+      -- push that the delete-cell action does explicitly.
+      notebook.push_undo_trash(nb, cell)
 
       nb.cell_by_id[cell.id] = nil
       table.remove(nb.cells, i)
@@ -118,28 +106,10 @@ function M.sync_cells_from_extmarks(bufnr, nb)
       cell.end_row = total_lines - 1
     end
     if cell.end_row < cell.start_row then
-      -- Snapshot the cell as it stood before its rows were consumed.
-      -- We use the original (pre-collapse) cell.code which still holds
-      -- the deleted content from the last successful sync.
-      local original_line_count = cell_mod.line_count(cell)
-      -- Pick the row vim is about to reuse — it's the cell's start_row,
-      -- which is what `u` will restore to.
-      local restore_row = cell.start_row
-      nb._undo_trash = nb._undo_trash or {}
-      table.insert(nb._undo_trash, 1, {
-        id = cell.id,
-        name = cell.name,
-        code = cell.code,
-        options = cell.options,
-        status = cell.status,
-        output = cell.output,
-        console = cell.console,
-        type = cell.type,
-        start_row = restore_row,
-        line_count = original_line_count,
-        trashed_at = vim.uv.hrtime() / 1e6,
-      })
-      while #nb._undo_trash > 5 do table.remove(nb._undo_trash) end
+      -- Snapshot the cell as it stood before its rows were consumed. The
+      -- pre-collapse cell.code still holds the deleted content from the
+      -- last successful sync, and start_row is the row `u` restores to.
+      notebook.push_undo_trash(nb, cell)
 
       cell.code = ""
     else
@@ -458,7 +428,7 @@ function M.refresh_after_mutation(bufnr, nb)
   -- Drop cells whose anchor collided with another (e.g. a swap that left
   -- two anchors at the same row) or whose range collapsed. Without this
   -- a phantom with end<start lingers and produces stacked borders.
-  require("neo-marimo.notebook").prune_phantoms(nb)
+  notebook.prune_phantoms(nb)
   M.sync_cells_from_extmarks(bufnr, nb)
   M.render_all_borders(bufnr, nb)
 end
@@ -477,6 +447,68 @@ function M.on_bytes_changed(bufnr, nb, _changes)
   if not vim.api.nvim_buf_is_valid(bufnr) then return end
   M.refresh_after_mutation(bufnr, nb)
   nb.dirty = true
+end
+
+-- Wire on_bytes change tracking onto a notebook buffer. on_bytes gives us
+-- the exact row where each change happened (start_row + line-count delta),
+-- so deltas are attributed to the cell that actually changed — not the cell
+-- under the cursor. Pressing Enter mid-cell used to misroute the delta to
+-- the next cell because the cursor moved before the autocmd fired; on_bytes
+-- fixes that at the source.
+--
+-- Flushes are debounced 300ms, but action paths (delete cell, insert cell,
+-- run cell, …) call nb._flush_pending() synchronously before reading
+-- cell.start_row/end_row. Without that gate, typing then immediately
+-- triggering an action would read stale offsets and either crash
+-- (out-of-range extmarks) or corrupt cell boundaries.
+--
+-- Lives here (not init.lua) so the headless test harness attaches the exact
+-- wiring production uses.
+function M.attach_change_tracking(bufnr, nb)
+  local pending_changes = {}
+  nb._flush_pending = function()
+    if not vim.api.nvim_buf_is_valid(bufnr) then
+      pending_changes = {}
+      return
+    end
+    if #pending_changes == 0 then return end
+    local changes = pending_changes
+    pending_changes = {}
+
+    -- Catch `u` after a cell delete: the trashed cell snapshot is matched
+    -- against the +N insertion vim just replayed. Restoring sets nb.cells
+    -- back to its pre-delete shape; any change consumed here is dropped
+    -- from the batch so on_bytes_changed doesn't also try to absorb it.
+    local pre_count = #changes
+    changes = notebook.try_undo_restore(nb, changes)
+    local restored = pre_count > #changes
+
+    if #changes > 0 then
+      M.on_bytes_changed(bufnr, nb, changes)
+    elseif restored then
+      -- We only restored cells; no remaining deltas to apply. Still need
+      -- to redraw borders so the brought-back cell paints.
+      M.render_all_borders(bufnr, nb)
+    end
+  end
+  local flush_changes = utils.debounce(nb._flush_pending, 300)
+
+  vim.api.nvim_buf_attach(bufnr, false, {
+    on_bytes = function(_, bnr, _changedtick,
+                        start_row, _start_col, _start_byte,
+                        old_end_row, _old_end_col, _old_end_byte,
+                        new_end_row, _new_end_col, _new_end_byte)
+      if bnr ~= bufnr then return true end  -- detach if buffer mismatch
+      -- Skip changes driven by our own actions (cell insert/delete/swap,
+      -- reload). Those code paths update cell offsets by hand, so letting
+      -- on_bytes also queue a delta would double-count and corrupt the
+      -- offsets ~300ms later when the debounce fires.
+      if (nb._suppress_on_bytes or 0) > 0 then return end
+      local delta = new_end_row - old_end_row
+      table.insert(pending_changes, { start_row = start_row, delta = delta })
+      flush_changes()
+    end,
+  })
 end
 
 return M
