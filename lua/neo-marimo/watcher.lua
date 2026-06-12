@@ -98,11 +98,4 @@ function M.stop(filepath)
   M._watchers[filepath] = nil
 end
 
--- Stop every active watcher (used on VimLeavePre as a belt-and-suspenders).
-function M.stop_all()
-  for filepath, _ in pairs(M._watchers) do
-    M.stop(filepath)
-  end
-end
-
 return M

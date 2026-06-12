@@ -312,14 +312,32 @@ function M.attach(source_bufnr)
   -- window width, otherwise cells stay at fallback size until the first edit.
   buffer.render_all_borders(nb_bufnr, nb)
 
+  -- Width-dependent output rendering (hstack column sizing, the wrap pass)
+  -- goes stale when the window is resized. Re-render every cell's output at
+  -- the new width — debounced, unlike the border redraws, because outputs
+  -- are much heavier to rebuild (tree parse + widget walk + possibly image
+  -- placements) and mid-drag intermediate widths aren't worth painting.
+  local redraw_outputs = utils.debounce(function()
+    if not vim.api.nvim_buf_is_valid(nb_bufnr) then return end
+    if #vim.fn.win_findbuf(nb_bufnr) == 0 then return end
+    local output = require("neo-marimo.output")
+    for _, cell in ipairs(nb.cells) do
+      if not cell._output_hidden
+          and (cell.output or cell.console or cell._has_run) then
+        output.render(nb_bufnr, cell, filepath)
+      end
+    end
+  end, 200)
+
   -- Re-apply window settings whenever the buffer enters a new window
-  -- (e.g. user runs :split). Also re-render borders so they pick up the
-  -- new window width.
+  -- (e.g. user runs :split). Also re-render borders and outputs so they
+  -- pick up the new window width.
   vim.api.nvim_create_autocmd("BufWinEnter", {
     buffer = nb_bufnr,
     callback = function()
       buffer.apply_window_settings(vim.api.nvim_get_current_win())
       buffer.render_all_borders(nb_bufnr, nb)
+      redraw_outputs()
     end,
   })
 
@@ -339,6 +357,7 @@ function M.attach(source_bufnr)
     if w == last_width then return end
     last_width = w
     buffer.render_all_borders(nb_bufnr, nb)
+    redraw_outputs()
   end
 
   vim.api.nvim_create_autocmd({ "WinResized", "VimResized" }, {
@@ -392,15 +411,6 @@ end
 -- that aren't the current buffer.
 function M.attached_for(filepath)
   return _attached[filepath]
-end
-
--- Return a list of {filepath, nb} for every currently attached notebook.
-function M.list_attached()
-  local result = {}
-  for fp, nb in pairs(_attached) do
-    table.insert(result, { filepath = fp, nb = nb })
-  end
-  return result
 end
 
 -- Bind the toggle_view keymap onto a plain (.py) buffer. After the user has

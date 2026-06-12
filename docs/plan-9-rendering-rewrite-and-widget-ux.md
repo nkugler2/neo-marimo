@@ -279,7 +279,38 @@ When the cell contains tabs that hold widgets:
 
 ---
 
-## Phase 11 — Bug sweep, perf, dead code
+## Phase 11 — Bug sweep, perf, dead code — **DONE (2026-06-11)**
+
+> **Status:** shipped, all 8 items. (1) `start_and_open` is now a fully
+> async chain (timer-based /health polling replaces the blocking
+> `vim.uv.sleep` loop, token fetch + WS-handshake wait are callback-based),
+> `reclaim_ws` polls on a timer instead of `vim.wait`, `run_cells` /
+> `instantiate` are async (`actions.lua` rolls the optimistic "queued"
+> status back if the POST itself is rejected); parser bridge calls capped
+> at 15 s, `pgrep`/`ps` at 2 s. (2) `WinResized`/`BufWinEnter` re-render
+> all cell outputs (debounced 200 ms) after the border redraw. (3)
+> `dataframe.lua`, `markdown.lua`, and `output.lua`'s strip-tags fallback
+> all decode through `html.decode_entities` / `html.json_attr`. (4) every
+> width in `dataframe.lua` (panel + inline preview) is display cells via
+> `strdisplaywidth`/`pad_display`; `column_at_cursor` converts the byte
+> cursor column to a display column so `s` sorts the right column on
+> non-ASCII tables. (5) removed dead `buffer.render_cell_border`,
+> `init.list_attached`, `markdown.render_markdown_source`, `output.clear`,
+> `server.save_cells`, `watcher.stop_all` (kept `image.reset_backend`,
+> `server.send_ws`, `server.is_any_running` — deliberate debug/integration
+> hooks). (6) truncation hint reads the real keymaps from config and adds
+> the dataframe-panel key when the payload holds a table. (7)
+> `notebook.py` uses `add_params`. (8) new wrap pass in `output.lua`
+> (`ui.wrap_output`, default on): every virt_line is hard-wrapped at the
+> window text width — chunk-highlight-preserving, codepoint-safe,
+> word-boundary-aware — so long markdown/stdout/table lines no longer
+> vanish off the right edge; combined with (2) it re-wraps on resize.
+> Bonus: `nb.filepath` threaded through the remaining `output.render`
+> call sites (actions, toggle_output, :MarimoResetWidgets) so re-renders
+> keep virtual-file images. 118 tests green via `make test` (8 new across
+> `wrap_spec.lua`, `dataframe_spec.lua`, `output_spec.lua`). Manual
+> in-editor verification still requires push → pull into the vim.pack
+> install path.
 
 Smaller items found during the audit, batched:
 

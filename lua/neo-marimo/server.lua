@@ -53,13 +53,36 @@ local function url_encode(s)
   end))
 end
 
--- Synchronous HTTP GET. Returns body string or nil on error.
+-- Asynchronous HTTP GET. Calls `cb(body|nil)` on the main loop.
 -- Uses -f so curl exits non-zero on 4xx/5xx (otherwise we'd silently treat a
 -- 303 redirect body, an auth-login page, etc. as a valid response).
-local function http_get(url)
-  local r = vim.system({ "curl", "-sf", "--max-time", "3", url }, { text = true }):wait()
-  if r.code ~= 0 then return nil end
-  return r.stdout
+local function http_get(url, cb)
+  vim.system({ "curl", "-sf", "--max-time", "3", url }, { text = true }, function(r)
+    vim.schedule(function()
+      cb(r.code == 0 and r.stdout or nil)
+    end)
+  end)
+end
+
+-- Poll `pred()` every `interval` ms without blocking the editor; calls
+-- `cb(true)` as soon as it holds, `cb(false)` once `timeout_ms` elapses.
+-- The async replacement for the vim.wait()/vim.uv.sleep() loops that used
+-- to freeze the UI for the whole server-startup handshake.
+local function poll_until(pred, timeout_ms, interval, cb)
+  local elapsed = 0
+  local function tick()
+    if pred() then
+      cb(true)
+      return
+    end
+    if elapsed >= timeout_ms then
+      cb(false)
+      return
+    end
+    elapsed = elapsed + interval
+    vim.defer_fn(tick, interval)
+  end
+  tick()
 end
 
 -- Check whether a TCP port is currently being listened on by anything.
@@ -97,15 +120,18 @@ local function find_free_port(start_port, attempts)
   return nil
 end
 
--- Synchronous HTTP POST. Returns {status, body} on completion (regardless
--- of HTTP code) or nil if curl itself failed. Status is a string ("200")
--- so callers can compare without parsing.
+-- HTTP POST. With `cb`, runs asynchronously and calls `cb({status, body}|nil)`
+-- on the main loop; without it, blocks until completion (callers on save
+-- paths, where the result gates whether the write succeeded) and returns the
+-- same value. Status is a string ("200") so callers can compare without
+-- parsing. nil means curl itself failed.
 --
 -- Always sends Marimo-Session-Id + Marimo-Server-Token headers when present.
-local function http_post_raw(srv, path, body)
+local function http_post_raw(srv, path, body, cb)
   local json_body, err = utils.json_encode(body)
   if err then
     utils.warn("http_post encode error: " .. err)
+    if cb then cb(nil) end
     return nil
   end
 
@@ -127,60 +153,87 @@ local function http_post_raw(srv, path, body)
   table.insert(args, json_body)
   table.insert(args, api_url(srv, path))
 
-  local r = vim.system(args, { text = true }):wait()
-  if r.code ~= 0 then
-    utils.warn("POST " .. path .. " failed: curl exit " .. tostring(r.code))
-    return nil
+  local function to_result(r)
+    if r.code ~= 0 then
+      utils.warn("POST " .. path .. " failed: curl exit " .. tostring(r.code))
+      return nil
+    end
+    local body_str, status = r.stdout:match("^(.*)\n(%d+)%s*$")
+    if not status then
+      body_str = r.stdout
+      status = "?"
+    end
+    return { status = status, body = body_str or "" }
   end
 
-  local body_str, status = r.stdout:match("^(.*)\n(%d+)%s*$")
-  if not status then
-    body_str = r.stdout
-    status = "?"
+  if cb then
+    vim.system(args, { text = true }, function(r)
+      vim.schedule(function() cb(to_result(r)) end)
+    end)
+    return
   end
-  return { status = status, body = body_str or "" }
+  return to_result(vim.system(args, { text = true }):wait())
 end
 
--- JSON variant. Returns decoded body table or nil on error/non-2xx.
--- Used for endpoints like /api/kernel/run that respond with JSON; for
--- endpoints that respond with text/plain (e.g. /api/kernel/save) use
--- http_post_raw directly so the caller can check status without a
--- spurious decode failure.
-local function http_post(srv, path, body)
-  local r = http_post_raw(srv, path, body)
-  if not r then return nil end
-  if r.status ~= "200" then
-    utils.warn("POST " .. path .. " → HTTP " .. r.status .. ": " .. r.body)
-    return nil
+-- JSON variant. Yields the decoded body table, or nil on error/non-2xx.
+-- Async with `cb`, blocking without (same contract as http_post_raw). Used
+-- for endpoints like /api/kernel/run that respond with JSON; for endpoints
+-- that respond with text/plain (e.g. /api/kernel/save) use http_post_raw
+-- directly so the caller can check status without a spurious decode failure.
+local function http_post(srv, path, body, cb)
+  local function to_data(r)
+    if not r then return nil end
+    if r.status ~= "200" then
+      utils.warn("POST " .. path .. " → HTTP " .. r.status .. ": " .. r.body)
+      return nil
+    end
+    local data, decode_err = utils.json_decode(r.body)
+    if decode_err then return nil end
+    return data
   end
-  local data, decode_err = utils.json_decode(r.body)
-  if decode_err then return nil end
-  return data
+
+  if cb then
+    http_post_raw(srv, path, body, function(r) cb(to_data(r)) end)
+    return
+  end
+  return to_data(http_post_raw(srv, path, body))
 end
 
--- Poll the server health endpoint until it responds or timeout (ms).
-local function wait_for_server(port, timeout_ms)
-  local url = "http://127.0.0.1:" .. tostring(port) .. "/health"
+-- Poll the server health endpoint until it responds or timeout (ms), then
+-- call `cb(ready)`. Reads srv.port on every tick — marimo may report a
+-- different port on stdout after we spawn it, and the on_stdout handler
+-- updates srv.port when that happens.
+local function wait_for_server(srv, timeout_ms, cb)
   local elapsed = 0
   local interval = 200
-
-  while elapsed < timeout_ms do
-    local body = http_get(url)
-    if body and body:find("healthy") then
-      return true
-    end
-    vim.uv.sleep(interval)
-    elapsed = elapsed + interval
+  local function tick()
+    http_get("http://127.0.0.1:" .. tostring(srv.port) .. "/health", function(body)
+      if body and body:find("healthy") then
+        cb(true)
+        return
+      end
+      if elapsed >= timeout_ms then
+        cb(false)
+        return
+      end
+      elapsed = elapsed + interval
+      vim.defer_fn(tick, interval)
+    end)
   end
-  return false
+  tick()
 end
 
 -- Fetch the notebook HTML and extract the skew-protection server token.
-local function fetch_server_token(port, filepath)
+-- Calls `cb(token|nil)`.
+local function fetch_server_token(port, filepath, cb)
   local url = "http://127.0.0.1:" .. tostring(port) .. "/?file=" .. url_encode(filepath)
-  local html = http_get(url)
-  if not html then return nil end
-  return html:match('<marimo%-server%-token[^>]*data%-token="([^"]+)"')
+  http_get(url, function(html)
+    if not html then
+      cb(nil)
+      return
+    end
+    cb(html:match('<marimo%-server%-token[^>]*data%-token="([^"]+)"'))
+  end)
 end
 
 -- Generate a UUID v4-like string for session IDs.
@@ -498,6 +551,10 @@ end
 -- holding the main slot, and won't kick the browser off). Pass
 -- `opts.as_main = true` to take over as the primary editor, which only
 -- works when no other client is connected.
+--
+-- Asynchronous: the handshake wait happens on a timer (this sits behind a
+-- keymap; the old vim.wait form locked the UI for up to 5 s). Returns true
+-- if a reconnect was initiated (or one is already live).
 function M.reclaim_ws(filepath, opts)
   opts = opts or {}
   local srv = M._servers[filepath]
@@ -519,60 +576,68 @@ function M.reclaim_ws(filepath, opts)
   local ok = M.connect_ws(filepath, srv.on_message, { kiosk = kiosk })
   if not ok then return false end
 
-  local connected = vim.wait(5000, function()
-    return srv.ws_connected == true
-  end, 50)
+  poll_until(function() return srv.ws_connected == true end, 5000, 50, function(connected)
+    if not connected then
+      utils.warn("Reclaim: WebSocket did not connect within 5s.")
+      return
+    end
 
-  if not connected then
-    utils.warn("Reclaim: WebSocket did not connect within 5s.")
-    return false
-  end
-
-  srv.browser_active = false
-  -- Don't re-instantiate when reconnecting as kiosk: marimo replays the
-  -- session view on kiosk connect, which re-emits the existing cell
-  -- outputs. Instantiate would force a re-run of every cell, which is
-  -- almost never what the user wants when they're just plugging back
-  -- in to observe.
-  if not kiosk then
-    M.instantiate(filepath)
-  end
-  vim.notify(
-    "[neo-marimo] WebSocket reclaimed (" .. (kiosk and "kiosk" or "main") .. ").",
-    vim.log.levels.INFO
-  )
+    srv.browser_active = false
+    -- Don't re-instantiate when reconnecting as kiosk: marimo replays the
+    -- session view on kiosk connect, which re-emits the existing cell
+    -- outputs. Instantiate would force a re-run of every cell, which is
+    -- almost never what the user wants when they're just plugging back
+    -- in to observe.
+    if not kiosk then
+      M.instantiate(filepath)
+    end
+    vim.notify(
+      "[neo-marimo] WebSocket reclaimed (" .. (kiosk and "kiosk" or "main") .. ").",
+      vim.log.levels.INFO
+    )
+  end)
   return true
 end
 
--- Send HTTP POST /api/kernel/instantiate.
-function M.instantiate(filepath)
-  local srv = M._servers[filepath]
-  if not srv then return false end
-
-  local result = http_post(srv, "/api/kernel/instantiate", {
-    objectIds = {}, values = {}, autoRun = true,
-  })
-
-  if result and result.success then
-    srv.instantiated = true
-    return true
-  end
-  return false
-end
-
--- Send HTTP POST /api/kernel/run for one or more cells.
-function M.run_cells(filepath, cell_ids, codes)
+-- Send HTTP POST /api/kernel/instantiate. Asynchronous; `on_done(ok)` is
+-- optional. Returns true if the request was dispatched.
+function M.instantiate(filepath, on_done)
   local srv = M._servers[filepath]
   if not srv then
-    utils.warn("No marimo server running. Press <leader>mo to start.")
+    if on_done then on_done(false) end
     return false
   end
 
-  local result = http_post(srv, "/api/kernel/run", {
-    cellIds = cell_ids, codes = codes,
-  })
+  http_post(srv, "/api/kernel/instantiate", {
+    objectIds = {}, values = {}, autoRun = true,
+  }, function(result)
+    local ok = result ~= nil and result.success == true
+    if ok then srv.instantiated = true end
+    if on_done then on_done(ok) end
+  end)
+  return true
+end
 
-  return result ~= nil and result.success == true
+-- Send HTTP POST /api/kernel/run for one or more cells. Asynchronous —
+-- this sits behind the run-cell keymaps, and the old blocking form froze
+-- the UI for up to 10 s on a slow kernel. Run results arrive over the WS
+-- as cell-op messages either way; `on_done(ok)` is optional for callers
+-- that care whether the request itself was accepted. Returns true if the
+-- request was dispatched.
+function M.run_cells(filepath, cell_ids, codes, on_done)
+  local srv = M._servers[filepath]
+  if not srv then
+    utils.warn("No marimo server running. Press <leader>mo to start.")
+    if on_done then on_done(false) end
+    return false
+  end
+
+  http_post(srv, "/api/kernel/run", {
+    cellIds = cell_ids, codes = codes,
+  }, function(result)
+    if on_done then on_done(result ~= nil and result.success == true) end
+  end)
+  return true
 end
 
 -- Open the notebook in a browser. No auth needed since --no-token is set;
@@ -588,7 +653,10 @@ end
 
 -- Full start-and-open flow: start server if needed, wait for ready, fetch
 -- the server token from the HTML, connect WS, instantiate kernel, then open
--- the browser.
+-- the browser. Every wait in the chain is asynchronous — this runs off a
+-- keymap, and the old form (blocking health poll + vim.wait on the WS
+-- handshake) froze the editor for the entire startup, up to ~15 s when the
+-- server was slow to come up.
 function M.start_and_open(nb, on_message)
   local filepath = nb.filepath
   local port = config.options.server.port or 2718
@@ -603,45 +671,9 @@ function M.start_and_open(nb, on_message)
   local srv = M.start(filepath, port, on_message)
   if not srv then return end
 
-  vim.defer_fn(function()
-    local ready = wait_for_server(srv.port, 10000)
-    if not ready then
-      utils.error("Marimo server did not start within 10 seconds.")
-      M.stop(filepath)
-      return
-    end
-
-    -- Fetch the skew-protection token before any API call. Without this all
-    -- POSTs would 401 with "Missing server token". This doubles as an
-    -- identity check: if the HTML doesn't contain a token element, we are
-    -- not talking to a --no-token server (probably an orphan that requires
-    -- auth and 303s us to /auth/login). Bail loudly rather than continue
-    -- with a half-broken connection where WS 403s and HTTP 401s.
-    srv.server_token = fetch_server_token(srv.port, filepath)
-    if not srv.server_token then
-      utils.error(
-        "Could not authenticate with marimo server on port " .. srv.port ..
-          ". Most likely an orphan `marimo edit` is holding the port " ..
-          "(`pgrep -fl marimo` to check, then `:MarimoKillAll` to clean up)."
-      )
-      M.stop(filepath)
-      return
-    end
-
-    vim.notify("[neo-marimo] Server ready. Connecting...", vim.log.levels.INFO)
-
-    srv.ws_connected = false
-    M.connect_ws(filepath, on_message)
-
-    -- Block until ws_client.py has actually completed its handshake.
-    -- vim.wait yields to the event loop so on_stdout can set ws_connected.
-    -- If we open the browser before this, the browser's WS wins the single
-    -- EDIT-mode connection slot and our HTTP requests 500 with
-    -- "Invalid session id" because no session was ever created for us.
-    local connected = vim.wait(5000, function()
-      return srv.ws_connected == true
-    end, 50)
-
+  -- Step 3 of the chain: WS handshake done (or timed out) → instantiate,
+  -- hand the main WS slot to the browser, open it, reconnect as kiosk.
+  local function on_ws_settled(connected)
     if not connected then
       utils.warn("WebSocket client didn't connect within 5s; opening browser anyway.")
     end
@@ -672,56 +704,48 @@ function M.start_and_open(nb, on_message)
         M.connect_ws(filepath, current_srv.on_message, { kiosk = true })
       end, 1200)
     end
-  end, 0)
-end
+  end
 
--- Push cell codes to the running marimo server via /api/kernel/save.
--- Marimo will write the file itself, but we still call this so its
--- in-memory view of the notebook matches what we just persisted. Without
--- it, the running server lags behind disk by ~1s while its own file
--- watcher catches up.
---
--- `cells` is an ordered list of cell tables with fields `id`, `name`,
--- `code`, and `options`. The cell IDs must match what the server
--- assigned at kernel-ready time, otherwise marimo rejects the request.
-function M.save_cells(filepath, cells)
-  local srv = M._servers[filepath]
-  if not srv then return false end
-
-  local cell_ids = {}
-  local codes = {}
-  local names = {}
-  local configs = {}
-  for _, cell in ipairs(cells) do
-    table.insert(cell_ids, cell.id)
-    table.insert(codes, cell.code or "")
-    table.insert(names, cell.name or "_")
-    -- vim.empty_dict() round-trips as {} rather than [] — required so
-    -- marimo's msgspec decoder accepts CellConfig{} for empty options.
-    local opts = cell.options
-    if type(opts) ~= "table" or next(opts) == nil then
-      opts = vim.empty_dict()
+  -- Step 2: server healthy → fetch token, connect WS, wait for handshake.
+  local function on_ready(token)
+    -- The skew-protection token gates every API call. Without it all POSTs
+    -- would 401 with "Missing server token". This doubles as an identity
+    -- check: if the HTML doesn't contain a token element, we are not
+    -- talking to a --no-token server (probably an orphan that requires
+    -- auth and 303s us to /auth/login). Bail loudly rather than continue
+    -- with a half-broken connection where WS 403s and HTTP 401s.
+    if not token then
+      utils.error(
+        "Could not authenticate with marimo server on port " .. srv.port ..
+          ". Most likely an orphan `marimo edit` is holding the port " ..
+          "(`pgrep -fl marimo` to check, then `:MarimoKillAll` to clean up)."
+      )
+      M.stop(filepath)
+      return
     end
-    table.insert(configs, opts)
+    srv.server_token = token
+
+    vim.notify("[neo-marimo] Server ready. Connecting...", vim.log.levels.INFO)
+
+    srv.ws_connected = false
+    M.connect_ws(filepath, on_message)
+
+    -- Wait for ws_client.py to complete its handshake before opening the
+    -- browser. If we open it earlier, the browser's WS wins the single
+    -- EDIT-mode connection slot and our HTTP requests 500 with
+    -- "Invalid session id" because no session was ever created for us.
+    poll_until(function() return srv.ws_connected == true end, 5000, 50, on_ws_settled)
   end
 
-  -- /api/kernel/save responds with the saved file contents as
-  -- text/plain (not JSON), so we use the raw helper and check the HTTP
-  -- status directly instead of going through http_post's JSON decode.
-  local r = http_post_raw(srv, "/api/kernel/save", {
-    cellIds = cell_ids,
-    codes = codes,
-    names = names,
-    configs = configs,
-    filename = filepath,
-    persist = true,
-  })
-  if not r then return false end
-  if r.status ~= "200" then
-    utils.warn("POST /api/kernel/save → HTTP " .. r.status .. ": " .. r.body)
-    return false
-  end
-  return true
+  -- Step 1: poll /health until the server is up.
+  wait_for_server(srv, 10000, function(ready)
+    if not ready then
+      utils.error("Marimo server did not start within 10 seconds.")
+      M.stop(filepath)
+      return
+    end
+    fetch_server_token(srv.port, filepath, on_ready)
+  end)
 end
 
 -- ── introspection ─────────────────────────────────────────────────────────
@@ -761,8 +785,10 @@ end
 -- it). Returns array of {pid, ppid, cmd}. Used by :MarimoServerList to
 -- surface orphans that the plugin can't see in its own state.
 function M.list_system_marimo_processes()
-  -- pgrep -fl: full command line. -d \n is the default.
-  local r = vim.system({ "pgrep", "-fl", "marimo edit" }, { text = true }):wait()
+  -- pgrep -fl: full command line. -d \n is the default. Sync is fine here
+  -- (this backs :MarimoServerList, loopback-fast commands) but bound the
+  -- waits so a wedged ps/pgrep can't hang the editor indefinitely.
+  local r = vim.system({ "pgrep", "-fl", "marimo edit" }, { text = true, timeout = 2000 }):wait()
   if r.code ~= 0 or not r.stdout or r.stdout == "" then return {} end
 
   local procs = {}
@@ -770,7 +796,7 @@ function M.list_system_marimo_processes()
     local pid, cmd = line:match("^(%d+)%s+(.+)$")
     if pid then
       pid = tonumber(pid)
-      local ppid_r = vim.system({ "ps", "-o", "ppid=", "-p", tostring(pid) }, { text = true }):wait()
+      local ppid_r = vim.system({ "ps", "-o", "ppid=", "-p", tostring(pid) }, { text = true, timeout = 2000 }):wait()
       local ppid = ppid_r.code == 0 and tonumber((ppid_r.stdout:gsub("%s+", ""))) or nil
       table.insert(procs, { pid = pid, ppid = ppid, cmd = cmd })
     end

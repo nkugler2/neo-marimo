@@ -331,11 +331,6 @@ function M.render_all_borders(bufnr, nb)
   end
 end
 
--- Update borders for a single cell (e.g., after its row changed).
-function M.render_cell_border(bufnr, cell)
-  render_cell_borders(bufnr, cell)
-end
-
 -- Build the buffer lines from the notebook cells.
 -- Returns a flat list of strings (no decorator boilerplate).
 local function cells_to_lines(nb)

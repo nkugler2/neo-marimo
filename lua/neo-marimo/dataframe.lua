@@ -13,6 +13,7 @@
 --   * column widths sized to content (capped at 30 chars per column)
 
 local notebook = require("neo-marimo.notebook")
+local html_mod = require("neo-marimo.html")
 
 local M = {}
 
@@ -41,14 +42,11 @@ M._panels = {}
 --
 --   shape 4  application/vnd.marimo+mime envelope wrapping any of 1-3.
 
+-- Entity decoding is html.lua's job (single copy, named + numeric refs);
+-- this just drops the tags and trims.
 local function strip_tags(s)
   if type(s) ~= "string" then return tostring(s or "") end
-  return (s:gsub("<[^>]+>", "")
-           :gsub("&amp;", "&"):gsub("&lt;", "<")
-           :gsub("&gt;", ">"):gsub("&quot;", '"')
-           :gsub("&#39;", "'"):gsub("&apos;", "'")
-           :gsub("&nbsp;", " ")
-           :match("^%s*(.-)%s*$"))
+  return (html_mod.decode_entities(s:gsub("<[^>]+>", "")):match("^%s*(.-)%s*$"))
 end
 
 -- Read an attribute value out of an opener tag (e.g. `<marimo-table
@@ -60,35 +58,12 @@ local function read_attr(tag_open, name)
 end
 
 -- Decode an attribute value that holds JSON. Marimo HTML-entity-encodes
--- the value on the wire — and for nested-quote content (`{"x": "a"}`)
--- it includes &#92; for the escaping backslash inside the JSON string.
--- Without the &#NNN; pass, json.decode sees `&#92;"` and bails on a
--- malformed escape. Additionally, marimo sometimes DOUBLE-encodes: the
--- attribute holds a JSON-encoded *string* whose content is itself JSON
--- (`data-data='&quot;[{&#92;&quot;x&#92;&quot;:1}]&quot;'`). After one
--- decode we get a Lua string holding `[{"x":1}]`; a second decode yields
--- the actual row list.
+-- the value on the wire (including &#92; for escaping backslashes inside
+-- nested JSON strings) and sometimes double-encodes the JSON itself —
+-- both layers are handled by html.lua's shared decoders.
 local function decode_json_attr(s)
   if type(s) ~= "string" or s == "" then return nil end
-  s = s:gsub("&amp;", "&")
-       :gsub("&lt;", "<"):gsub("&gt;", ">")
-       :gsub("&quot;", '"'):gsub("&apos;", "'")
-       :gsub("&#x(%x+);", function(hex)
-         local n = tonumber(hex, 16)
-         if n then return vim.fn.nr2char(n) end
-       end)
-       :gsub("&#(%d+);", function(dec)
-         local n = tonumber(dec)
-         if n then return vim.fn.nr2char(n) end
-       end)
-  local ok, data = pcall(vim.json.decode, s)
-  if not ok then return nil end
-  -- Unwrap double-encoded JSON (a JSON-string whose content is itself JSON).
-  if type(data) == "string" then
-    local ok2, data2 = pcall(vim.json.decode, data)
-    if ok2 then return data2 end
-  end
-  return data
+  return html_mod.json_attr(html_mod.decode_entities(s))
 end
 
 -- Shape 1: application/vnd.dataresource+json.
@@ -310,6 +285,25 @@ M.parse_dataresource = parse_dataresource
 local INLINE_MAX_ROWS = 5
 local INLINE_COL_CAP = 20
 
+-- Pad/truncate `s` to exactly `cells` display cells. Widths everywhere in
+-- this module are display cells (not bytes) so non-ASCII headers/values —
+-- CJK, emoji, accented text — keep vertical alignment; naïve
+-- `string.format("%-Ns", …)` counts bytes and overruns the budget.
+local function pad_display(s, cells)
+  local w = vim.fn.strdisplaywidth(s)
+  if w == cells then return s end
+  if w < cells then return s .. string.rep(" ", cells - w) end
+  -- truncate in codepoint-safe steps until we fit
+  local total = vim.fn.strchars(s)
+  for n = total, 0, -1 do
+    local cand = vim.fn.strcharpart(s, 0, n)
+    if vim.fn.strdisplaywidth(cand) <= cells then
+      return cand .. string.rep(" ", cells - vim.fn.strdisplaywidth(cand))
+    end
+  end
+  return string.rep(" ", cells)
+end
+
 function M.render_inline(df, opts)
   opts = opts or {}
   local max_rows = opts.max_rows or INLINE_MAX_ROWS
@@ -322,11 +316,13 @@ function M.render_inline(df, opts)
   end
 
   local widths = {}
-  for _, c in ipairs(df.cols) do widths[c] = math.max(#tostring(c), 4) end
+  for _, c in ipairs(df.cols) do
+    widths[c] = math.max(vim.fn.strdisplaywidth(tostring(c)), 4)
+  end
   for i = 1, math.min(max_rows, #df.rows) do
     for _, c in ipairs(df.cols) do
-      local val = tostring(df.rows[i][c] or "")
-      if #val > widths[c] then widths[c] = math.min(#val, INLINE_COL_CAP) end
+      local w = vim.fn.strdisplaywidth(tostring(df.rows[i][c] or ""))
+      if w > widths[c] then widths[c] = math.min(w, INLINE_COL_CAP) end
     end
   end
 
@@ -334,8 +330,7 @@ function M.render_inline(df, opts)
   -- Header row
   local header = "  │"
   for _, c in ipairs(df.cols) do
-    header = header .. string.format(" %-" .. widths[c] .. "s │",
-      tostring(c):sub(1, widths[c]))
+    header = header .. " " .. pad_display(tostring(c), widths[c]) .. " │"
   end
   table.insert(lines, { { header, "MarimoOutputText" } })
 
@@ -350,8 +345,7 @@ function M.render_inline(df, opts)
   for i = 1, shown do
     local s = "  │"
     for _, c in ipairs(df.cols) do
-      local v = tostring(df.rows[i][c] or ""):sub(1, widths[c])
-      s = s .. string.format(" %-" .. widths[c] .. "s │", v)
+      s = s .. " " .. pad_display(tostring(df.rows[i][c] or ""), widths[c]) .. " │"
     end
     table.insert(lines, { { s, "MarimoOutputText" } })
   end
@@ -370,43 +364,24 @@ end
 
 local MAX_COL_WIDTH = 30
 
--- Compute padded widths for every column. Widths cap at MAX_COL_WIDTH so a
--- single fat column doesn't blow the panel out beyond the user's window.
--- The sort-arrow suffix is included in the header sizing so the header and
--- separator lines stay vertically aligned even after the user sorts.
+-- Compute padded widths (display cells) for every column. Widths cap at
+-- MAX_COL_WIDTH so a single fat column doesn't blow the panel out beyond
+-- the user's window. The sort-arrow suffix is included in the header sizing
+-- so the header and separator lines stay vertically aligned after a sort.
 local function compute_widths(df, sort_col)
   local widths = {}
   for _, c in ipairs(df.cols) do
-    local hdr_w = #c
+    local hdr_w = vim.fn.strdisplaywidth(c)
     if c == sort_col then hdr_w = hdr_w + 2 end  -- " ▲" or " ▼"
     widths[c] = math.max(hdr_w, 4)
   end
   for _, row in ipairs(df.rows) do
     for _, c in ipairs(df.cols) do
-      local v = tostring(row[c] or "")
-      if #v > widths[c] then widths[c] = math.min(#v, MAX_COL_WIDTH) end
+      local w = vim.fn.strdisplaywidth(tostring(row[c] or ""))
+      if w > widths[c] then widths[c] = math.min(w, MAX_COL_WIDTH) end
     end
   end
   return widths
-end
-
--- Pad/truncate `s` to exactly `cells` display cells. `widths[c]` is sized in
--- bytes from compute_widths (which assumes ASCII content); the sort arrow is
--- 3 bytes / 1 cell, so naïve `string.format("%-Ns", …)` overruns the budget
--- and breaks vertical alignment.
-local function pad_display(s, cells)
-  local w = vim.fn.strdisplaywidth(s)
-  if w == cells then return s end
-  if w < cells then return s .. string.rep(" ", cells - w) end
-  -- truncate in codepoint-safe steps until we fit
-  local total = vim.fn.strchars(s)
-  for n = total, 0, -1 do
-    local cand = vim.fn.strcharpart(s, 0, n)
-    if vim.fn.strdisplaywidth(cand) <= cells then
-      return cand .. string.rep(" ", cells - vim.fn.strdisplaywidth(cand))
-    end
-  end
-  return string.rep(" ", cells)
 end
 
 local function build_lines(df, sort_col, sort_desc)
@@ -433,9 +408,7 @@ local function build_lines(df, sort_col, sort_desc)
   for _, row in ipairs(df.rows) do
     local line = "│"
     for _, c in ipairs(df.cols) do
-      local v = tostring(row[c] or "")
-      v = v:sub(1, widths[c])
-      line = line .. string.format(" %-" .. widths[c] .. "s │", v)
+      line = line .. " " .. pad_display(tostring(row[c] or ""), widths[c]) .. " │"
     end
     table.insert(lines, line)
   end
@@ -449,16 +422,20 @@ end
 
 -- Find which column the cursor sits on (1-indexed into df.cols). Returns nil
 -- if the cursor isn't over a data column (e.g. on the row-number area or a
--- separator line).
+-- separator line). Cursor position arrives as a byte column but widths are
+-- display cells — convert via strdisplaywidth of the line up to the cursor,
+-- otherwise multi-byte content ("│" is 3 bytes / 1 cell, CJK is 3 bytes /
+-- 2 cells) shifts every boundary and `s` sorts the wrong column.
 local function column_at_cursor(panel)
   local pos = vim.api.nvim_win_get_cursor(panel.win)
-  local col = pos[2]  -- 0-indexed byte column
+  local line = vim.api.nvim_buf_get_lines(panel.buf, pos[1] - 1, pos[1], false)[1] or ""
+  local col = vim.fn.strdisplaywidth(line:sub(1, pos[2]))  -- 0-indexed display column
 
   -- Skip the leading "│ " prefix
   local x = 2
   for j, c in ipairs(panel.df.cols) do
     local w = panel.widths[c]
-    -- Each column occupies width + 3 bytes: " %-w s │"
+    -- Each column occupies width + 3 display cells: " <content> │"
     if col >= x and col < x + w + 1 then
       return j, c
     end

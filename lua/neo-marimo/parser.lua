@@ -9,11 +9,16 @@ local bridge_path = utils.plugin_root() .. "/python/bridge.py"
 --   app_options: app constructor kwargs
 --   valid: boolean
 -- Raises an error string on failure.
+-- Bridge calls run on attach/save paths where the result gates the next
+-- step, so they stay synchronous — but bounded, so a wedged interpreter
+-- (bad python_path, hung import) can't freeze the editor forever.
+local BRIDGE_TIMEOUT_MS = 15000
+
 function M.parse_file(filepath, python_path)
   python_path = python_path or "python3"
   local result = vim.system(
     { python_path, bridge_path, "parse", filepath },
-    { text = true }
+    { text = true, timeout = BRIDGE_TIMEOUT_MS }
   ):wait()
 
   if result.code ~= 0 then
@@ -40,7 +45,7 @@ function M.generate_py(cells, filepath, python_path)
 
   local result = vim.system(
     { python_path, bridge_path, "generate" },
-    { text = true, stdin = input }
+    { text = true, stdin = input, timeout = BRIDGE_TIMEOUT_MS }
   ):wait()
 
   if result.code ~= 0 then
@@ -56,7 +61,7 @@ function M.check(python_path)
   python_path = python_path or "python3"
   local result = vim.system(
     { python_path, bridge_path, "check" },
-    { text = true }
+    { text = true, timeout = BRIDGE_TIMEOUT_MS }
   ):wait()
 
   if result.code ~= 0 then

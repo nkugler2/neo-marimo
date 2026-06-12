@@ -442,7 +442,7 @@ vim.api.nvim_create_user_command("MarimoResetWidgets", function()
   end
   require("neo-marimo.widgets").clear_all_overrides()
   for _, cell in ipairs(nb.cells) do
-    require("neo-marimo.output").render(nb.bufnr, cell)
+    require("neo-marimo.output").render(nb.bufnr, cell, nb.filepath)
   end
   vim.notify("[neo-marimo] Widget overrides cleared.", vim.log.levels.INFO)
 end, { desc = "Clear all widget value overrides and re-render" })

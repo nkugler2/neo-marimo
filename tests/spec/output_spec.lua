@@ -86,6 +86,35 @@ t.case("output: plain text over the cap is truncated", function()
   local joined = table.concat(virt_lines_at(bufnr), "\n")
   t.match(joined, "truncated")
   t.no_match(joined, "line 59", "tail capped")
+  -- The hint names the escape hatches (11.6): toggle + browser, but not
+  -- the dataframe panel for a non-table payload.
+  t.match(joined, "<leader>mt")
+  t.match(joined, "<leader>mo")
+  t.no_match(joined, "<leader>mD", "no table hint for plain text")
+end)
+
+t.case("output: dataframe output points at the full panel", function()
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  local rows = {}
+  for i = 1, 200 do rows[i] = { a = i, b = "x" .. i } end
+  local cell = {
+    id = "df-trunc", index = 1, name = "_",
+    start_row = 0, end_row = 2, status = "idle", _has_run = true,
+    output = {
+      mimetype = "application/vnd.dataresource+json",
+      data = {
+        schema = { fields = { { name = "a" }, { name = "b" } } },
+        data = rows,
+      },
+    },
+  }
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "x = 1", "y = 2", "z = 3" })
+  -- The inline dataframe renderer caps itself at 5 rows, so this payload
+  -- never trips MAX_LINES — but its own hint must still point at the panel.
+  output.render(bufnr, cell)
+  local joined = table.concat(virt_lines_at(bufnr), "\n")
+  t.match(joined, "<leader>mD", "panel hint present for table output")
+  t.match(joined, "195 more rows")
 end)
 
 t.case("output: full notebook.py cell-4 payload renders every tab", function()

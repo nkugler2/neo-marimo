@@ -15,38 +15,8 @@ local M = {}
 
 -- ── HTML helpers ──────────────────────────────────────────────────────────
 
-local HTML_ENTITIES = {
-  ["&amp;"] = "&",
-  ["&lt;"] = "<",
-  ["&gt;"] = ">",
-  ["&quot;"] = '"',
-  ["&#39;"] = "'",
-  ["&apos;"] = "'",
-  ["&nbsp;"] = " ",
-  ["&hellip;"] = "…",
-  ["&mdash;"] = "—",
-  ["&ndash;"] = "–",
-  ["&copy;"] = "©",
-  ["&trade;"] = "™",
-  ["&reg;"] = "®",
-}
-
-local function decode_entities(s)
-  -- Named entities from the lookup table first.
-  s = s:gsub("&%w+;", function(e) return HTML_ENTITIES[e] or e end)
-  -- Generic numeric character references — marimo uses &#92; for backslash
-  -- in nested-JSON content, and we don't want to hand-roll a name for every
-  -- printable codepoint. nr2char handles the UTF-8 encoding.
-  s = s:gsub("&#x(%x+);", function(hex)
-    local n = tonumber(hex, 16)
-    if n then return vim.fn.nr2char(n) end
-  end)
-  s = s:gsub("&#(%d+);", function(dec)
-    local n = tonumber(dec)
-    if n then return vim.fn.nr2char(n) end
-  end)
-  return s
-end
+-- Single shared entity decoder (named + numeric refs) lives in html.lua.
+local decode_entities = require("neo-marimo.html").decode_entities
 
 -- True if the payload looks like marimo's HTML markdown wrapper, vs. an
 -- arbitrary HTML blob that happens to contain markdown-ish text.
@@ -391,13 +361,6 @@ function M.render(data)
 
   local md_lines = vim.split(md, "\n", { plain = true })
   return render_md_lines(md_lines)
-end
-
--- Exposed for callers that already have markdown source (e.g. raw
--- `text/markdown` mime payloads, no HTML wrapper).
-function M.render_markdown_source(src)
-  if type(src) ~= "string" or src == "" then return {} end
-  return render_md_lines(vim.split(src, "\n", { plain = true }))
 end
 
 -- Predicate exposed so output.lua can route HTML payloads that look like

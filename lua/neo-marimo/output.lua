@@ -2,6 +2,7 @@
 -- Handles the cell-op messages from the marimo WebSocket.
 
 local hl = require("neo-marimo.highlights")
+local config = require("neo-marimo.config")
 local markdown = require("neo-marimo.markdown")
 local image = require("neo-marimo.image")
 local widgets = require("neo-marimo.widgets")
@@ -151,9 +152,7 @@ local function render_html(data)
   if has_image then
     table.insert(lines, { { "  [image — install image.nvim or open in browser]", "Comment" } })
   end
-  local stripped = data:gsub("<[^>]+>", "")
-    :gsub("&amp;", "&"):gsub("&lt;", "<"):gsub("&gt;", ">")
-    :gsub("&quot;", '"'):gsub("&#39;", "'"):gsub("&nbsp;", " ")
+  local stripped = require("neo-marimo.html").decode_entities(data:gsub("<[^>]+>", ""))
   stripped = stripped:match("^%s*(.-)%s*$")
   if stripped ~= "" then
     for _, vl in ipairs(render_text_plain(stripped)) do
@@ -192,11 +191,9 @@ end
 
 local function render_markdown_mime(data)
   -- markdown.render auto-detects HTML wrappers (`<span class="markdown
-  -- prose">`) and unwraps them, then renders. Routing through `render`
-  -- rather than `render_markdown_source` is what makes mimetype
-  -- text/markdown work when marimo serializes mo.md() output as
-  -- pre-rendered HTML wearing a text/markdown sticker — observed in
-  -- marimo ≥ 0.19.
+  -- prose">`) and unwraps them before rendering — necessary because marimo
+  -- (≥ 0.19) serializes mo.md() output as pre-rendered HTML wearing a
+  -- text/markdown sticker, so the payload can't be treated as raw markdown.
   return require("neo-marimo.markdown").render(data)
 end
 
@@ -298,6 +295,115 @@ local function output_to_virt_lines(output)
   return { { { "  [" .. mimetype .. "]", "Comment" } } }
 end
 
+-- ── output wrapping ────────────────────────────────────────────────────────
+--
+-- virt_lines neither wrap nor scroll horizontally: anything past the right
+-- window edge is simply invisible, with no way to reach it. So every
+-- virt_line is hard-wrapped at the window's text width before the extmark
+-- is set. Highlights are preserved per chunk; continuation lines start with
+-- the standard two-space indent. Prose breaks at word boundaries when one
+-- falls inside the overflowing chunk.
+
+-- Split `text` at the largest codepoint prefix that fits in `cells` display
+-- cells (multi-byte safe — box-drawing chars are 3 bytes / 1 cell).
+local function fit_chars(text, cells)
+  local total = vim.fn.strchars(text)
+  local lo, hi = 0, total
+  while lo < hi do
+    local mid = math.floor((lo + hi + 1) / 2)
+    if vim.fn.strdisplaywidth(vim.fn.strcharpart(text, 0, mid)) <= cells then
+      lo = mid
+    else
+      hi = mid - 1
+    end
+  end
+  return vim.fn.strcharpart(text, 0, lo), vim.fn.strcharpart(text, lo)
+end
+
+-- Wrap one virt_line (list of {text, hl} chunks) at `width` display cells.
+-- Returns a list of virt_lines. Exposed as M._wrap_virt_line for tests.
+local function wrap_virt_line(chunks, width)
+  width = math.max(width, 12)
+  local total = 0
+  for _, ch in ipairs(chunks) do
+    total = total + vim.fn.strdisplaywidth(ch[1])
+  end
+  if total <= width then return { chunks } end
+
+  local out = {}
+  local cur, cur_w, start_w = {}, 0, 0
+  local function flush()
+    table.insert(out, cur)
+    cur = { { "  ", "MarimoOutputText" } }
+    cur_w = 2
+    start_w = 2
+  end
+
+  for _, ch in ipairs(chunks) do
+    local text, hl_group = ch[1], ch[2]
+    while text ~= "" do
+      local avail = width - cur_w
+      if vim.fn.strdisplaywidth(text) <= avail then
+        table.insert(cur, { text, hl_group })
+        cur_w = cur_w + vim.fn.strdisplaywidth(text)
+        break
+      end
+
+      local head, tail = fit_chars(text, avail)
+
+      -- Mid-word split? Pull the partial word onto the next line when the
+      -- kept part still has content without it.
+      if head ~= "" and tail ~= ""
+          and head:sub(-1):match("%S") and tail:sub(1, 1):match("%S") then
+        local cut = head:match("^(.*)%s%S+$")
+        if cut and cut:find("%S") then
+          tail = head:sub(#cut + 2) .. tail
+          head = cut
+        end
+      end
+
+      if head == "" then
+        if cur_w > start_w then
+          -- Line already holds content; wrap and retry with a fresh line.
+          flush()
+        else
+          -- A single codepoint wider than the available space (pathological
+          -- narrow window): force one through so we always make progress.
+          head = vim.fn.strcharpart(text, 0, 1)
+          table.insert(cur, { head, hl_group })
+          flush()
+          text = vim.fn.strcharpart(text, 1)
+        end
+      else
+        table.insert(cur, { head, hl_group })
+        flush()
+        -- Continuation alignment is already broken by the wrap; leading
+        -- whitespace would just smear it further right.
+        text = tail:gsub("^%s+", "")
+      end
+    end
+  end
+
+  if cur_w > start_w or #out == 0 then table.insert(out, cur) end
+  return out
+end
+
+M._wrap_virt_line = wrap_virt_line
+
+-- Display width available for output text in the first window showing
+-- `bufnr` (window width minus sign/number/fold columns). nil when the
+-- buffer isn't visible — renders can land while another buffer has the
+-- window; wrapping is then deferred to the WinResized/BufWinEnter repaint.
+local function output_text_width(bufnr)
+  local wins = vim.fn.win_findbuf(bufnr)
+  if #wins == 0 then return nil end
+  local win = wins[1]
+  local width = vim.api.nvim_win_get_width(win)
+  local info = vim.fn.getwininfo(win)[1]
+  if info and info.textoff then width = width - info.textoff end
+  return math.max(20, width)
+end
+
 -- Status indicator line at the top of each cell's output area.
 -- `has_run` lets us distinguish "never executed" (no indicator) from
 -- "executed successfully but produced no output" (✓ ran).
@@ -368,7 +474,16 @@ function M.render(bufnr, cell, filepath)
     local shown = 0
     for _, vl in ipairs(output_lines) do
       if not skip_cap and shown >= MAX_LINES then
-        table.insert(virt_lines, { { "  … (output truncated, open in browser for full view)", "Comment" } })
+        -- Point at every escape hatch: hide/show toggle, browser, and —
+        -- when the payload actually holds a table — the dataframe panel.
+        local km = config.options.keymaps or {}
+        local hint = "  … (output truncated — "
+          .. (km.toggle_output or "<leader>mt") .. " hides it, "
+          .. (km.open_in_browser or "<leader>mo") .. " opens the browser"
+        if dataframe.extract_from_output(cell.output) then
+          hint = hint .. ", " .. (km.dataframe_panel or "<leader>mD") .. " shows the full table"
+        end
+        table.insert(virt_lines, { { hint .. ")", "Comment" } })
         break
       end
       table.insert(virt_lines, vl)
@@ -395,21 +510,29 @@ function M.render(bufnr, cell, filepath)
 
   if #virt_lines == 0 then return end
 
+  -- Wrap every line at the window's text width so nothing disappears off
+  -- the right edge (virt_lines can't scroll horizontally). Runs after the
+  -- MAX_LINES cap so wrapping doesn't eat into the line budget.
+  local ui_opts = config.options.ui or {}
+  if ui_opts.wrap_output ~= false then
+    local wrap_width = output_text_width(bufnr)
+    if wrap_width then
+      local wrapped = {}
+      for _, vl in ipairs(virt_lines) do
+        for _, line in ipairs(wrap_virt_line(vl, wrap_width)) do
+          table.insert(wrapped, line)
+        end
+      end
+      virt_lines = wrapped
+    end
+  end
+
   -- Attach at end_row so the output moves with the cell as it grows
   vim.api.nvim_buf_set_extmark(bufnr, hl.ns_output, cell.end_row, 0, {
     virt_lines = virt_lines,
     virt_lines_above = false,
     priority = 90,
   })
-end
-
--- Clear output for a specific cell.
-function M.clear(bufnr, cell)
-  cell.output = nil
-  cell.console = nil
-  cell.status = "idle"
-  widgets.clear_for_cell(bufnr, cell.id)
-  M.render(bufnr, cell)
 end
 
 -- Clear output for all cells.

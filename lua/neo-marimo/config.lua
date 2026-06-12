@@ -39,6 +39,11 @@ M.defaults = {
     show_cell_index = true,
     -- Soft-wrap code inside cells so long lines stay visible without horizontal scroll
     wrap_cells = true,
+    -- Wrap cell *output* (virt_lines) at the window width. virt_lines
+    -- neither wrap nor scroll horizontally, so without this anything past
+    -- the right edge — long markdown prose, wide tables, long stdout
+    -- lines — is simply invisible.
+    wrap_output = true,
     -- Show nerd-font glyphs in the cell label. Disable for non-nerd-font setups.
     icons = true,
   },

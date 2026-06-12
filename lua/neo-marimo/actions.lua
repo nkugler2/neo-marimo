@@ -129,8 +129,16 @@ function M.run_cell_at_cursor(bufnr, nb)
   widgets.clear_overrides_for_cell(bufnr, cell.id)
 
   cell.status = "queued"
-  output.render(bufnr, cell)
-  server.run_cells(nb.filepath, { cell.id }, { cell.code })
+  output.render(bufnr, cell, nb.filepath)
+  -- run_cells is async; if the request itself is rejected no cell-op will
+  -- ever arrive, so roll the optimistic "queued" back rather than letting
+  -- it spin forever.
+  server.run_cells(nb.filepath, { cell.id }, { cell.code }, function(ok)
+    if not ok and cell.status == "queued" then
+      cell.status = "idle"
+      output.render(bufnr, cell, nb.filepath)
+    end
+  end)
 end
 
 -- Run every cell in the notebook.
@@ -147,10 +155,18 @@ function M.run_all_cells(bufnr, nb)
     table.insert(codes, cell.code)
     widgets.clear_overrides_for_cell(bufnr, cell.id)
     cell.status = "queued"
-    output.render(bufnr, cell)
+    output.render(bufnr, cell, nb.filepath)
   end
 
-  server.run_cells(nb.filepath, cell_ids, codes)
+  server.run_cells(nb.filepath, cell_ids, codes, function(ok)
+    if ok then return end
+    for _, cell in ipairs(nb.cells) do
+      if cell.status == "queued" then
+        cell.status = "idle"
+        output.render(bufnr, cell, nb.filepath)
+      end
+    end
+  end)
 end
 
 return M

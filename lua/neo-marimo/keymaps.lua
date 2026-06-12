@@ -295,7 +295,7 @@ function M.setup(bufnr, nb)
 
       if cell._output_hidden then
         cell._output_hidden = false
-        output.render(bufnr, cell)
+        output.render(bufnr, cell, nb.filepath)
       else
         cell._output_hidden = true
         vim.api.nvim_buf_clear_namespace(bufnr, require("neo-marimo.highlights").ns_output,
