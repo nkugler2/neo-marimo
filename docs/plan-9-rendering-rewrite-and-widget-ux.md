@@ -1,3 +1,8 @@
+---
+id: plan-9-rendering-rewrite-and-widget-ux
+aliases: []
+tags: []
+---
 # Phases 9–12 — Rendering correctness, widget UX, bug sweep, extensibility
 
 ## Why this plan exists
@@ -13,7 +18,7 @@ The plugin is feature-complete for daily use but three classes of problems remai
    widget you're acting on.
 3. **No test coverage at all**, so regressions in the parse/render pipeline
    are invisible until a user notices. This is the "AI-coded, scared of
-   hidden bugs" problem — the fix is a fixture corpus of *real* marimo
+   hidden bugs" problem — the fix is a fixture corpus of _real_ marimo
    payloads with golden-output tests.
 
 ## Ground truth: what marimo 0.19.4 actually emits
@@ -23,20 +28,20 @@ Captured by running the installed marimo
 the spec the renderer must match.** The current code's assumptions are wrong
 in every row marked ✖.
 
-| Construct | Real HTML | Current parser assumes | |
-|---|---|---|---|
-| `mo.vstack([...])` | `<div style='display: flex;...;flex-direction: column;...'>children</div>` | `<marimo-vstack>` element | ✖ never matches |
-| `mo.hstack([...])` | same div, `flex-direction: row` | `<marimo-hstack>` element | ✖ never matches |
-| `mo.ui.tabs({...})` / `mo.tabs` | `<marimo-ui-element object-id=…><marimo-tabs data-tabs='[json label htmls]' data-initial-value=…>` then one `<div data-kind='tab'>…</div>` per tab | `<marimo-tab-content data-label="…">` children | ✖ finds 0 tabs → renders **nothing** |
-| `mo.accordion({...})` | `<marimo-accordion data-labels='[json]' data-multiple='false'><div>body</div>…` | `<marimo-accordion-item data-label="…">` | ✖ finds 0 items → renders **nothing** |
-| every `mo.ui.*` | wrapped in `<marimo-ui-element object-id='…' random-id='…'>` | handled via gsub id-hoisting hack | ~ works but fragile |
-| `mo.ui.table(df)` | `<marimo-table data-data=…>` *anywhere* in payload, incl. nested inside tabs | "if payload contains `<marimo-table` → whole cell is a dataframe" | ✖ **the cell-4 bug** |
-| `mo.ui.altair_chart` | `<marimo-vega>` | nothing | unknown-widget noise |
-| `mo.ui.plotly` | `<marimo-plotly>` | nothing | unknown-widget noise |
-| `mo.ui.array` | `<marimo-dict>` + `<marimo-json-output>` | nothing | unknown-widget noise |
-| `mo.ui.data_explorer` | `<marimo-data-explorer>` | nothing | unknown-widget noise |
-| widget labels | triple-encoded: HTML-entity ⇒ JSON string ⇒ markdown-rendered HTML | handled (`clean_label`) | ✔ keep |
-| tab labels | `data-tabs` attr: JSON array of markdown-rendered HTML strings | n/a | reuse `clean_label` per entry |
+| Construct                       | Real HTML                                                                                                                                          | Current parser assumes                                            |                                       |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------- |
+| `mo.vstack([...])`              | `<div style='display: flex;...;flex-direction: column;...'>children</div>`                                                                         | `<marimo-vstack>` element                                         | ✖ never matches                       |
+| `mo.hstack([...])`              | same div, `flex-direction: row`                                                                                                                    | `<marimo-hstack>` element                                         | ✖ never matches                       |
+| `mo.ui.tabs({...})` / `mo.tabs` | `<marimo-ui-element object-id=…><marimo-tabs data-tabs='[json label htmls]' data-initial-value=…>` then one `<div data-kind='tab'>…</div>` per tab | `<marimo-tab-content data-label="…">` children                    | ✖ finds 0 tabs → renders **nothing**  |
+| `mo.accordion({...})`           | `<marimo-accordion data-labels='[json]' data-multiple='false'><div>body</div>…`                                                                    | `<marimo-accordion-item data-label="…">`                          | ✖ finds 0 items → renders **nothing** |
+| every `mo.ui.*`                 | wrapped in `<marimo-ui-element object-id='…' random-id='…'>`                                                                                       | handled via gsub id-hoisting hack                                 | ~ works but fragile                   |
+| `mo.ui.table(df)`               | `<marimo-table data-data=…>` _anywhere_ in payload, incl. nested inside tabs                                                                       | "if payload contains `<marimo-table` → whole cell is a dataframe" | ✖ **the cell-4 bug**                  |
+| `mo.ui.altair_chart`            | `<marimo-vega>`                                                                                                                                    | nothing                                                           | unknown-widget noise                  |
+| `mo.ui.plotly`                  | `<marimo-plotly>`                                                                                                                                  | nothing                                                           | unknown-widget noise                  |
+| `mo.ui.array`                   | `<marimo-dict>` + `<marimo-json-output>`                                                                                                           | nothing                                                           | unknown-widget noise                  |
+| `mo.ui.data_explorer`           | `<marimo-data-explorer>`                                                                                                                           | nothing                                                           | unknown-widget noise                  |
+| widget labels                   | triple-encoded: HTML-entity ⇒ JSON string ⇒ markdown-rendered HTML                                                                                 | handled (`clean_label`)                                           | ✔ keep                                |
+| tab labels                      | `data-tabs` attr: JSON array of markdown-rendered HTML strings                                                                                     | n/a                                                               | reuse `clean_label` per entry         |
 
 Other confirmed facts:
 
@@ -106,19 +111,19 @@ Replace the regex-chain parsing with a small tokenizer + tree builder
 
 `render_html` becomes: parse to tree → `render_node(node, ctx)` dispatch:
 
-| Node | Renderer |
-|---|---|
-| `marimo-ui-element` | set `ctx.object_id` from attr, recurse into children |
-| flex `div` (style has `flex-direction: column/row`) | vstack / hstack over children (keep existing box-drawing renderers, feed them child nodes instead of regex slices) |
-| `marimo-tabs` | labels ← `data-tabs` JSON + `clean_label`; bodies ← child `div[data-kind=tab]` nodes; render all tabs stacked with the existing labeled-divider style |
-| `marimo-accordion` | labels ← `data-labels` JSON; bodies ← child divs |
-| `marimo-table` | `dataframe.render_inline` **scoped to this node** (serialize just this subtree for the existing attr extractor, or port the extractor to read attrs off the node) — fixes cell 4 |
-| `marimo-slider/-checkbox/-text/…` | existing per-type widget renderers, fed `ctx.object_id`; register in the per-cell widget registry |
-| `marimo-vega`, `marimo-plotly`, `marimo-data-explorer`, `marimo-dataframe`, `marimo-file`, `marimo-refresh` | one clean placeholder line: `[altair chart — <leader>mo to view in browser]` (still registered in the widget registry when they carry an object-id) |
-| `marimo-dict` / `marimo-json-output` | render the JSON value compactly (covers `mo.ui.array`) |
-| `span.markdown` subtree | existing `markdown.render` on the subtree HTML |
-| `img` / `svg` | existing image extraction paths (data-URI, virtual file, inline svg) |
-| text node | plain text line |
+| Node                                                                                                        | Renderer                                                                                                                                                                         |
+| ----------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `marimo-ui-element`                                                                                         | set `ctx.object_id` from attr, recurse into children                                                                                                                             |
+| flex `div` (style has `flex-direction: column/row`)                                                         | vstack / hstack over children (keep existing box-drawing renderers, feed them child nodes instead of regex slices)                                                               |
+| `marimo-tabs`                                                                                               | labels ← `data-tabs` JSON + `clean_label`; bodies ← child `div[data-kind=tab]` nodes; render all tabs stacked with the existing labeled-divider style                            |
+| `marimo-accordion`                                                                                          | labels ← `data-labels` JSON; bodies ← child divs                                                                                                                                 |
+| `marimo-table`                                                                                              | `dataframe.render_inline` **scoped to this node** (serialize just this subtree for the existing attr extractor, or port the extractor to read attrs off the node) — fixes cell 4 |
+| `marimo-slider/-checkbox/-text/…`                                                                           | existing per-type widget renderers, fed `ctx.object_id`; register in the per-cell widget registry                                                                                |
+| `marimo-vega`, `marimo-plotly`, `marimo-data-explorer`, `marimo-dataframe`, `marimo-file`, `marimo-refresh` | one clean placeholder line: `[altair chart — <leader>mo to view in browser]` (still registered in the widget registry when they carry an object-id)                              |
+| `marimo-dict` / `marimo-json-output`                                                                        | render the JSON value compactly (covers `mo.ui.array`)                                                                                                                           |
+| `span.markdown` subtree                                                                                     | existing `markdown.render` on the subtree HTML                                                                                                                                   |
+| `img` / `svg`                                                                                               | existing image extraction paths (data-URI, virtual file, inline svg)                                                                                                             |
+| text node                                                                                                   | plain text line                                                                                                                                                                  |
 
 Deletions: `UI_ELEMENT_PATTERN`/`inject_object_id` hack, `LAYOUT_PATTERN`,
 `try_match_layout`, `split_layout_children`, `has_layout` string probes, the
@@ -187,15 +192,15 @@ and a fast path back to recently-used or pinned widgets.
 
 ### 10.2 Keymaps (all configurable in `config.keymaps`)
 
-| Key (default) | Action |
-|---|---|
-| `]w` / `[w` | focus next/previous widget in the cell under the cursor (wraps; if cursor's cell has none, jump to next cell that has widgets) |
-| `<leader>mw` | **smart act**: if the cell under the cursor has exactly one widget, act on it directly with no menu; if it has multiple, open the ordered picker (see 10.3) |
-| `<leader>mW` | open the tab-aware picker unconditionally (full list view) |
-| `<leader>m.` | re-act on the last-edited widget, wherever it lives (see 10.4) |
-| `<leader>mp` | open the pinned-widget panel (see 10.4) |
-| `+` / `-` on focused slider/number/range (via `<leader>m+`-style or direct, decide at impl) | nudge by `data-step` (default 1), POST immediately, update override, re-render — no prompt |
-| checkbox/switch/button focused + act | toggle / press immediately, no prompt |
+| Key (default)                                                                               | Action                                                                                                                                                      |
+| ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `]w` / `[w`                                                                                 | focus next/previous widget in the cell under the cursor (wraps; if cursor's cell has none, jump to next cell that has widgets)                              |
+| `<leader>mw`                                                                                | **smart act**: if the cell under the cursor has exactly one widget, act on it directly with no menu; if it has multiple, open the ordered picker (see 10.3) |
+| `<leader>mW`                                                                                | open the tab-aware picker unconditionally (full list view)                                                                                                  |
+| `<leader>m.`                                                                                | re-act on the last-edited widget, wherever it lives (see 10.4)                                                                                              |
+| `<leader>mp`                                                                                | open the pinned-widget panel (see 10.4)                                                                                                                     |
+| `+` / `-` on focused slider/number/range (via `<leader>m+`-style or direct, decide at impl) | nudge by `data-step` (default 1), POST immediately, update override, re-render — no prompt                                                                  |
+| checkbox/switch/button focused + act                                                        | toggle / press immediately, no prompt                                                                                                                       |
 
 Acting on text/dropdown/multiselect keeps the existing `vim.ui.input` /
 `vim.ui.select` prompts from `widget_picker.lua` — that part of the flow is
@@ -222,6 +227,7 @@ Pressing `2` opens the dropdown editor directly.
 **Tab-aware picker (widgets inside `mo.ui.tabs`)**
 
 When the cell contains tabs that hold widgets:
+
 - The picker shows the current tab's widgets with number prefixes, same as
   above.
 - A footer line reads `<tab> next tab · <S-tab> prev tab` and shows which tab
@@ -298,6 +304,10 @@ Smaller items found during the audit, batched:
 7. Re-check `notebooks/notebook.py` itself once rendering is fixed:
    `add_selection` is deprecated in altair 5 (warns on run) — switch to
    `add_params`; harmless but noisy.
+8. **Output rendering issues** text with line lengths that are too long go off
+   the right side of the screen, and can't be seen. True of things like markdown,
+   dataframes, and just general standard out. There needs to be some way to fix
+   this.
 
 ## Phase 12 — Extensibility & docs (make it usable by other people)
 
@@ -320,13 +330,13 @@ Smaller items found during the audit, batched:
 
 ## Sequencing & effort
 
-| Phase | Size | Depends on |
-|---|---|---|
-| 9.1 html.lua + 9.3 fixtures/harness | ~1–2 sessions | — (fixtures can be captured immediately) |
-| 9.2 node renderer rewrite | ~1–2 sessions | 9.1 |
-| 10 widget focus UX | ~1 session | 9.2 (focus rendering hooks into new renderer) |
-| 11 sweep | ~1 session | mostly independent |
-| 12 docs/extensibility | ~1 session | best after 9–10 settle the API |
+| Phase                               | Size          | Depends on                                    |
+| ----------------------------------- | ------------- | --------------------------------------------- |
+| 9.1 html.lua + 9.3 fixtures/harness | ~1–2 sessions | — (fixtures can be captured immediately)      |
+| 9.2 node renderer rewrite           | ~1–2 sessions | 9.1                                           |
+| 10 widget focus UX                  | ~1 session    | 9.2 (focus rendering hooks into new renderer) |
+| 11 sweep                            | ~1 session    | mostly independent                            |
+| 12 docs/extensibility               | ~1 session    | best after 9–10 settle the API                |
 
 Recommended order: **9.3 fixtures first** (locks in ground truth), then 9.1 →
 9.2 → 10 → 11 → 12. Verification requires push-to-GitHub + pull into the
