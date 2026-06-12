@@ -340,7 +340,30 @@ Smaller items found during the audit, batched:
    dataframes, and just general standard out. There needs to be some way to fix
    this.
 
-## Phase 12 — Extensibility & docs (make it usable by other people)
+## Phase 12 — Extensibility & docs (make it usable by other people) — **DONE (2026-06-11)**
+
+> **Status:** shipped, all 5 items. (1) `README.md`: features, requirements
+> (nvim 0.11+, marimo 0.19 series, curl, optional image backend + terminal),
+> lazy.nvim + vim.pack install, full config reference mirrored from
+> `config.lua` defaults, keymap/command tables, statusline, blink.cmp,
+> extension-point summary. Screenshot still TODO (placeholder comment —
+> needs a manual capture). (2) `docs/architecture.md`: module map, run→render
+> data flow, widget-interaction inverse flow, the four extension points with
+> worked examples, the virt_line chunk contract, fixture-testing workflow.
+> (3) public registration API on `require("neo-marimo")`:
+> `register_widget_renderer`, `register_output_renderer`,
+> `register_ws_handler`, `register_cell_detector` (thin delegators onto the
+> existing registries). (4) `:checkhealth` now reports the probed marimo
+> version against a tested-series table (warn + re-capture hint outside
+> 0.19), the detected inline-image backend (`image.backend()` accessor
+> added), and the fixture-directory note. (5) API surface stabilized:
+> internals-vs-public convention documented in init.lua/vimdoc/architecture
+> (`_` = private), dead `notebook.cell_index` removed; audit found no other
+> unreferenced exports. Bonus: `doc/neo-marimo.txt` brought up to date
+> (phases 8–11 keymaps/commands/config, new Extending + Health sections,
+> real repo URL). 122 tests green via `make test` (4 new in
+> `tests/spec/api_spec.lua`). Manual in-editor verification still requires
+> push → pull into the vim.pack install path.
 
 1. **README.md** (repo has none): install (lazy.nvim + vim.pack), config
    reference (generated from `config.lua` defaults), keymap table, supported

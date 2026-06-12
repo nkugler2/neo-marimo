@@ -354,6 +354,12 @@ function M.reset_backend()
   _backend_cache = nil
 end
 
+-- Name of the detected inline-image backend ("image.nvim" or
+-- "snacks.image"), or nil when none is usable. Used by :checkhealth.
+function M.backend()
+  return pick_backend() or nil
+end
+
 -- Expose for callers that need it (e.g. tests).
 M._b64_decode = b64_decode
 

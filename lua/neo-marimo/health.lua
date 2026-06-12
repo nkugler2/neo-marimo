@@ -1,5 +1,13 @@
 local M = {}
 
+-- marimo minor series the rendering pipeline has been fixture-tested
+-- against. Each entry corresponds to a committed corpus under
+-- tests/fixtures/<series>/ (captured with tests/capture_fixtures.py and
+-- asserted by `make test`). A different series may emit HTML shapes the
+-- tree renderer has never seen — usually it still works, but re-capture
+-- the fixtures and run the suite before trusting it.
+local TESTED_MARIMO_SERIES = { ["0.19"] = true }
+
 function M.check()
   vim.health.start("neo-marimo")
 
@@ -16,6 +24,25 @@ function M.check()
       "Python bridge OK (Python " .. result.python_version
       .. ", marimo " .. (result.marimo_version or "?") .. ")"
     )
+
+    -- Compare the probed marimo version against the fixture-tested range.
+    local series = (result.marimo_version or ""):match("^(%d+%.%d+)")
+    if series and TESTED_MARIMO_SERIES[series] then
+      vim.health.ok(
+        "marimo " .. result.marimo_version .. " is within the tested range"
+        .. " (rendering fixtures: tests/fixtures/" .. series .. "/)"
+      )
+    elseif series then
+      vim.health.warn(
+        "marimo " .. result.marimo_version .. " has not been fixture-tested"
+        .. " (tested series: " .. table.concat(vim.tbl_keys(TESTED_MARIMO_SERIES), ", ") .. ")."
+        .. " Output rendering may mis-parse HTML shapes that changed between versions."
+      )
+      vim.health.info(
+        "To validate: run `make fixtures` with this marimo to re-capture"
+        .. " tests/fixtures/, then `make test`."
+      )
+    end
   elseif result.python_version then
     -- Bridge ran but marimo wasn't importable
     vim.health.error(
@@ -70,6 +97,24 @@ function M.check()
     vim.health.warn(
       "nvim-treesitter not found. Syntax injection (markdown/SQL in cells) requires "
       .. "nvim-treesitter with python, markdown, and sql parsers."
+    )
+  end
+
+  -- Check inline-image backend
+  local backend = require("neo-marimo.image").backend()
+  if backend then
+    vim.health.ok("inline-image backend: " .. backend)
+    vim.health.info(
+      "Inline images also need a graphics-capable terminal (kitty, ghostty, wezterm)."
+    )
+  else
+    vim.health.warn(
+      "No inline-image backend found. Plots and images will render as "
+      .. "file-path placeholders instead of inline graphics."
+    )
+    vim.health.info(
+      "Install image.nvim, or snacks.nvim with its image feature enabled, "
+      .. "and use a graphics-capable terminal (kitty, ghostty, wezterm)."
     )
   end
 end

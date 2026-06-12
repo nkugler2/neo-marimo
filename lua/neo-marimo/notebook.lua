@@ -39,16 +39,6 @@ function M.get_cell_at_row(nb, row)
   return nil
 end
 
--- Find the 1-based index of a cell in nb.cells by its ID.
-function M.cell_index(nb, cell_id)
-  for i, c in ipairs(nb.cells) do
-    if c.id == cell_id then
-      return i
-    end
-  end
-  return nil
-end
-
 -- Insert a new blank cell after the cell at `after_index` (1-based).
 -- Adjusts row offsets for subsequent cells.
 -- Returns the new cell.

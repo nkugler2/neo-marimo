@@ -10,7 +10,8 @@ CONTENTS                                                    *neo-marimo-contents
   5. Commands ................... |neo-marimo-commands|
   6. Statusline ................. |neo-marimo-statusline|
   7. Configuration .............. |neo-marimo-config|
-  8. Health check ............... |neo-marimo-health|
+  8. Extending .................. |neo-marimo-extending|
+  9. Health check ............... |neo-marimo-health|
 
 ==============================================================================
 1. INTRODUCTION                                              *neo-marimo-intro*
@@ -28,7 +29,14 @@ cells, then writing them back as valid Marimo Python when you save.
 2. SETUP                                                     *neo-marimo-setup*
 
 Add to your Neovim config (vim.pack): >lua
-  vim.pack.add("https://github.com/YOUR_USERNAME/neo-marimo")
+  vim.pack.add({ "https://github.com/nkugler2/neo-marimo" })
+<
+Or with lazy.nvim: >lua
+  {
+    "nkugler2/neo-marimo",
+    event = { "BufReadPre *.py", "BufNewFile *.py" },
+    opts = { python_path = "/path/to/venv/bin/python" },
+  }
 <
 Then configure: >lua
   require("neo-marimo").setup({
@@ -73,10 +81,27 @@ Default keymaps (all buffer-local, only active in notebook buffers):
   <leader>mK      Move cell up
   <leader>mo      Start server (if not running) and open in browser
   <leader>mx      Stop the marimo server
+  <leader>mc      Reclaim the WebSocket connection from the browser
   <leader>mr      Run cell under cursor
   <leader>mR      Run all cells
   <leader>mt      Toggle cell output display
   <leader>mv      Toggle between notebook view and underlying .py
+  <leader>mD      Open the full DataFrame side panel for the cell
+
+Widget interaction (cells whose output contains mo.ui.* elements):
+
+  ]w / [w         Focus next/previous widget (▸ marker; wraps, and jumps
+                  to the nearest cell with widgets when the current cell
+                  has none)
+  <leader>mw      Smart act: a focused widget (or a cell with exactly one
+                  widget) is edited directly; multi-widget cells open the
+                  ordered picker, where digits 1-9 act immediately and
+                  <Tab>/<S-Tab> cycle between mo.ui.tabs groups
+  <leader>mW      Open the full tab-aware picker unconditionally
+  <C-a> / <C-x>   Nudge the focused slider/number by its step, no prompt
+  <leader>m.      Re-edit the last-edited widget, wherever it lives
+  <leader>mP      Pin/unpin the focused widget
+  <leader>mp      Panel of pinned widgets across the whole notebook
 
 LSP keymaps (Phase 7, routed through a hidden shadow buffer so the user's
 existing Python LSP — pyright, basedpyright, pylsp — works inside the
@@ -128,6 +153,14 @@ Notebook-specific commands (require a marimo notebook buffer):
   :MarimoReload        Re-read the .py file from disk and rebuild the view.
   :MarimoToggle        Toggle between notebook view and underlying .py.
                        Notebook state (outputs, status) is preserved.
+  :MarimoReclaim       Reclaim the WebSocket connection from the browser.
+  :MarimoDataFramePanel
+                       Open the full DataFrame side panel for the cell
+                       under the cursor (`s` sorts a column, `q` closes).
+  :MarimoWidget        Widget picker for the cell under the cursor.
+  :MarimoWidgetPins    Panel of pinned widgets across the notebook.
+  :MarimoResetWidgets  Drop every cached widget value override and
+                       re-render (use when an override goes stale).
 
 Buffer / server management:
 
@@ -150,6 +183,10 @@ Debug:
                            logs to /tmp/neo-marimo-ws.log. `off` disables.
   :MarimoWsPing            Send a no-op ping over the WS. Useful with
                            :MarimoWsDebug to verify the pipe is healthy.
+  :MarimoCheck             Validate cell row bookkeeping against the
+                           buffer (run when borders look misplaced).
+  :MarimoInspectOutput     Dump the cell-under-cursor's output mimetype,
+                           payload sample, and parsed widgets.
 
 ==============================================================================
 6. STATUSLINE                                            *neo-marimo-statusline*
@@ -192,6 +229,10 @@ Full configuration with defaults: >lua
       -- Stop the marimo server when the notebook buffer is wiped (:bw).
       -- Default false so :MarimoToggle and :bd don't terminate a kernel.
       stop_on_close = false,
+      -- Release our WS so the browser can take the single EDIT slot.
+      share_with_browser = true,
+      -- Watch the .py for external edits (browser saves, other editors).
+      watch_file    = true,
     },
 
     ui = {
@@ -199,6 +240,7 @@ Full configuration with defaults: >lua
       show_cell_name  = true,       -- show function name in border
       show_cell_index = true,       -- show cell number (#1, #2, ...)
       wrap_cells      = true,       -- soft-wrap long lines inside cells
+      wrap_output     = true,       -- hard-wrap output at window width
       icons           = true,       -- nerd-font glyphs in labels/statusline
     },
 
@@ -222,6 +264,17 @@ Full configuration with defaults: >lua
       signature_help  = "<C-k>",      -- insert mode
       goto_definition = "gd",
       completion      = true,          -- set false to leave omnifunc alone
+      -- data + widgets
+      dataframe_panel    = "<leader>mD",
+      widget_picker      = "<leader>mw",
+      widget_picker_full = "<leader>mW",
+      next_widget        = "]w",
+      prev_widget        = "[w",
+      widget_last        = "<leader>m.",
+      widget_pin         = "<leader>mP",
+      widget_pins        = "<leader>mp",
+      widget_nudge_up    = "<C-a>",
+      widget_nudge_down  = "<C-x>",
     },
   })
 <
@@ -230,10 +283,51 @@ Set any keymap to `false` to disable that binding. Disable icons by setting
 statusline, etc.).
 
 ==============================================================================
-8. HEALTH CHECK                                             *neo-marimo-health*
+8. EXTENDING                                             *neo-marimo-extending*
+
+Four registries extend (or override) behavior without forking. Register at
+setup() time; registering an existing name replaces the built-in: >lua
+  local marimo = require("neo-marimo")
+
+  -- Output renderer for a mimetype ("text/csv") or prefix ("image/*").
+  -- fn(data, opts, mimetype) -> list of virt_lines.
+  marimo.register_output_renderer(mime, fn)
+
+  -- ASCII renderer for a widget element name ("slider", "text_area").
+  -- fn(w) -> list of virt_lines; w = {name, object_id, value, options,
+  -- label, focused, ...}.
+  marimo.register_widget_renderer(name, fn)
+
+  -- Handler for a WebSocket op. fn(payload, ctx) where
+  -- ctx = { nb, bufnr, raw }.
+  marimo.register_ws_handler(op, fn)
+
+  -- Cell-type detector: predicate(code) -> bool; first match (lowest
+  -- priority number first) sets the cell's type/border colour.
+  marimo.register_cell_detector(predicate, type_name, priority)
+<
+A virt_line is a list of {text, hl_group} chunks — the same shape
+|nvim_buf_set_extmark()| takes for `virt_lines`. Start lines with a
+two-space indent; don't wrap or pad (the pipeline wraps at window width).
+See docs/architecture.md in the repo for the module map, data flow, and
+worked examples.
+
+Everything not exported from require("neo-marimo"), this help file, or the
+statusline module is internal; `_`-prefixed fields are private and may
+change in any commit.
+
+==============================================================================
+9. HEALTH CHECK                                             *neo-marimo-health*
 
 Run :checkhealth neo-marimo to verify your setup. This checks:
 - Whether the Python bridge can run
 - Whether marimo is importable from python_path
+- Whether the marimo version is in the fixture-tested range (rendering is
+  golden-tested against real marimo HTML captures committed under
+  tests/fixtures/<series>/ — currently the 0.19 series)
+- Whether the marimo CLI is on PATH
+- Whether nvim-treesitter and its parsers are available
+- Which inline-image backend is detected (image.nvim or snacks.image);
+  without one, plots render as file-path placeholders
 
 vim:ft=help:ts=8:sw=4:et:tw=78:norl:

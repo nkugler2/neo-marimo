@@ -496,4 +496,44 @@ function M.toggle(bufnr)
   end
 end
 
+-- ── Extension points ──────────────────────────────────────────────────────
+--
+-- These three registries are the supported way to extend neo-marimo without
+-- patching it. Everything else — module functions not re-exported here or
+-- documented in docs/architecture.md, and anything prefixed with `_` — is
+-- internal and may change between commits.
+
+-- Register (or replace) the ASCII renderer for a widget name. `name` is the
+-- suffix of marimo's `<marimo-{name}>` element normalised to snake_case
+-- ("text-area" → "text_area"). `fn(w)` receives the widget table (name,
+-- object_id, value, options, label, focused, …) and must return a list of
+-- virt_lines, where each virt_line is a list of `{text, hl_group}` chunks.
+-- See docs/architecture.md ("The virt_line chunk contract") for details.
+function M.register_widget_renderer(name, fn)
+  require("neo-marimo.widgets").register_renderer(name, fn)
+end
+
+-- Register (or replace) the output renderer for a mimetype. `mime` is an
+-- exact mimetype ("text/csv") or a prefix pattern ("image/*"); patterns are
+-- consulted after exact matches. `fn(data, opts, mimetype)` receives the
+-- CellOutput payload and must return a list of virt_lines (same chunk
+-- contract as widget renderers).
+function M.register_output_renderer(mime, fn)
+  require("neo-marimo.output").register_renderer(mime, fn)
+end
+
+-- Register (or replace) the handler for a WebSocket op. `fn(payload, ctx)`
+-- receives the message's `data` field (or the whole message when there is
+-- none) and ctx = { nb = <notebook>, bufnr = <notebook buffer>, raw = msg }.
+function M.register_ws_handler(op, fn)
+  require("neo-marimo.ws_handlers").register(op, fn)
+end
+
+-- Register a cell-type detector. `predicate(code)` is tried against each
+-- cell's source (lower `priority` first; built-ins use 10–30) and the first
+-- match sets the cell's type — which drives its border colour and label.
+function M.register_cell_detector(predicate, type_name, priority)
+  require("neo-marimo.cell").register_detector(predicate, type_name, priority)
+end
+
 return M
