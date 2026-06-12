@@ -1,0 +1,41 @@
+# Runs the full test suite on every push and pull request, against both the
+# current stable Neovim and nightly (extmark/API behavior occasionally shifts
+# between versions, and users will be on both).
+#
+# marimo is installed so the python-gated specs (bridge round-trip) run too;
+# if that install ever breaks, those specs self-skip and the rest of the
+# suite still guards the Lua side.
+name: test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        neovim: [stable, nightly]
+    name: nvim ${{ matrix.neovim }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: ${{ matrix.neovim }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Pin to the tested series (see health.lua). Bump together with the
+      # fixture corpus when adopting a new marimo series.
+      - name: Install marimo
+        run: pip install "marimo==0.19.*"
+
+      - name: Run tests
+        run: make test PYTHON=python
