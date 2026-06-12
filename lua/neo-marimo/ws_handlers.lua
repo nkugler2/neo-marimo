@@ -22,11 +22,33 @@ function M.register(op, fn)
   M.handlers[op] = fn
 end
 
--- Dispatch a message. Returns true if a handler ran, false otherwise.
+-- Per-op error counts for the containment below. Exposed for tests and
+-- :MarimoWsDebug-style introspection.
+M._handler_errors = {}
+
+-- Dispatch a message. Returns true if a handler ran without error, false
+-- otherwise.
+--
+-- Handlers are isolated with pcall: marimo streams dozens of messages per
+-- run, and an uncaught error on a payload shape we didn't anticipate would
+-- otherwise repeat for every subsequent message — an error loop that makes
+-- the whole session unusable. Instead we warn once per op (with the error)
+-- and stay silent after that; the count is kept so the problem is still
+-- diagnosable.
 function M.dispatch(op, payload, ctx)
   local fn = M.handlers[op]
   if not fn then return false end
-  fn(payload, ctx)
+  local ok, err = pcall(fn, payload, ctx)
+  if not ok then
+    M._handler_errors[op] = (M._handler_errors[op] or 0) + 1
+    if M._handler_errors[op] == 1 then
+      utils.warn(
+        "WS handler for '" .. tostring(op) .. "' failed: " .. tostring(err)
+          .. "\nFurther failures for this op will be suppressed."
+      )
+    end
+    return false
+  end
   return true
 end
 

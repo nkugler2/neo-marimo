@@ -145,6 +145,14 @@ function M.attach(source_bufnr)
   -- harness attaches the exact wiring production uses.
   buffer.attach_change_tracking(nb_bufnr, nb)
 
+  -- The WinResized/VimResized autocmd below is global (resize events
+  -- aren't tied to a buffer), so it must be removed by hand when the
+  -- notebook is wiped — otherwise every attach leaks a handler whose
+  -- closure pins the entire notebook state for the rest of the session.
+  -- Declared here so the BufWipeout cleanup can see it; assigned where
+  -- the autocmd is created further down.
+  local resize_autocmd_id = nil
+
   -- Clean up when notebook buffer is explicitly wiped (:bw). With
   -- bufhidden = "hide", this no longer fires on :q or :MarimoToggle —
   -- only when the user really discards the buffer. The server keeps
@@ -157,6 +165,10 @@ function M.attach(source_bufnr)
       _attached[filepath] = nil
       watcher.stop(filepath)
       lsp.cleanup(filepath)
+      if resize_autocmd_id then
+        pcall(vim.api.nvim_del_autocmd, resize_autocmd_id)
+        resize_autocmd_id = nil
+      end
       if config.options.server and config.options.server.stop_on_close
           and server.is_running(filepath) then
         server.stop(filepath)
@@ -306,7 +318,7 @@ function M.attach(source_bufnr)
     redraw_outputs()
   end
 
-  vim.api.nvim_create_autocmd({ "WinResized", "VimResized" }, {
+  resize_autocmd_id = vim.api.nvim_create_autocmd({ "WinResized", "VimResized" }, {
     callback = redraw_borders,
   })
 
