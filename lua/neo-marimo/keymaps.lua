@@ -440,57 +440,26 @@ function M.setup(bufnr, nb)
     end, o("Marimo: open widget picker"))
   end
 
-  -- Focus cycling: ]w / [w move the ▸ marker through the cell's widgets
-  -- (wrapping); from a widget-less cell they jump to the nearest cell that
-  -- has widgets. Both the previously-focused cell and the new one repaint.
+  -- Focus cycling: ]w / [w move the ▸ marker through every widget in the
+  -- notebook — cells top-to-bottom, widgets in document order within each
+  -- cell, wrapping at the ends. The cursor follows the focused cell, and
+  -- both the previously-focused cell and the new one repaint.
   local function focus_cycle(dir)
     local cur_cell = cell_at_cursor()
     local prev_focus = widgets.get_focus(bufnr)
-
-    local function focus_in(cell, idx)
-      local list = widgets.list_for_cell(bufnr, cell.id)
-      local w = list[idx]
-      widgets.set_focus(bufnr, cell.id, w.object_id, idx)
-      if prev_focus and prev_focus.cell_id ~= cell.id then
-        local pc = nb.cell_by_id[prev_focus.cell_id]
-        if pc then output.render(bufnr, pc, nb.filepath) end
-      end
-      output.render(bufnr, cell, nb.filepath)
-    end
-
-    local list = cur_cell and widgets.list_for_cell(bufnr, cur_cell.id) or {}
-    if cur_cell and #list > 0 then
-      local cur_idx = 0
-      if prev_focus and prev_focus.cell_id == cur_cell.id then
-        for i, w in ipairs(list) do
-          if widgets.is_focused(bufnr, cur_cell.id, w, i) then
-            cur_idx = i
-            break
-          end
-        end
-      end
-      local nxt
-      if cur_idx == 0 then
-        nxt = dir == 1 and 1 or #list
-      else
-        nxt = (cur_idx - 1 + dir) % #list + 1
-      end
-      focus_in(cur_cell, nxt)
+    local target = widgets.next_focus_target(bufnr, nb.cells, cur_cell, dir)
+    if not target then
+      vim.notify("[neo-marimo] No widgets in any cell output.", vim.log.levels.INFO)
       return
     end
-
-    local n = #nb.cells
-    local from = cur_cell and cur_cell.index or (dir == 1 and 0 or n + 1)
-    for step = 1, n do
-      local i = (from + dir * step - 1) % n + 1
-      local c = nb.cells[i]
-      if #widgets.list_for_cell(bufnr, c.id) > 0 then
-        jump_to_cell(c)
-        focus_in(c, dir == 1 and 1 or #widgets.list_for_cell(bufnr, c.id))
-        return
-      end
+    widgets.set_focus(bufnr, target.cell.id, target.widget.object_id, target.index)
+    if prev_focus and prev_focus.cell_id ~= target.cell.id then
+      local pc = nb.cell_by_id[prev_focus.cell_id]
+      if pc then output.render(bufnr, pc, nb.filepath) end
     end
-    vim.notify("[neo-marimo] No widgets in any cell output.", vim.log.levels.INFO)
+    output.render(bufnr, target.cell, nb.filepath)
+    jump_to_cell(target.cell)
+    vim.cmd("redraw")
   end
 
   if km.next_widget then
@@ -519,11 +488,12 @@ function M.setup(bufnr, nb)
   if km.widget_pin then
     vim.keymap.set("n", km.widget_pin, function()
       local cell = cell_at_cursor()
-      -- Pin target priority: the focused widget, else a single-widget
-      -- cursor cell, else the last-edited widget in this notebook.
+      -- Pin target priority: the focused widget when it's in the cell
+      -- under the cursor (a far-away focus must not hijack the pin), else
+      -- a single-widget cursor cell, else the last-edited widget.
       local target, target_cell_id
       local fw, fcell_id = widgets.focused_widget(bufnr)
-      if fw then
+      if fw and cell and fcell_id == cell.id then
         target, target_cell_id = fw, fcell_id
       elseif cell then
         local list = widgets.list_for_cell(bufnr, cell.id)
@@ -557,16 +527,16 @@ function M.setup(bufnr, nb)
   end
 
   -- Nudge: step the focused slider/number/range with one key, no prompt.
-  -- When the cell has no nudgeable widget and the key is a single char
-  -- (the default + / -), replay the builtin motion so it keeps working.
+  -- Only fires when the focused widget is in the cell under the cursor;
+  -- otherwise the key is replayed unmapped so the native command (<C-a>
+  -- increment / <C-x> decrement on the defaults) keeps working in code.
   local function bind_nudge(lhs, dir, desc)
     if not lhs then return end
     vim.keymap.set("n", lhs, function()
       local cell = cell_at_cursor()
       if cell and widget_picker.nudge(nb, cell, dir) then return end
-      if #lhs == 1 then
-        vim.cmd("normal! " .. vim.v.count1 .. lhs)
-      end
+      local keys = vim.api.nvim_replace_termcodes(lhs, true, false, true)
+      vim.api.nvim_feedkeys(vim.v.count1 .. keys, "n", false)
     end, o(desc))
   end
   bind_nudge(km.widget_nudge_up, 1, "Marimo: nudge widget up")

@@ -79,8 +79,12 @@ local function commit(nb, cell, w, value)
   cell.status = "running"
   cell._optimistic_status = true
   -- filepath matters: without it a re-render drops any virtual-file
-  -- image this cell's output also contains.
+  -- image this cell's output also contains. The explicit redraws matter
+  -- too: extmark changes made from timer/async contexts otherwise sit
+  -- unpainted until the next UI event (observed as "value updates only
+  -- when I move the cursor").
   output.render(nb.bufnr, cell, nb.filepath)
+  vim.cmd("redraw")
 
   widgets.set_value(nb.filepath, w.object_id, value, function(_ok)
     if cell._optimistic_status then
@@ -88,6 +92,7 @@ local function commit(nb, cell, w, value)
       cell._optimistic_status = nil
       if vim.api.nvim_buf_is_valid(nb.bufnr) then
         output.render(nb.bufnr, cell, nb.filepath)
+        vim.cmd("redraw")
       end
     end
   end)
@@ -215,28 +220,24 @@ local _post_nudge = utils.debounce(function()
   if p then commit(p.nb, p.cell, p.w, p.value) end
 end, 150)
 
--- Nudge the actionable widget in this cell: the focused one if it's
--- nudgeable, else the cell's only widget if that is. Returns true when
--- handled — the keymap falls back to the builtin +/- motion otherwise.
+-- Nudge the focused widget, provided it lives in the cell under the cursor
+-- and is nudgeable. Returns true when handled — the keymap replays the
+-- native key otherwise, so <C-a>/<C-x> still increment numbers in code.
 function M.nudge(nb, cell, dir)
-  local list = widgets.list_for_cell(nb.bufnr, cell.id)
-  local target
   local fw, fcell_id = widgets.focused_widget(nb.bufnr)
-  if fw and fcell_id == cell.id and NUDGEABLE[fw.name] then
-    target = fw
-  elseif #list == 1 and NUDGEABLE[list[1].name] then
-    target = list[1]
+  if not (fw and fcell_id == cell.id and NUDGEABLE[fw.name] and fw.object_id) then
+    return false
   end
-  if not target or not target.object_id then return false end
 
-  local value = M.nudge_value(target, dir)
+  local value = M.nudge_value(fw, dir)
   if value == nil then return false end
 
-  widgets.set_override(target.object_id, value)
-  target.value = value
+  widgets.set_override(fw.object_id, value)
+  fw.value = value
   require("neo-marimo.output").render(nb.bufnr, cell, nb.filepath)
+  vim.cmd("redraw")
 
-  _nudge_pending = { nb = nb, cell = cell, w = target, value = value }
+  _nudge_pending = { nb = nb, cell = cell, w = fw, value = value }
   _post_nudge()
   return true
 end

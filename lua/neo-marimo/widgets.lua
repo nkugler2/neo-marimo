@@ -140,6 +140,47 @@ function M.focused_widget(bufnr)
   return nil
 end
 
+-- Compute the next focus target for ]w / [w: the widget after/before the
+-- currently focused one in notebook order (cells top-to-bottom, widgets in
+-- document order within each cell), wrapping at the ends. When nothing is
+-- focused — or the focus lives in a different cell than the cursor — start
+-- from the cursor's cell instead, so focus never teleports somewhere
+-- surprising. Returns { cell, widget, index } or nil when no cell has
+-- widgets.
+function M.next_focus_target(bufnr, cells, cursor_cell, dir)
+  local seq = {}
+  for _, c in ipairs(cells) do
+    for i, w in ipairs(M.list_for_cell(bufnr, c.id)) do
+      table.insert(seq, { cell = c, widget = w, index = i })
+    end
+  end
+  if #seq == 0 then return nil end
+
+  local f = M._focus[bufnr]
+  if f and (not cursor_cell or f.cell_id == cursor_cell.id) then
+    for si, e in ipairs(seq) do
+      if e.cell.id == f.cell_id
+          and M.is_focused(bufnr, e.cell.id, e.widget, e.index) then
+        return seq[(si - 1 + dir) % #seq + 1]
+      end
+    end
+  end
+
+  if cursor_cell then
+    if dir == 1 then
+      for _, e in ipairs(seq) do
+        if e.cell.index >= cursor_cell.index then return e end
+      end
+      return seq[1]
+    end
+    for si = #seq, 1, -1 do
+      if seq[si].cell.index <= cursor_cell.index then return seq[si] end
+    end
+    return seq[#seq]
+  end
+  return dir == 1 and seq[1] or seq[#seq]
+end
+
 -- ── last-edited widget (Phase 10.4) ───────────────────────────────────────
 --
 -- Updated on every committed value change; <leader>m. re-opens the edit

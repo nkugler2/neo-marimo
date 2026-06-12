@@ -80,6 +80,71 @@ t.case("focus: focused_widget resolves against the live registry", function()
   widgets.clear_focus(bufnr)
 end)
 
+-- ── focus cycling sequence (]w / [w) ──────────────────────────────────────
+
+t.case("cycle: walks all widgets across cells and wraps", function()
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  local c1 = { id = "cyc1", index = 1 }
+  local c2 = { id = "cyc2", index = 2 }
+  local cells = { c1, c2 }
+  local w1 = { name = "slider", object_id = "o1" }
+  local w2 = { name = "checkbox", object_id = "o2" }
+  local w3 = { name = "number", object_id = "o3" }
+  widgets.register_widget(bufnr, c1.id, w1)
+  widgets.register_widget(bufnr, c1.id, w2)
+  widgets.register_widget(bufnr, c2.id, w3)
+
+  -- Nothing focused, cursor in c1 → first widget of c1.
+  local e = widgets.next_focus_target(bufnr, cells, c1, 1)
+  t.eq(e.widget.object_id, "o1")
+
+  -- Focused o1, cursor in same cell → advances to o2.
+  widgets.set_focus(bufnr, c1.id, "o1", 1)
+  e = widgets.next_focus_target(bufnr, cells, c1, 1)
+  t.eq(e.widget.object_id, "o2")
+
+  -- Focused on the last widget of c1 → crosses into c2.
+  widgets.set_focus(bufnr, c1.id, "o2", 2)
+  e = widgets.next_focus_target(bufnr, cells, c1, 1)
+  t.eq(e.widget.object_id, "o3")
+  t.eq(e.cell.id, "cyc2")
+
+  -- Focused on the notebook's last widget → wraps to the first.
+  widgets.set_focus(bufnr, c2.id, "o3", 1)
+  e = widgets.next_focus_target(bufnr, cells, c2, 1)
+  t.eq(e.widget.object_id, "o1")
+
+  -- Backwards from the first wraps to the last.
+  widgets.set_focus(bufnr, c1.id, "o1", 1)
+  e = widgets.next_focus_target(bufnr, cells, c1, -1)
+  t.eq(e.widget.object_id, "o3")
+
+  widgets.clear_focus(bufnr)
+end)
+
+t.case("cycle: cursor in a different cell restarts from the cursor", function()
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  local c1 = { id = "cyd1", index = 1 }
+  local c2 = { id = "cyd2", index = 2 }
+  local cells = { c1, c2 }
+  widgets.register_widget(bufnr, c1.id, { name = "slider", object_id = "d1" })
+  widgets.register_widget(bufnr, c2.id, { name = "number", object_id = "d2" })
+
+  -- Focus is in c1, but the cursor moved to c2 → ]w targets c2's widget,
+  -- not the continuation of the far-away focus.
+  widgets.set_focus(bufnr, c1.id, "d1", 1)
+  local e = widgets.next_focus_target(bufnr, cells, c2, 1)
+  t.eq(e.widget.object_id, "d2")
+
+  -- Widget-less cursor cell: dir decides the nearest neighbour.
+  local c0 = { id = "cyd0", index = 0 }
+  e = widgets.next_focus_target(bufnr, { c0, c1, c2 }, c0, 1)
+  t.eq(e.widget.object_id, "d1")
+
+  t.eq(widgets.next_focus_target(bufnr, {}, nil, 1), nil, "no widgets → nil")
+  widgets.clear_focus(bufnr)
+end)
+
 -- ── tab metadata + gutter ─────────────────────────────────────────────────
 
 t.case("tabs: widgets carry their tab, indexes stamped in order", function()

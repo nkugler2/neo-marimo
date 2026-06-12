@@ -100,10 +100,11 @@ M.defaults = {
     widget_pin      = "<leader>mP",
     widget_pins     = "<leader>mp",
     -- Nudge the focused slider/number/range_slider by its step without a
-    -- prompt. Falls back to the builtin +/- motions when the cell has no
-    -- nudgeable widget.
-    widget_nudge_up   = "+",
-    widget_nudge_down = "-",
+    -- prompt. Only fires when the focused (▸) widget is in the cell under
+    -- the cursor; otherwise the native <C-a>/<C-x> increment/decrement
+    -- still applies to numbers in code.
+    widget_nudge_up   = "<C-a>",
+    widget_nudge_down = "<C-x>",
   },
 }
 
