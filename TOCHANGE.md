@@ -1,12 +1,39 @@
-# TOCHANGE
+---
+id: TOCHANGE
+aliases: []
+tags: []
+---
+# TOCHANGE — Backlog
 
-This is a list of things that I want to fix in my neo-marimo plugin
+Quick capture for things I want fixed or added. To turn an item into a formal
+plan, copy it into the relevant phase in `docs/plan-phases-7-15.md` (the
+current roadmap) and flesh out the implementation steps there.
 
-1. **DONE** (Phase 4.2) Cells: First of all, the cells are not the width of the available screen size. Also, when I scroll left or right, the neo-marimo stuff all stays in the same place, but the actual code goes left and right. I don't know what the right solution for that is, maybe it is good the way that it is. Maybe if the cell design was just the width of whatever the screen size is for the buffer, then it would make sense for the cells to not change but the code to go left and right. ideally, code always stays within the bounds of the notebook design. Maybe with line wrap, maybe with something else, but ideally i can just type things and it will visually adjust in a way that makes sense.
-2. **NOT DONE** (Phase 8) Better rendering then standard out: It makes sense that I just take the standard out from the python output. that is simple and easier to build. But I want this plugin to have as much feature parity as possible with marimo. that means that in a perfect world, I would not just see the stdout, but I would see actually rendered things. For example, I really want markdown to render correctly and to be able to see the output in my neovim. I don't actually know if that is possible, but that is what I am lookignfor. similarly, I would want to be able to have sliders and other marimo widgets render in the marimo neovim buffer. Please let me know if this is not feasible at all within neovim, the terminal (specifically tmux), marimo, and whatever else.
-3. **DONE** (Phase 6) Bidirectioal with marimo: I would like to be able to make changes in neo-marimo, then instantly see those changes within a live marimo notebook. similarly, I would like to be able to edit the marimo notebook within the browser, and immedititly see those changes in neovim. this is espeically important if I can't get better rendering for things like markdown and marimo widgets, as those are key things that I want to use. As long as I can make changes in neovim and/or the marimo notebook in the browser and see the changes instantly in both versions, that should be enough for me.
-4. **DONE** (Phase 7) Proper hover information: In my neovim config, I have `K` setup to show hover information for python. Similar to an IDE, I can hover over a function, variable, class, whatever, and get the documentation floating above it. That works in my neovim with regular python, but it is not working right now when neo-marimo is active
-5. **DONE** (Phase 5.1) Easy toggle neo-marimo view on or off: in a buffer that has marimo stuff in it (especially `import marimo as mo`), I should be able to use a neovim keyboard shortcut to turn the view of neo-marimo with the cells on or off.
-6. **DONE** (Phase 5.2) Icon in neovim to indicate the server is still active: I would like there to be a symbol somewhere in the status bar of my neovim config whenever a marimo server is active. This would be helpful for debugging, knowing if I have one up, and just in general. I would also like to have a marimo neovim command (like `MarimoServerList`) that shows all active marimo servers on my computer.
-7. **DONE** (Phase 4.3) visually distinct boxes for sql and markdown: any cell that has `mo.md` or `mo.sql` should have on outlined box that says "md" or "sql" in the same way other cells say "py", and each should have it's own color. Any cell that only has a marimo widget should just be called "mo" for marimo.
-8. **DONE** (Phase 4.1) **issue with cells and pressing enter**: when i try to do `mo.md("""test text""")` with a new line after test and text on that new line, it puts `text""")` in a new line that is either between visual cells in neo-marimo or is on the next cell, and both of those cause syntax errors. this is a serious worflow thing that must be fixed. I don't know if you have to use treesitter, or lsp support, or what to get that working.
+---
+
+## Open
+
+**Improve markdown rendering** Changes were already made that improved the markdown rendering, but I want to improve it. Specifically, I would like the regular output that is just grey and italics to be more readable
+
+---
+
+## Ideas / rough requests
+
+<!-- Add new items here. Keep them short — one or two sentences is enough. -->
+<!-- When something gets promoted into the formal plan, move it to "Integrated" below. -->
+
+---
+
+## Integrated (removed from backlog)
+
+The following were once in this file and are now fully done and reflected in the plan docs:
+
+- Cell width fills the window, code soft-wraps (Phase 4.2)
+- Bidirectional sync with the marimo browser (Phase 6)
+- Hover information (`K`) works inside notebook cells (Phase 7)
+- Toggle neo-marimo view on/off (`<leader>mv` / `:MarimoToggle`) (Phase 5.1)
+- Marimo status icon in the statusline + `:MarimoServerList` (Phase 5.2)
+- Visually distinct borders for `md`, `sql`, `mo` cell types (Phase 4.3)
+- Enter in multi-line strings no longer corrupts cells (Phase 4.1)
+- Database connections for SQL cells (Phase 10 in plan-phases-7-15.md)
+- Widget UX improvements: single-widget smart act, ordered digit picker, tab cycling, pins, nudge (Phase 10 in plan-phases-9-12-detail.md)

@@ -148,6 +148,8 @@ require("neo-marimo").setup({
     stop_server        = "<leader>mx",
     run_cell           = "<leader>mr",
     run_all            = "<leader>mR",
+    interrupt          = "<leader>mi",
+    restart_kernel     = "<leader>mX",
     toggle_output      = "<leader>mt",
     toggle_view        = "<leader>mv",
     reclaim_ws         = "<leader>mc",
@@ -193,6 +195,8 @@ All buffer-local to the notebook view.
 | --- | --- |
 | `<leader>mo` | Start the server (if needed) and open in browser |
 | `<leader>mx` | Stop the server |
+| `<leader>mi` | Interrupt the kernel (stop a runaway cell) |
+| `<leader>mX` | Restart the kernel (outputs cleared; nothing re-runs until you ask) |
 | `<leader>mc` | Reclaim the WebSocket from the browser |
 
 ### Widgets
@@ -223,6 +227,8 @@ All buffer-local to the notebook view.
 | --- | --- |
 | `:MarimoEdit` | Start the managed server and open the notebook in the browser (same as `<leader>mo`) |
 | `:MarimoRun [all]` | Run the cell under the cursor, or every cell |
+| `:MarimoInterrupt` | Interrupt the kernel's current execution |
+| `:MarimoRestart` | Restart the kernel (clears outputs; nothing re-runs) |
 | `:MarimoNewCell [above\|below]` | Insert a blank cell |
 | `:MarimoStop` | Stop the server for this notebook |
 | `:MarimoToggle` | Notebook view ↔ raw `.py` |
@@ -293,9 +299,21 @@ marimo CLI, treesitter parsers, and the inline-image backend.
 ## Development
 
 ```sh
-make test       # zero-dependency suite: nvim -l tests/run.lua (118 specs)
-make fixtures   # re-capture the marimo HTML corpus (needs a marimo python)
+make test        # full suite: nvim -l tests/run.lua
+make fixtures    # re-capture the marimo HTML corpus (needs a marimo python)
+make dev-link    # symlink the vim.pack install path to this working copy
+make dev-unlink  # restore the previous (git-tracked) install
 ```
 
+`make dev-link` makes local edits live on the next nvim restart — no
+commit/push/pull loop while developing. The previous install is preserved
+and `make dev-unlink` puts it back.
+
 Rendering is golden-tested against real marimo `_repr_html_()` captures
-committed under `tests/fixtures/<series>/`.
+committed under `tests/fixtures/<series>/`. The editing core (extmark cell
+tracking, undo restore, remote patching) is integration-tested headlessly in
+`tests/spec/editing_spec.lua`; the Python bridge has marimo-gated round-trip
+specs that self-skip when no marimo-equipped python is available
+(`NEO_MARIMO_TEST_PYTHON` selects the interpreter — `make test` points it at
+the `PYTHON` variable). CI runs everything on nvim stable and nightly via
+`.github/workflows/test.yml`.

@@ -84,6 +84,9 @@ Default keymaps (all buffer-local, only active in notebook buffers):
   <leader>mc      Reclaim the WebSocket connection from the browser
   <leader>mr      Run cell under cursor
   <leader>mR      Run all cells
+  <leader>mi      Interrupt the kernel (stop a runaway cell)
+  <leader>mX      Restart the kernel (outputs cleared; nothing re-runs
+                  until you ask)
   <leader>mt      Toggle cell output display
   <leader>mv      Toggle between notebook view and underlying .py
   <leader>mD      Open the full DataFrame side panel for the cell
@@ -147,6 +150,12 @@ Notebook-specific commands (require a marimo notebook buffer):
   :MarimoOpen          Alias for :MarimoEdit (kept for back-compat).
   :MarimoRun           Run the cell under the cursor.
   :MarimoRun all       Run every cell in the notebook.
+  :MarimoInterrupt     Interrupt the kernel's current execution — the
+                       escape hatch for infinite loops and runaway loads.
+  :MarimoRestart       Restart the kernel: outputs and statuses are
+                       cleared, the server process is recycled, and
+                       nothing re-runs until you ask (:MarimoRun all).
+                       Open browser tabs need re-opening afterwards.
   :MarimoNewCell       Insert a new blank cell below the cursor.
   :MarimoNewCell above Insert a new blank cell above the cursor.
   :MarimoStop          Stop the marimo server for the current notebook.
@@ -256,6 +265,8 @@ Full configuration with defaults: >lua
       stop_server     = "<leader>mx",
       run_cell        = "<leader>mr",
       run_all         = "<leader>mR",
+      interrupt       = "<leader>mi",
+      restart_kernel  = "<leader>mX",
       toggle_output   = "<leader>mt",
       toggle_view     = "<leader>mv",
       reclaim_ws      = "<leader>mc",
