@@ -130,6 +130,20 @@ function M.setup(bufnr, nb)
     end, o("Marimo: run all cells"))
   end
 
+  -- Interrupt the kernel (stop a runaway cell)
+  if km.interrupt then
+    vim.keymap.set("n", km.interrupt, function()
+      actions.interrupt_kernel(nb)
+    end, o("Marimo: interrupt kernel"))
+  end
+
+  -- Restart the kernel (fresh state, outputs cleared, nothing re-runs)
+  if km.restart_kernel then
+    vim.keymap.set("n", km.restart_kernel, function()
+      actions.restart_kernel(bufnr, nb)
+    end, o("Marimo: restart kernel"))
+  end
+
   -- Toggle output visibility
   if km.toggle_output then
     vim.keymap.set("n", km.toggle_output, function()

@@ -61,6 +61,12 @@ M.defaults = {
     stop_server = "<leader>mx",
     run_cell = "<leader>mr",
     run_all = "<leader>mR",
+    -- Interrupt whatever the kernel is currently executing — the escape
+    -- hatch for runaway cells (infinite loops, huge loads).
+    interrupt = "<leader>mi",
+    -- Restart the kernel: outputs and statuses are cleared, the server
+    -- process is recycled, and nothing re-runs until you ask (run_all).
+    restart_kernel = "<leader>mX",
     toggle_output = "<leader>mt",
     -- Swap the current window between the notebook view (marimo://...) and
     -- the underlying .py buffer. Bound on both buffers once the toggle has

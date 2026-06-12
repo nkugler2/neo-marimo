@@ -348,6 +348,30 @@ end, {
   desc = "Run cell under cursor (or all cells with 'all')",
 })
 
+-- Interrupt whatever the kernel is currently executing — the escape hatch
+-- for runaway cells (infinite loops, huge loads).
+vim.api.nvim_create_user_command("MarimoInterrupt", function()
+  local marimo = require("neo-marimo")
+  local nb = marimo.current_notebook()
+  if not nb then
+    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    return
+  end
+  require("neo-marimo.actions").interrupt_kernel(nb)
+end, { desc = "Interrupt the marimo kernel's current execution" })
+
+-- Restart the kernel: outputs and statuses are cleared, the server process
+-- is recycled, and nothing re-runs until you ask (:MarimoRun all).
+vim.api.nvim_create_user_command("MarimoRestart", function()
+  local marimo = require("neo-marimo")
+  local nb = marimo.current_notebook()
+  if not nb then
+    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    return
+  end
+  require("neo-marimo.actions").restart_kernel(nb.bufnr, nb)
+end, { desc = "Restart the marimo kernel (clears outputs; nothing re-runs)" })
+
 -- `:MarimoNewCell` (defaults to below) inserts a new blank cell relative to
 -- the cell under the cursor. Use `above` to put it before.
 vim.api.nvim_create_user_command("MarimoNewCell", function(opts)

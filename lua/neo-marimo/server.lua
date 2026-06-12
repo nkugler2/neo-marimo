@@ -600,20 +600,41 @@ function M.reclaim_ws(filepath, opts)
 end
 
 -- Send HTTP POST /api/kernel/instantiate. Asynchronous; `on_done(ok)` is
--- optional. Returns true if the request was dispatched.
-function M.instantiate(filepath, on_done)
+-- optional. `opts.auto_run = false` registers the app's cells with the
+-- kernel without executing anything (used after a restart so nothing
+-- re-runs until the user asks). Returns true if the request was dispatched.
+function M.instantiate(filepath, on_done, opts)
   local srv = M._servers[filepath]
   if not srv then
     if on_done then on_done(false) end
     return false
   end
 
+  opts = opts or {}
   http_post(srv, "/api/kernel/instantiate", {
-    objectIds = {}, values = {}, autoRun = true,
+    objectIds = {}, values = {}, autoRun = opts.auto_run ~= false,
   }, function(result)
     local ok = result ~= nil and result.success == true
     if ok then srv.instantiated = true end
     if on_done then on_done(ok) end
+  end)
+  return true
+end
+
+-- POST /api/kernel/interrupt — stop whatever the kernel is currently
+-- executing. Asynchronous; `on_done(ok)` is optional. The interrupted
+-- cells report their final status over the WS as ordinary cell-op
+-- messages, so no local state needs touching here.
+function M.interrupt(filepath, on_done)
+  local srv = M._servers[filepath]
+  if not srv then
+    utils.warn("No marimo server running for this notebook.")
+    if on_done then on_done(false) end
+    return false
+  end
+
+  http_post(srv, "/api/kernel/interrupt", vim.empty_dict(), function(result)
+    if on_done then on_done(result ~= nil and result.success == true) end
   end)
   return true
 end
@@ -651,12 +672,71 @@ function M.open_browser(filepath)
   vim.notify("[neo-marimo] Opening " .. url, vim.log.levels.INFO)
 end
 
--- Full start-and-open flow: start server if needed, wait for ready, fetch
--- the server token from the HTML, connect WS, instantiate kernel, then open
--- the browser. Every wait in the chain is asynchronous — this runs off a
--- keymap, and the old form (blocking health poll + vim.wait on the WS
--- handshake) froze the editor for the entire startup, up to ~15 s when the
--- server was slow to come up.
+-- Shared startup chain: start the server process (if needed), poll /health,
+-- fetch the skew-protection token from the HTML, connect the main WS, wait
+-- for the handshake. Every wait is asynchronous — callers sit behind
+-- keymaps, and a blocking form would freeze the editor for the entire
+-- startup (up to ~15 s when the server is slow to come up).
+--
+-- `cb(srv|nil, connected)` — srv nil means startup failed (already cleaned
+-- up and reported); `connected == false` with a non-nil srv means the
+-- server is healthy but the WS handshake timed out.
+local function start_and_connect(filepath, port, on_message, cb)
+  local srv = M.start(filepath, port, on_message)
+  if not srv then
+    cb(nil, false)
+    return
+  end
+
+  -- Step 1: poll /health until the server is up.
+  wait_for_server(srv, 10000, function(ready)
+    if not ready then
+      utils.error("Marimo server did not start within 10 seconds.")
+      M.stop(filepath)
+      cb(nil, false)
+      return
+    end
+
+    -- Step 2: server healthy → fetch token, connect WS, wait for handshake.
+    fetch_server_token(srv.port, filepath, function(token)
+      -- The skew-protection token gates every API call. Without it all
+      -- POSTs would 401 with "Missing server token". This doubles as an
+      -- identity check: if the HTML doesn't contain a token element, we
+      -- are not talking to a --no-token server (probably an orphan that
+      -- requires auth and 303s us to /auth/login). Bail loudly rather
+      -- than continue with a half-broken connection where WS 403s and
+      -- HTTP 401s.
+      if not token then
+        utils.error(
+          "Could not authenticate with marimo server on port " .. srv.port ..
+            ". Most likely an orphan `marimo edit` is holding the port " ..
+            "(`pgrep -fl marimo` to check, then `:MarimoKillAll` to clean up)."
+        )
+        M.stop(filepath)
+        cb(nil, false)
+        return
+      end
+      srv.server_token = token
+
+      vim.notify("[neo-marimo] Server ready. Connecting...", vim.log.levels.INFO)
+
+      srv.ws_connected = false
+      M.connect_ws(filepath, on_message)
+
+      -- Wait for ws_client.py to complete its handshake before reporting
+      -- back. Callers that open the browser must not do so earlier: the
+      -- browser's WS would win the single EDIT-mode connection slot and
+      -- our HTTP requests would 500 with "Invalid session id" because no
+      -- session was ever created for us.
+      poll_until(function() return srv.ws_connected == true end, 5000, 50, function(connected)
+        cb(srv, connected)
+      end)
+    end)
+  end)
+end
+
+-- Full start-and-open flow: the startup chain above, then instantiate the
+-- kernel, hand the main WS slot to the browser, and reconnect as kiosk.
 function M.start_and_open(nb, on_message)
   local filepath = nb.filepath
   local port = config.options.server.port or 2718
@@ -668,12 +748,8 @@ function M.start_and_open(nb, on_message)
 
   vim.notify("[neo-marimo] Starting marimo server...", vim.log.levels.INFO)
 
-  local srv = M.start(filepath, port, on_message)
-  if not srv then return end
-
-  -- Step 3 of the chain: WS handshake done (or timed out) → instantiate,
-  -- hand the main WS slot to the browser, open it, reconnect as kiosk.
-  local function on_ws_settled(connected)
+  start_and_connect(filepath, port, on_message, function(srv, connected)
+    if not srv then return end
     if not connected then
       utils.warn("WebSocket client didn't connect within 5s; opening browser anyway.")
     end
@@ -704,48 +780,46 @@ function M.start_and_open(nb, on_message)
         M.connect_ws(filepath, current_srv.on_message, { kiosk = true })
       end, 1200)
     end
-  end
-
-  -- Step 2: server healthy → fetch token, connect WS, wait for handshake.
-  local function on_ready(token)
-    -- The skew-protection token gates every API call. Without it all POSTs
-    -- would 401 with "Missing server token". This doubles as an identity
-    -- check: if the HTML doesn't contain a token element, we are not
-    -- talking to a --no-token server (probably an orphan that requires
-    -- auth and 303s us to /auth/login). Bail loudly rather than continue
-    -- with a half-broken connection where WS 403s and HTTP 401s.
-    if not token then
-      utils.error(
-        "Could not authenticate with marimo server on port " .. srv.port ..
-          ". Most likely an orphan `marimo edit` is holding the port " ..
-          "(`pgrep -fl marimo` to check, then `:MarimoKillAll` to clean up)."
-      )
-      M.stop(filepath)
-      return
-    end
-    srv.server_token = token
-
-    vim.notify("[neo-marimo] Server ready. Connecting...", vim.log.levels.INFO)
-
-    srv.ws_connected = false
-    M.connect_ws(filepath, on_message)
-
-    -- Wait for ws_client.py to complete its handshake before opening the
-    -- browser. If we open it earlier, the browser's WS wins the single
-    -- EDIT-mode connection slot and our HTTP requests 500 with
-    -- "Invalid session id" because no session was ever created for us.
-    poll_until(function() return srv.ws_connected == true end, 5000, 50, on_ws_settled)
-  end
-
-  -- Step 1: poll /health until the server is up.
-  wait_for_server(srv, 10000, function(ready)
-    if not ready then
-      utils.error("Marimo server did not start within 10 seconds.")
-      M.stop(filepath)
-      return
-    end
-    fetch_server_token(srv.port, filepath, on_ready)
   end)
+end
+
+-- Restart the kernel by recycling the whole server process. Marimo's own
+-- /api/kernel/restart_session just closes the session and relies on the
+-- browser doing a full page reload to build a new one — we have no page to
+-- reload, so a clean stop + the standard startup chain is the equivalent
+-- (and reuses the battle-tested path). We come back holding the main WS
+-- slot and instantiate with auto_run = false so the new kernel registers
+-- the cells without executing anything.
+--
+-- Asynchronous; `on_done(ok)` is optional. Returns true if a restart was
+-- initiated.
+function M.restart(nb, on_done)
+  local filepath = nb.filepath
+  local srv = M._servers[filepath]
+  if not srv then
+    utils.warn("No marimo server running for this notebook.")
+    if on_done then on_done(false) end
+    return false
+  end
+
+  local on_message = srv.on_message
+  local port = srv.requested_port or config.options.server.port or 2718
+
+  M.stop(filepath)
+
+  start_and_connect(filepath, port, on_message, function(new_srv, connected)
+    if not new_srv then
+      if on_done then on_done(false) end
+      return
+    end
+    if not connected then
+      utils.warn("Restart: WebSocket did not reconnect within 5s — try :MarimoReclaim.")
+    end
+    M.instantiate(filepath, function()
+      if on_done then on_done(true) end
+    end, { auto_run = false })
+  end)
+  return true
 end
 
 -- ── introspection ─────────────────────────────────────────────────────────

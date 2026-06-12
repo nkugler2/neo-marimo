@@ -310,4 +310,45 @@ function M.run_all_cells(bufnr, nb)
   end)
 end
 
+-- Interrupt whatever the kernel is currently executing — the escape hatch
+-- for runaway cells (infinite loops, OOM-bound loads). The interrupted
+-- cells report their final status over the WS as ordinary cell-op
+-- messages, so the ⟳ indicators resolve on their own.
+function M.interrupt_kernel(nb)
+  if not require_server(nb) then return end
+  server.interrupt(nb.filepath, function(ok)
+    if ok then
+      vim.notify("[neo-marimo] Interrupt sent to kernel.", vim.log.levels.INFO)
+    end
+  end)
+end
+
+-- Restart the kernel: clear every cell's output/status locally and recycle
+-- the server process. Nothing re-runs until the user asks (run_all /
+-- <leader>mR), so a restart never surprises with side effects.
+function M.restart_kernel(bufnr, nb)
+  if not require_server(nb) then return end
+
+  for _, cell in ipairs(nb.cells) do
+    cell.status = "idle"
+    cell.output = nil
+    cell.console = nil
+    cell._has_run = nil
+  end
+  output.clear_all(bufnr)
+
+  vim.notify("[neo-marimo] Restarting marimo kernel...", vim.log.levels.INFO)
+  server.restart(nb, function(ok)
+    if ok then
+      vim.notify(
+        "[neo-marimo] Kernel restarted; outputs cleared. Run-all re-executes from scratch. "
+          .. "Open browser tabs need re-opening (open_in_browser keymap).",
+        vim.log.levels.INFO
+      )
+    else
+      utils.error("Kernel restart failed — check :MarimoServerList for orphan processes.")
+    end
+  end)
+end
+
 return M
