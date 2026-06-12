@@ -1,5 +1,9 @@
-# neo-marimo: Neovim Plugin for Marimo Notebooks
+# neo-marimo: Initial Plan — Phases 1–3
 
+> **Phases covered:** 1 (Core Editor), 2 (Save Sync + TreeSitter), 3 (Marimo Server + Cell Execution)
+> **Written:** before development began. All three phases are ✅ complete.
+> **Continued in:** [`plan-phases-4-6.md`](plan-phases-4-6.md)
+>
 > **Source:** the original three-phase plan generated in plan mode and stored at
 > `~/.claude/plans/i-would-like-to-dazzling-puppy.md`. Copied here so the
 > implementation roadmap travels with the repo.

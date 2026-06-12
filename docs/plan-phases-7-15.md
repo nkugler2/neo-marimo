@@ -1,21 +1,26 @@
 ---
-id: plan-feature-parity
+id: plan-phases-7-15
 aliases: []
 tags:
   - roadmap
   - planning
 ---
 
-# neo-marimo — Plan: Phase 7 → Feature Parity
+# neo-marimo — Plan: Phases 7–15 (Feature Parity)
 
-This is the forward-looking plan. It picks up where `docs/roadmap.md` leaves off (Phases 4–6 are shipped, see commits `ec5bcdd`, `67ef4d8`, `434c9d9`, `c897975`, and the 2026-06-02 stale-offset sweep) and lays out the path from "usable for editing and running cells" to "full marimo feature parity, keyboard-first, in nvim."
+> **Phases covered:** 7 (LSP), 7.5 (Cell-tracking Stability), 8 (Rich Output), 9 (Execution Control), 10 (Database), 11 (Layout/Navigation), 12 (App Mode), 13 (AI), 14 (RTC), 15 (Programmatic)
+> **Written:** after Phases 1–6 shipped. Phases 7–8 (incl. 7.5) are ✅ complete. Phases 9–15 are the current roadmap.
+> **Preceded by:** [`plan-phases-4-6.md`](plan-phases-4-6.md)
+> **Detail sub-plan for Phases 9–12:** [`plan-phases-9-12-detail.md`](plan-phases-9-12-detail.md)
+
+This is the forward-looking plan from "usable for editing and running cells" to "full marimo feature parity, keyboard-first, in nvim." It picks up where Phases 4–6 (`docs/plan-phases-4-6.md`) left off.
 
 ## What's done (recap)
 
-- **Phases 1–3** (`docs/plan.md`): cell rendering, save-sync, headless server + WS, basic stdout output.
-- **Phase 4** (`docs/roadmap.md`): Enter-in-strings fix, adaptive cell width, soft-wrap, per-type icons, `:MarimoEdit`/`:MarimoRun`/`:MarimoNewCell` commands.
-- **Phase 5** (`docs/roadmap.md`): `:MarimoToggle` view, statusline component, interactive `:MarimoServerList`, cross-phase refactors (renderer registry, WS dispatch, detector chain).
-- **Phase 6** (`docs/roadmap.md`): file-watch bidirectional sync, kiosk-mode reconnect so the browser can coexist, `update-cell-codes`/`completed-run` handlers. `/api/kernel/save` was deliberately skipped — see `sync.lua:89-97`.
+- **Phases 1–3** (`docs/plan-phases-1-3.md`): cell rendering, save-sync, headless server + WS, basic stdout output.
+- **Phase 4** (`docs/plan-phases-4-6.md`): Enter-in-strings fix, adaptive cell width, soft-wrap, per-type icons, `:MarimoEdit`/`:MarimoRun`/`:MarimoNewCell` commands.
+- **Phase 5** (`docs/plan-phases-4-6.md`): `:MarimoToggle` view, statusline component, interactive `:MarimoServerList`, cross-phase refactors (renderer registry, WS dispatch, detector chain).
+- **Phase 6** (`docs/plan-phases-4-6.md`): file-watch bidirectional sync, kiosk-mode reconnect so the browser can coexist, `update-cell-codes`/`completed-run` handlers. `/api/kernel/save` was deliberately skipped — see `sync.lua:89-97`.
 
 What remains is sequenced below by priority. Each phase is sized so it lands in one or two focused sessions and either ships a user-visible win or unblocks a later phase.
 
@@ -141,11 +146,12 @@ The fixes below replace each path's hand-rolled math with code that derives offs
 
 ### 7.5.1 Stop prune-on-create from killing fresh cells (ship first) ✅ `e0319ad`
 
-`new_cell_below` (`actions.lua:75`) and `new_cell_above` (`actions.lua:97`) call `notebook.prune_phantoms(nb)` *before* `notebook.recompute_offsets(nb)`. `cell_mod.new` (`cell.lua:68`) returns `start_row = 0, end_row = 0` by default, so the just-inserted cell appears to overlap with whatever cell already lives at row 0. `prune_phantoms` removes it as the "empty overlapper." The inserted blank line is left orphaned in the buffer; subsequent typing on that line gets absorbed by whichever neighbor cell is adjacent. The same inverted call order exists in the delete keymap (`keymaps.lua:120`).
+`new_cell_below` (`actions.lua:75`) and `new_cell_above` (`actions.lua:97`) call `notebook.prune_phantoms(nb)` _before_ `notebook.recompute_offsets(nb)`. `cell_mod.new` (`cell.lua:68`) returns `start_row = 0, end_row = 0` by default, so the just-inserted cell appears to overlap with whatever cell already lives at row 0. `prune_phantoms` removes it as the "empty overlapper." The inserted blank line is left orphaned in the buffer; subsequent typing on that line gets absorbed by whichever neighbor cell is adjacent. The same inverted call order exists in the delete keymap (`keymaps.lua:120`).
 
 **Fix:** drop `prune_phantoms` from those three call sites. Keep it only in `on_bytes_changed`, where deltas can produce real phantoms.
 
 **Verification:**
+
 - `<leader>mn` repeatedly produces visible bordered cells. `:MarimoCheck` says OK after each.
 - `<leader>md` deletes a cell; `:MarimoCheck` says OK.
 - Sequence of mn / type / mn / type leaves every line inside a bordered cell.
@@ -157,14 +163,16 @@ The fixes below replace each path's hand-rolled math with code that derives offs
 Add a pre-save validator in the `BufWriteCmd` handler (`init.lua:138`): walk each cell, compare `cell.code` to `nvim_buf_get_lines(bufnr, cell.start_row, cell.end_row+1)`. If any cell disagrees, abort the save with a notification naming the offending cell IDs and recommending `:MarimoCheck` or `:MarimoReload`. This turns silent disk corruption into a loud, recoverable failure mode.
 
 **Verification:**
+
 - Manually corrupt `cell.code` via Lua. `:w`. Save is aborted with a clear message.
 - Normal save after typing in cells succeeds silently.
 
 ### 7.5.3 Make on_bytes_changed handle cross-cell deletes correctly ✅ `84b1a79`
 
-`on_bytes_changed` (`buffer.lua:310`) assumes each delta affects exactly one cell. A multi-line delete that spans cells produces wrong offsets: the target cell's `end_row` shrinks past `start_row` (now prune-removed), but the shift loop applies the *full* delta to all subsequent cells instead of just the portion that affected rows past the deleted cells. Result: cells over-shift by the overflow amount and overlap whatever cell absorbed the deletion.
+`on_bytes_changed` (`buffer.lua:310`) assumes each delta affects exactly one cell. A multi-line delete that spans cells produces wrong offsets: the target cell's `end_row` shrinks past `start_row` (now prune-removed), but the shift loop applies the _full_ delta to all subsequent cells instead of just the portion that affected rows past the deleted cells. Result: cells over-shift by the overflow amount and overlap whatever cell absorbed the deletion.
 
 **Fix:**
+
 - On `delta < 0`, compute `overflow = max(0, abs(delta) - (cell.end_row - cell.start_row + 1))`.
 - The cell absorbs up to its own line count; the overflow propagates to `cell[idx+1]`.
 - Repeat until `overflow == 0` or we run out of cells.
@@ -173,6 +181,7 @@ Add a pre-save validator in the `BufWriteCmd` handler (`init.lua:138`): walk eac
 Insertion can't span cells (it happens at a single row), so no fix is needed for `delta > 0`.
 
 **Verification:**
+
 - `V3jd` spanning 3 separate 1-line cells leaves no overlap; `:MarimoCheck` says OK.
 - `dd` on a single empty cell still cleanly removes it.
 - Single-line delete inside a multi-line cell shrinks only that cell.
@@ -184,6 +193,7 @@ Insertion can't span cells (it happens at a single row), so no fix is needed for
 **Fix:** after the in-place patch loop in `apply_remote_changes`, call `notebook.recompute_offsets(nb)` instead of the manual shifts.
 
 **Verification:**
+
 - Edit the notebook in the browser while it's open in nvim. After 5+ round-trips, `:MarimoCheck` stays OK and `nb.cells[].code` matches the buffer slice for each cell.
 
 ### 7.5.5 Detect undo and reconcile `<leader>md` ✅ `ca57049`
@@ -199,6 +209,7 @@ Undo of `<leader>md` is currently unrecoverable: vim restores the buffer rows, `
 This isn't a complete undo system — only covers the dominant pain case (`<leader>md` then `u`). Full safety needs 7.5.6.
 
 **Verification:**
+
 - Create cells A, B, C. `<leader>md` on B. `u`. B is restored with its original ID, code matches the pre-delete state.
 - Undo of plain typing inside a cell still works as today.
 - Undo of multiple deletes in a row restores them in reverse order.
@@ -208,6 +219,7 @@ This isn't a complete undo system — only covers the dominant pain case (`<lead
 The root cause across all the above is that `cell.start_row` and `cell.end_row` are plain integers we mutate by hand from three call sites. nvim already ships the right primitive: **extmarks**. An extmark anchored at a buffer row stays anchored across inserts, deletes, and undo without our intervention.
 
 **What shipped:**
+
 - New namespace `ns_cell_anchor`, never wiped by border re-renders.
 - Each cell gets a single `cell.start_mark_id` with `right_gravity = true`. We landed on start-only anchoring because the end of each cell is unambiguously "one row before the next cell's start" (or the last buffer line for the tail cell) — a parallel end-anchor would just be a second source of truth to keep in sync.
 - `cell.start_row` / `cell.end_row` remain cached integers, but `sync_cells_from_extmarks` (`buffer.lua:40`) is now the only writer; it re-derives them from the live extmarks before every read path.
@@ -216,12 +228,14 @@ The root cause across all the above is that `cell.start_row` and `cell.end_row` 
 - `prune_phantoms` is retained as a defensive sweep for the case where a `dd` deletes the only line of a cell — vim's gravity collapses the anchor onto the next cell's, and prune drops the empty one before the validator runs.
 
 **Follow-up fixes that surfaced while testing 7.5.6:**
-- `44b3847` — `dd` on the only row of a cell left the anchor "alive but with end<start." Added a second-pass in `sync_cells_from_extmarks` that pushes such collapsed cells to undo trash so `u` can splice them back. Also introduced `refresh_after_mutation` as the shared post-mutation pipeline (action paths previously called `sync` without `prune`).
-- `46e0b4d` — `vim.list_extend` mutates its first argument in place, so reading `#next_lines` *after* the call gave a doubled count and the moved cell's anchor landed too far down. Capture `next_count = #next_lines` and `start_at = cell.start_row` before `list_extend` in both `move_cell_down` and `move_cell_up`.
 
-**Smart paste follow-up (`d3c4ca9`, then `61cc648`):** vanilla `p` after `<leader>mn` left a stray blank above the pasted line inside the fresh cell. The first attempt (`d3c4ca9`) rewrote to `Vp` for that case, but the single-line substitution dragged both right-gravity anchors past the new content and the paste ended up in the *previous* cell. Final fix (`61cc648`) does the substitution via `nvim_buf_set_lines` and immediately re-places this cell's anchor at the original row so it claims the pasted slice.
+- `44b3847` — `dd` on the only row of a cell left the anchor "alive but with end<start." Added a second-pass in `sync_cells_from_extmarks` that pushes such collapsed cells to undo trash so `u` can splice them back. Also introduced `refresh_after_mutation` as the shared post-mutation pipeline (action paths previously called `sync` without `prune`).
+- `46e0b4d` — `vim.list_extend` mutates its first argument in place, so reading `#next_lines` _after_ the call gave a doubled count and the moved cell's anchor landed too far down. Capture `next_count = #next_lines` and `start_at = cell.start_row` before `list_extend` in both `move_cell_down` and `move_cell_up`.
+
+**Smart paste follow-up (`d3c4ca9`, then `61cc648`):** vanilla `p` after `<leader>mn` left a stray blank above the pasted line inside the fresh cell. The first attempt (`d3c4ca9`) rewrote to `Vp` for that case, but the single-line substitution dragged both right-gravity anchors past the new content and the paste ended up in the _previous_ cell. Final fix (`61cc648`) does the substitution via `nvim_buf_set_lines` and immediately re-places this cell's anchor at the original row so it claims the pasted slice.
 
 **Verification (passed):**
+
 - All tests from 7.5.1–7.5.5 still pass.
 - `:MarimoCheck` stays OK across heavy editing, undo, browser sync, and `<leader>mn` / `<leader>md` stress sequences.
 - The manual shift code in `actions.lua`, `keymaps.lua`, `sync.lua` is fully removed without regression.
@@ -233,12 +247,14 @@ The root cause across all the above is that `cell.start_row` and `cell.end_row` 
 **Fix:** have the parser emit a stable ID per cell. Two viable shapes:
 
 (a) **Persist the ID via a comment** above each `@app.cell`:
+
 ```python
 # id: abc123
 @app.cell
 def _():
     ...
 ```
+
 Parser reads the ID; if absent, mints one and writes it back on next save.
 
 (b) **Derive the ID deterministically** from a hash of `(cell_position, normalized_code)`. Invisible to the user but fragile when two cells have identical code at the same position.
@@ -248,6 +264,7 @@ Recommend (a) with a config flag to disable the comments if the user finds them 
 **Shipped:** Option (a) via `python/bridge.py` (`extract_cell_ids` / `inject_cell_ids`). Each `@app.cell` now carries a `# id: XXXX` comment that round-trips through the parser/generator. The parser preserves the ID across reloads; cells without a comment get a fresh ID and the comment is written on the next save.
 
 **Verification (passed):**
+
 - Edit the file via browser, accept the External change prompt in nvim, run a cell. No "unknown cell" warnings appear.
 
 ### 7.5.8 Suppress "External change" prompt for our own writes ✅ `d789f7f` (+ follow-up `8f2ee45`)
@@ -259,6 +276,7 @@ Recommend (a) with a config flag to disable the comments if the user finds them 
 **Shipped:** SHA256 (not SHA1) dedup via `vim.fn.sha256` — every write records the content hash, every watcher read compares against the ring of recent hashes. `8f2ee45` was the load-bearing follow-up: marimo `--watch` strips our `# id: XXXX` comments (Phase 7.5.7) before writing the file back, so the raw bytes never matched. The dedup now normalises by stripping id comments before hashing on both sides.
 
 **Verification (passed):**
+
 - Run a cell that triggers a dependent re-run. No prompt fires. Confirmed with a diagnostic loop watching `id_count` drop from N to 0 as marimo rewrote.
 - An actually-external edit (e.g., `sed` from another terminal) still prompts as before.
 
@@ -272,9 +290,11 @@ Each step shipped as its own commit in the order below. The intermediate testing
 
 ---
 
-## Phase 8 — Rich Output (markdown + kitty graphics + widgets) (≈4–5 days)
+## Phase 8 — Rich Output (markdown + kitty graphics + widgets) ✅ SHIPPED (2026-06-05)
 
 **Goal:** the browser is no longer required for the common case. Resolves `TOCHANGE.md` #2.
+
+> **Status:** all five sub-phases shipped in `10989b7` (markdown, images, 12 widget renderers, layout primitives, DataFrame side-panel), followed by a series of image-rendering bug fixes (`b285d81`–`88a75f5`). Further improved by the plan-phases-9-12-detail work (rendering correctness rewrite + widget UX overhaul). Modules: `markdown.lua`, `image.lua`, `widgets.lua`, `widget_picker.lua`, `dataframe.lua`.
 
 ### 8.1 Markdown rendering for `mo.md(...)` output
 
@@ -384,7 +404,7 @@ Marimo's `variables` WS op streams all top-level definitions with type and a sho
 
 ## Phase 10 — Database Connections for SQL Cells (≈2 days)
 
-**Goal:** when a SQL cell runs, the user can pick which database connection (defined in earlier Python cells) it targets. Closes `docs/add-to-roadmap.md` item #1.
+**Goal:** when a SQL cell runs, the user can pick which database connection (defined in earlier Python cells) it targets.
 
 ### 10.1 Connection discovery
 

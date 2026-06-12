@@ -1,16 +1,21 @@
 ---
-id: roadmap
+id: plan-phases-4-6
 aliases: []
 tags: []
 ---
 
-# neo-marimo — Roadmap: Phases 4 → 8
+# neo-marimo — Plan: Phases 4–6
+
+> **Phases covered:** 4 (Workflow Fixes), 5 (Toggle View + Statusline), 6 (Bidirectional Sync)
+> **Written:** after Phases 1–3 shipped. All three phases are ✅ complete.
+> **Preceded by:** [`plan-phases-1-3.md`](plan-phases-1-3.md)
+> **Continued in:** [`plan-phases-7-15.md`](plan-phases-7-15.md)
 
 ## Context
 
-Phases 1–3 of the original plan (`docs/plan.md`) shipped: cell rendering, save-sync, headless server + WS, and basic stdout output. The plugin is usable for editing and running cells, but several workflow blockers and feature-parity gaps remain (captured in `TOCHANGE.md` and the "not yet implemented" list in `docs/plan.md`).
+Phases 1–3 of the original plan (`docs/plan-phases-1-3.md`) shipped: cell rendering, save-sync, headless server + WS, and basic stdout output. The plugin is usable for editing and running cells, but several workflow blockers and feature-parity gaps remain (captured in `TOCHANGE.md` and the "not yet implemented" list in `docs/plan-phases-1-3.md`).
 
-This roadmap covers the next five phases. Goals (in priority order):
+This plan covers Phases 4–6. Goals (in priority order):
 
 1. Fix workflow blockers that make day-to-day editing painful (Enter-in-strings, cell width, hover, view toggle).
 2. Add visibility and control (statusline, distinct cell types, server introspection). Some of this is already added, so check what has been added first before making changes.
@@ -71,7 +76,7 @@ New file `lua/neo-marimo/ws_handlers.lua` exposes `register(op, fn)` and `dispat
 > **Status:** shipped in commits `ec5bcdd`, `c897975` (post-Phase-4 regression
 > sweep), and finalized on 2026-06-02 with the stale-offset flush that
 > resolved the last `buffer.lua` extmark crashes (see
-> `docs/Cross-phase-and-phase-4-issues.md`).
+> `docs/log-phase-4-issues.md`).
 
 ### 4.1 Fix Enter in multi-line strings (`TOCHANGE.md` #8) — **critical** — DONE
 
@@ -108,7 +113,7 @@ Borders draw at the _visible_ window width, code wraps within that width. No hor
 - **`mo` detection**: extend `cell.detect_type` chain to add a "marimo" type when the cell body is _only_ `mo.ui.*`, `mo.hstack`, `mo.vstack`, `mo.tabs`, etc. with no surrounding logic. Heuristic: trimmed code starts with `mo.` and ends with `)`, no `=`, no `def`, no `import`.
 - **New highlight group**: `MarimoCellMarimoBorder` and `MarimoCellMarimoLabel` in `lua/neo-marimo/highlights.lua`, color `#E6C384` (warm yellow — distinct from py/md/sql).
 
-### 4.4 `:MarimoEdit`, `:MarimoRun`, `:MarimoNew` user commands (plan.md pending) — DONE
+### 4.4 `:MarimoEdit`, `:MarimoRun`, `:MarimoNew` user commands (plan-phases-1-3.md pending) — DONE
 
 `:MarimoNew` already exists for "create new notebook" — keep it.
 
@@ -240,7 +245,7 @@ Critical files:
 
 Currently the user's `:w` writes the `.py` file but the running marimo server is only watching the file via inotify-equivalent — there's a ~1s lag before it picks up. We can do better:
 
-- After `sync.write_to_file` succeeds, also POST `/api/kernel/save` with the new cell codes if a server is running for this file. The endpoint exists (plan.md pending #3); calling it forces the server to reload immediately.
+- After `sync.write_to_file` succeeds, also POST `/api/kernel/save` with the new cell codes if a server is running for this file. The endpoint exists (plan-phases-1-3.md pending #3); calling it forces the server to reload immediately.
 - For _interactive_ edits (no save yet), don't sync — the existing model of "save = sync" is correct. Marimo's browser editor also saves on edit; we mirror that.
 
 Critical files:

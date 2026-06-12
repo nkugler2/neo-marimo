@@ -1,18 +1,19 @@
 ---
-id: Cross-phase-and-phase-4-issues
+id: log-phase-4-issues
 aliases: []
 tags: []
 ---
 
-# Issues in the most recent run
+# Issue Log: Phase 4 (resolved 2026-06-02)
 
-There are issue with the most recent run that you did.
+> **When:** these bugs appeared during Phase 4 implementation.
+> **Resolved:** 2026-06-02. All items below are ✅ fixed.
+> **Context:** Phase 4 plans live in [`plan-phases-4-6.md`](plan-phases-4-6.md).
 
-> **Status:** all items below resolved on 2026-06-02. Root cause was the same
-> for the cell-issues section and TOCHANGE #4 here: keymap actions read
-> `cell.start_row`/`cell.end_row` immediately, but those offsets are only
-> updated on a 300ms debounce. Typing-then-acting read stale offsets and either
-> crashed (extmark out-of-range) or chopped the wrong rows. Fix: synchronous
+> **Root cause (summary):** keymap actions read `cell.start_row`/`cell.end_row`
+> immediately, but those offsets are only updated on a 300ms debounce.
+> Typing-then-acting read stale offsets and either crashed (extmark out-of-range)
+> or chopped the wrong rows. Fix: synchronous
 > `nb._flush_pending()` at the top of every action that reads cell offsets.
 
 ## Cell issues — DONE

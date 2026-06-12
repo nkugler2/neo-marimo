@@ -1,9 +1,14 @@
 ---
-id: plan-9-rendering-rewrite-and-widget-ux
+id: plan-phases-9-12-detail
 aliases: []
 tags: []
 ---
-# Phases 9–12 — Rendering correctness, widget UX, bug sweep, extensibility
+# neo-marimo — Detail Plan: Phases 9–12
+
+> **Phases covered:** 9 (Rendering Correctness), 10 (Widget Interaction UX), 11 (Bug Sweep), 12 (Extensibility & Docs)
+> **Written:** 2026-06-11, as a detailed sub-plan during work on [`plan-phases-7-15.md`](plan-phases-7-15.md). All four phases are ✅ complete (2026-06-11).
+> **Preceded by:** [`plan-phases-7-15.md`](plan-phases-7-15.md) (Phase 7 + 7.5 shipped first)
+> **Continued in:** [`plan-phases-7-15.md`](plan-phases-7-15.md) (Phase 8 onward)
 
 ## Why this plan exists
 
