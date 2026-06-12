@@ -57,12 +57,12 @@ Two known drifts, both caused by the phase-number collision between
 `plan-phases-7-15.md` and `plan-phases-9-12-detail.md` (both have phases
 9–12 meaning different things):
 
-1. The "Integrated" list claims *"Database connections for SQL cells
-   (Phase 10 in plan-phases-7-15.md)"* is done. **It is not** — there is no
+1. The "Integrated" list claims _"Database connections for SQL cells
+   (Phase 10 in plan-phases-7-15.md)"_ is done. **It is not** — there is no
    `:MarimoSqlConnect`, no `cell.sql_engine` anywhere in the code. The
-   shipped "Phase 10" was the *detail plan's* phase 10 (widget UX). Move the
+   shipped "Phase 10" was the _detail plan's_ phase 10 (widget UX). Move the
    DB item back to Open (or leave it to the feature roadmap).
-2. Open item #1 says Phase 8 rich output is *"currently a NOT DONE item"* —
+2. Open item #1 says Phase 8 rich output is _"currently a NOT DONE item"_ —
    Phase 8 shipped 2026-06-05. Delete the item.
 
 While there: add a one-line warning at the top of both plan docs noting the
@@ -71,7 +71,7 @@ numbering collision, so future bookkeeping doesn't repeat this.
 ### R1.4 History scrub check
 
 `notebooks/` and `invest-data/` are gitignored now, but confirm nothing
-personal was committed *before* the ignore rules landed:
+personal was committed _before_ the ignore rules landed:
 
 ```sh
 git log --all --diff-filter=A --name-only -- 'notebooks/*' 'invest-data/*'
@@ -119,7 +119,7 @@ vim.pack paths:
 2. `python_path` pointing at a marimo-less python → is the error actionable
    (it should name the config key and show an example)?
 3. `:checkhealth neo-marimo` → every WARN/ERROR line tells the user what to
-   *do*, not just what's wrong.
+   _do_, not just what's wrong.
 
 Fix whatever this surfaces; it always surfaces something.
 
@@ -219,6 +219,7 @@ process invented on the spot.
 ## Definition of done
 
 - [ ] LICENSE in repo, visible on GitHub.
+- [ ] my note: may have to do `make dev-unlink` to unlink my dev environment
 - [ ] TOCHANGE/plan docs contain no claims the code contradicts.
 - [ ] `examples/demo.py` committed; README has a real screenshot.
 - [ ] Clean-machine install verified for lazy.nvim and vim.pack.
