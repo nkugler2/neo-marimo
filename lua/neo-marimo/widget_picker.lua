@@ -128,17 +128,23 @@ local function interact(nb, cell, w)
     prompt_text(w.label, w.value, function(v) commit(nb, cell, w, v) end)
 
   elseif w.name == "dropdown" then
+    -- Marimo's dropdown decoder expects the selected key wrapped in a list
+    -- (set_ui_element_value → _convert_value(value: list[str]), which
+    -- asserts len == 1). Sending the bare string makes marimo treat the
+    -- string itself as the list and trips "Dropdowns only support a single
+    -- value". Commit { v }, matching what the browser frontend posts.
+    --
     -- Marimo serializes the option list in data-options as JSON; fall back
     -- to "type a value" if we don't see one.
     local opts_raw = w.options.options
     if opts_raw then
       local ok, opts = pcall(vim.json.decode, opts_raw)
       if ok and type(opts) == "table" then
-        prompt_select(w.label, opts, function(v) commit(nb, cell, w, v) end)
+        prompt_select(w.label, opts, function(v) commit(nb, cell, w, { v }) end)
         return
       end
     end
-    prompt_text(w.label, w.value, function(v) commit(nb, cell, w, v) end)
+    prompt_text(w.label, w.value, function(v) commit(nb, cell, w, { v }) end)
 
   elseif w.name == "multiselect" then
     prompt_text(w.label .. " (comma-separated)",

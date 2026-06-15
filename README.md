@@ -179,72 +179,72 @@ All buffer-local to the notebook view.
 
 ### Cells
 
-| Key | Action |
-| --- | --- |
-| `]m` / `[m` | Next / previous cell |
-| `<leader>mn` / `<leader>mN` | New cell below / above |
-| `<leader>md` | Delete cell (undo with `u`) |
-| `<leader>mJ` / `<leader>mK` | Move cell down / up |
-| `<leader>mr` / `<leader>mR` | Run cell / run all |
-| `<leader>mt` | Toggle output display for the cell |
-| `<leader>mv` | Toggle notebook view ↔ raw `.py` (bound on both buffers) |
+| Key                         | Action                                                   |
+| --------------------------- | -------------------------------------------------------- |
+| `]m` / `[m`                 | Next / previous cell                                     |
+| `<leader>mn` / `<leader>mN` | New cell below / above                                   |
+| `<leader>md`                | Delete cell (undo with `u`)                              |
+| `<leader>mJ` / `<leader>mK` | Move cell down / up                                      |
+| `<leader>mr` / `<leader>mR` | Run cell / run all                                       |
+| `<leader>mt`                | Toggle output display for the cell                       |
+| `<leader>mv`                | Toggle notebook view ↔ raw `.py` (bound on both buffers) |
 
 ### Server & browser
 
-| Key | Action |
-| --- | --- |
-| `<leader>mo` | Start the server (if needed) and open in browser |
-| `<leader>mx` | Stop the server |
-| `<leader>mi` | Interrupt the kernel (stop a runaway cell) |
+| Key          | Action                                                              |
+| ------------ | ------------------------------------------------------------------- |
+| `<leader>mo` | Start the server (if needed) and open in browser                    |
+| `<leader>mx` | Stop the server                                                     |
+| `<leader>mi` | Interrupt the kernel (stop a runaway cell)                          |
 | `<leader>mX` | Restart the kernel (outputs cleared; nothing re-runs until you ask) |
-| `<leader>mc` | Reclaim the WebSocket from the browser |
+| `<leader>mc` | Reclaim the WebSocket from the browser                              |
 
 ### Widgets
 
-| Key | Action |
-| --- | --- |
-| `]w` / `[w` | Focus next / previous widget (▸ marker; jumps across cells) |
-| `<leader>mw` | Smart act: focused or single widget → edit directly; multiple → ordered picker (digits `1`–`9` act immediately, `<Tab>`/`<S-Tab>` cycle tab groups) |
-| `<leader>mW` | Full tab-aware picker, unconditionally |
-| `<C-a>` / `<C-x>` | Nudge the focused slider/number by its step (no prompt) |
-| `<leader>m.` | Re-edit the last-edited widget, wherever it lives |
-| `<leader>mP` | Pin / unpin the focused widget |
-| `<leader>mp` | Panel of pinned widgets across the notebook |
+| Key               | Action                                                                                                                                              |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `]w` / `[w`       | Focus next / previous widget (▸ marker; jumps across cells)                                                                                         |
+| `<leader>mw`      | Smart act: focused or single widget → edit directly; multiple → ordered picker (digits `1`–`9` act immediately, `<Tab>`/`<S-Tab>` cycle tab groups) |
+| `<leader>mW`      | Full tab-aware picker, unconditionally                                                                                                              |
+| `<C-a>` / `<C-x>` | Nudge the focused slider/number by its step (no prompt)                                                                                             |
+| `<leader>m.`      | Re-edit the last-edited widget, wherever it lives                                                                                                   |
+| `<leader>mP`      | Pin / unpin the focused widget                                                                                                                      |
+| `<leader>mp`      | Panel of pinned widgets across the notebook                                                                                                         |
 
 ### Data & LSP
 
-| Key | Action |
-| --- | --- |
+| Key          | Action                                                      |
+| ------------ | ----------------------------------------------------------- |
 | `<leader>mD` | Full DataFrame side panel (`s` sorts by column, `q` closes) |
-| `K` | Hover |
-| `gd` | Goto definition |
-| `<C-k>` | Signature help (insert mode) |
-| `<C-x><C-o>` | Omnifunc completion |
+| `K`          | Hover                                                       |
+| `gd`         | Goto definition                                             |
+| `<C-k>`      | Signature help (insert mode)                                |
+| `<C-x><C-o>` | Omnifunc completion                                         |
 
 ## Commands
 
-| Command | Action |
-| --- | --- |
-| `:MarimoEdit` | Start the managed server and open the notebook in the browser (same as `<leader>mo`) |
-| `:MarimoRun [all]` | Run the cell under the cursor, or every cell |
-| `:MarimoInterrupt` | Interrupt the kernel's current execution |
-| `:MarimoRestart` | Restart the kernel (clears outputs; nothing re-runs) |
-| `:MarimoNewCell [above\|below]` | Insert a blank cell |
-| `:MarimoStop` | Stop the server for this notebook |
-| `:MarimoToggle` | Notebook view ↔ raw `.py` |
-| `:MarimoReload` | Re-read the `.py` from disk and rebuild the view |
-| `:MarimoNew [path]` | Create and open a new notebook |
-| `:MarimoAttach` | Manually attach to the current buffer |
-| `:MarimoServerList` | Interactive list of managed servers + system marimo processes (`<CR>` switch, `K` kill all) |
-| `:MarimoKillAll` | Force-kill every marimo edit process on the system |
-| `:MarimoWidget` | Widget picker for the cell under the cursor |
-| `:MarimoWidgetPins` | Pinned-widgets panel |
-| `:MarimoResetWidgets` | Drop cached widget value overrides and re-render |
-| `:MarimoDataFramePanel` | Full DataFrame side panel |
-| `:MarimoCheck` | Validate cell row bookkeeping against the buffer |
-| `:MarimoInspectOutput` | Dump the cell's output mimetype/payload/widgets (debugging) |
-| `:MarimoWsDebug [path\|off]` | Log every WebSocket message to a file |
-| `:MarimoWsPing` | Send a no-op WS ping (pipe health check) |
+| Command                         | Action                                                                                      |
+| ------------------------------- | ------------------------------------------------------------------------------------------- |
+| `:MarimoEdit`                   | Start the managed server and open the notebook in the browser (same as `<leader>mo`)        |
+| `:MarimoRun [all]`              | Run the cell under the cursor, or every cell                                                |
+| `:MarimoInterrupt`              | Interrupt the kernel's current execution                                                    |
+| `:MarimoRestart`                | Restart the kernel (clears outputs; nothing re-runs)                                        |
+| `:MarimoNewCell [above\|below]` | Insert a blank cell                                                                         |
+| `:MarimoStop`                   | Stop the server for this notebook                                                           |
+| `:MarimoToggle`                 | Notebook view ↔ raw `.py`                                                                   |
+| `:MarimoReload`                 | Re-read the `.py` from disk and rebuild the view                                            |
+| `:MarimoNew [path]`             | Create and open a new notebook                                                              |
+| `:MarimoAttach`                 | Manually attach to the current buffer                                                       |
+| `:MarimoServerList`             | Interactive list of managed servers + system marimo processes (`<CR>` switch, `K` kill all) |
+| `:MarimoKillAll`                | Force-kill every marimo edit process on the system                                          |
+| `:MarimoWidget`                 | Widget picker for the cell under the cursor                                                 |
+| `:MarimoWidgetPins`             | Pinned-widgets panel                                                                        |
+| `:MarimoResetWidgets`           | Drop cached widget value overrides and re-render                                            |
+| `:MarimoDataFramePanel`         | Full DataFrame side panel                                                                   |
+| `:MarimoCheck`                  | Validate cell row bookkeeping against the buffer                                            |
+| `:MarimoInspectOutput`          | Dump the cell's output mimetype/payload/widgets (debugging)                                 |
+| `:MarimoWsDebug [path\|off]`    | Log every WebSocket message to a file                                                       |
+| `:MarimoWsPing`                 | Send a no-op WS ping (pipe health check)                                                    |
 
 ## Completion
 
@@ -317,3 +317,33 @@ specs that self-skip when no marimo-equipped python is available
 (`NEO_MARIMO_TEST_PYTHON` selects the interpreter — `make test` points it at
 the `PYTHON` variable). CI runs everything on nvim stable and nightly via
 `.github/workflows/test.yml`.
+
+## Enabling logging
+
+`:MarimoWsDebug`
+
+Toggles logging on. Messages are appended to /tmp/neo-marimo-ws.log (truncated fresh each time you enable it). You can specify a custom path too:
+
+`:MarimoWsDebug /tmp/my-debug.log`
+
+### Viewing the file live
+
+Open a terminal split and tail the log:
+
+`:split | terminal tail -f /tmp/neo-marimo-ws.log`
+
+Or from your shell:
+`tail -f /tmp/neo-marimo-ws.log`
+
+Each line has the format: [HH:MM:SS] <op> <JSON payload> — one WebSocket message per line.
+
+### Disabling logging
+
+:MarimoWsDebug off
+
+### Typical workflow
+
+1. :MarimoWsDebug — enable, starts fresh log
+2. Do the thing you want to inspect (run a cell, edit, etc.)
+3. Check the tail output to see which ops fired and what the payloads looked like
+4. :MarimoWsDebug off when done
