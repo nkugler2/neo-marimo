@@ -6,7 +6,7 @@ local M = {}
 -- asserted by `make test`). A different series may emit HTML shapes the
 -- tree renderer has never seen — usually it still works, but re-capture
 -- the fixtures and run the suite before trusting it.
-local TESTED_MARIMO_SERIES = { ["0.19"] = true }
+local TESTED_MARIMO_SERIES = { ["0.19"] = true, ["0.23"] = true }
 
 function M.check()
   vim.health.start("neo-marimo")

@@ -6,6 +6,11 @@
 --   Phase 6 → "update-cell-codes", "completed-run"
 --   Phase 7 → "completion-result", "hover-result"
 --
+-- Version note: marimo ≤0.19 broadcasts the granular "update-cell-codes" /
+-- "update-cell-ids" ops on every reload; 0.23+ dropped both and sends a
+-- single payload-less "reload" op instead. We register handlers for all
+-- three so the plugin works across both series.
+--
 -- A handler receives (payload, ctx) where:
 --   payload  = the message's `data` field if present, otherwise the whole msg
 --   ctx      = { nb = <notebook>, bufnr = <notebook buffer> }
@@ -148,6 +153,30 @@ M.register("update-cell-codes", function(payload, ctx)
     })
   end
   sync.apply_remote_changes(ctx.nb, new_cells)
+end)
+
+-- reload: marimo 0.23+ replaced the granular update-cell-codes /
+-- update-cell-ids broadcasts with a single payload-less "reload" op,
+-- emitted by --watch's file-change handler (and after a save). It carries
+-- no cell_ids or codes — the frontend is expected to re-fetch state — so we
+-- do the two things the old handlers did for us:
+--   1. Stamp _last_cell_ids_at. actions.flush_pending_edits blocks up to
+--      1.5s waiting for this stamp to overtake _last_save_at; on 0.23 no
+--      update-cell-ids arrives, so without this every run eats the full
+--      timeout. 0.23 is client-ID-authoritative (/api/kernel/run registers
+--      unseen IDs), so the IDs we already hold stay valid — only the
+--      unblock matters.
+--   2. Re-sync from disk for external/browser/--watch edits. Skip inside
+--      our own write-suppression window (a save we just made) so we don't
+--      clobber characters the user typed between :w and the echo — same
+--      guard the old update-cell-codes handler used.
+M.register("reload", function(_, ctx)
+  if not ctx.nb then return end
+  ctx.nb._last_cell_ids_at = (vim.uv.hrtime() / 1e6)
+  local sync = require("neo-marimo.sync")
+  if not sync.is_writing(ctx.nb) then
+    sync.reload_from_file(ctx.nb)
+  end
 end)
 
 -- completed-run: empty payload. Marimo sends this after every submitted
