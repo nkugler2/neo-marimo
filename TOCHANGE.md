@@ -14,9 +14,25 @@ current roadmap) and flesh out the implementation steps there.
 
 ## Open
 
+### Markdown Rendering
+
 **Improve markdown rendering** Changes were already made that improved the markdown rendering, but I want to improve it. Specifically, I would like the regular output that is just grey and italics to be more readable
 
-**Bad Markdown rendering?** In the week one notebook, it looks like some of the markdown output came later then it was supposed to.
+**Bad Markdown rendering?** In the week one notebook, it looks like some of the markdown output came later then it was supposed to. Got rid of that notebook, but let me see if I can recreate it
+
+**Markdown rendering not as wide as could be sometimes** So I make a 10x10 numpy array, but even though my screen is wide enough to view a 10x10 output, the lines truncate in a way, so each row of the 10x10 takes up 2 lines of output, while a 6x6 would have 1 row of output per row of the array. When I make my screen smaller it will adjust to take a smaller width, can I adjust it to take a bigger width? Like a 10x10 with 0s works, but not with larger numbers
+
+### Cell Rendering
+
+**Run text and output placement issues**: Sometimes the run button is in the cell, sometimes its below the cell. Sometimes output has the same issue. Ideally both of these things will go below the cell, and I will add more spacing or some subtle visuals to more clearly show the output
+
+**Run button in wrong spot** if I have rune a cell, see the run icon in the cell, and then press enter, i sometimes see a new line within that run cell but the new line is under the run icon. the run icon should be at the bottom. Should try to see the exact cause of this, but maybe this is fixed by always having run after the cell
+
+**Cell below what visable on my screen** when I create a new cell, and that cell is below what is visable in my screen in neovim, I cant press j to go down to it nor can I use ]m to go to that next cell, i have to do something like `zz` to center my screen where my cursor is, the last cell that is visable, and then I can see and navigate to the last cell
+
+### Cell ID desync
+
+This may have already been fixed, need to double check
 
 **Cell-id desync → a cell silently stops working ("queued" forever, widget writes no-op)**
 Hit this with two identical `mo.ui.slider` cells (`x`, `y`) in the week-one
@@ -60,13 +76,15 @@ Proper fix (two parts):
    — resume with `claude --resume fc7c2961-2fc8-4909-83b2-6d95b761b2f7`. To confirm
    on a fresh repro: enable WS logging and `grep "unknown cell" /tmp/neo-marimo-ws.log`.
 
+### Editing Issues
+
 `/Users/noahkugler/Desktop/Screenshot\ 2026-06-14\ at\ 11.19.14 PM.png`
 
 **Pressing enter goes to new cell** When I try to do something like a for loop, when i do `for i in thing:` and press enter, it creates a new cell rather than staying in the same cell. In fact, when I press enter in a new cell, it just adds one row to the end of the previous cell and then keeps one line in the new cell.
 
-**External Editing warning** need more info on when this happens
-
 **`Shift O` on first line of cell** when I do `Shift O` to add a line above the only line in a cell, that line goes to the cell above. This doesn't just happen on shift O, this also happens when i try to press enter and move the one line in the cell down, same bug
+
+**External Editing warning** need more info on when this happens
 
 ## Ideas / rough requests
 
