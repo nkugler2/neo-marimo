@@ -18,6 +18,7 @@
 local output = require("neo-marimo.output")
 local utils = require("neo-marimo.utils")
 local log = require("neo-marimo.log")
+local widgets = require("neo-marimo.widgets")
 
 local M = {}
 
@@ -265,5 +266,77 @@ end)
 -- so this is a no-op slot for now — Phase 8 might use it to drive a
 -- "notebook idle" indicator in the statusline.
 M.register("completed-run", function(_, _) end)
+
+-- ── widget value sync (browser/other-consumer → nvim) ───────────────────────
+--
+-- When any consumer changes a UI element's value, marimo recomputes the
+-- dependent cells (those cell-ops arrive and render fine) but NEVER
+-- re-broadcasts the widget's own cell — so without the two handlers below
+-- nvim's slider/checkbox stays where it was even though the value changed.
+-- The signal that carries the new value is the "variable-values" op; to map a
+-- variable back to its widget we first need "variables", which says which cell
+-- declares each variable (a widget's object-id is "<declaring-cell>-<n>").
+--
+-- The reverse (nvim → browser) is NOT fixable here: the browser only gets the
+-- same variable-values broadcast and marimo's frontend doesn't reposition
+-- another session's widget from it either. The value and all downstream cells
+-- still sync both ways; only the *other* editor's widget glyph stays put.
+
+-- Coerce a variable-values entry to a display value, or nil to skip it (a null
+-- value, or a non-scalar datatype like a range slider's tuple that we can't
+-- represent as a single override without risking a wrong/garbled display).
+local function coerce_var_value(v)
+  if type(v) ~= "table" or v.value == nil then return nil end
+  local val, dt = v.value, v.datatype
+  if dt == "int" or dt == "float" or dt == "number" then
+    return tonumber(val)
+  elseif dt == "bool" or dt == "boolean" then
+    return (val == true or val == "True" or val == "true")
+  elseif dt == "str" or dt == "string" or dt == "text" then
+    return tostring(val)
+  end
+  return nil
+end
+
+-- variables: marimo's variable dependency graph, broadcast once per run and on
+-- (re)connect. Keep name → declaring cell so a later variable-values update
+-- can find the widget that variable produced.
+M.register("variables", function(payload, ctx)
+  local nb = ctx.nb
+  if not nb or type(payload.variables) ~= "table" then return end
+  nb._var_decl = nb._var_decl or {}
+  for _, v in ipairs(payload.variables) do
+    if type(v) == "table" and v.name and type(v.declared_by) == "table" then
+      nb._var_decl[v.name] = v.declared_by[1]
+    end
+  end
+end)
+
+-- variable-values: a variable's runtime value (re)computed. For variables that
+-- back a UI element, stash the new value as an override and re-render the cell
+-- so the widget glyph moves to match. Skips when the declaring cell produced
+-- more than one widget (ambiguous which variable maps to which object-id).
+M.register("variable-values", function(payload, ctx)
+  local nb, bufnr = ctx.nb, ctx.bufnr
+  if not nb or not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
+  if type(payload.variables) ~= "table" then return end
+  local decl = nb._var_decl or {}
+  local dirty = {}
+  for _, v in ipairs(payload.variables) do
+    local coerced = coerce_var_value(v)
+    local cell_id = v.name and decl[v.name]
+    if coerced ~= nil and cell_id then
+      local hits = widgets.find_by_object_prefix(bufnr, cell_id .. "-")
+      if #hits == 1 then
+        widgets.set_override(hits[1].widget.object_id, coerced)
+        dirty[hits[1].cell_id] = true
+      end
+    end
+  end
+  for cid in pairs(dirty) do
+    local cell = nb.cell_by_id and nb.cell_by_id[cid]
+    if cell then output.render(bufnr, cell, nb.filepath) end
+  end
+end)
 
 return M

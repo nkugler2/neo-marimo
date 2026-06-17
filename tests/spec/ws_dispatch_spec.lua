@@ -138,3 +138,66 @@ t.case("ws: update-cell-ids skips the reload during our own write", function()
   sync.is_writing, sync.reload_from_file = orig_is_writing, orig_reload
   t.eq(reloaded, 0, "no reload while writing — would clobber unsaved edits")
 end)
+
+-- Widget value sync (browser/other consumer → nvim): marimo never re-broadcasts
+-- the widget's own cell when its value changes, only a "variable-values" op.
+-- We map the variable to its widget via the "variables" declaring-cell graph
+-- (object-id is "<declaring-cell>-<n>") and stash a value override so the
+-- widget glyph re-renders at the new position.
+t.case("ws: variable-values moves a widget to the broadcast value", function()
+  local widgets = require("neo-marimo.widgets")
+  widgets.clear_all_overrides()
+  local nb, bufnr = t.make_notebook({ "s = 1", "y = s" })
+  local cell = nb.cells[1].id
+  local obj = cell .. "-0"
+  widgets.register_widget(bufnr, cell, { name = "slider", object_id = obj, value = 1 })
+
+  ws.dispatch("variables",
+    { variables = { { name = "s", declared_by = { cell }, used_by = {} } } },
+    { nb = nb, bufnr = bufnr })
+  ws.dispatch("variable-values",
+    { variables = { { name = "s", value = "42", datatype = "int" } } },
+    { nb = nb, bufnr = bufnr })
+
+  t.eq(widgets.get_override(obj), 42, "override set to the broadcast value")
+  widgets.clear_all_overrides()
+end)
+
+t.case("ws: variable-values is ambiguous when a cell has >1 widget — skip", function()
+  local widgets = require("neo-marimo.widgets")
+  widgets.clear_all_overrides()
+  local nb, bufnr = t.make_notebook({ "a = 1", "b = 2" })
+  local cell = nb.cells[1].id
+  widgets.register_widget(bufnr, cell, { name = "slider", object_id = cell .. "-0", value = 1 })
+  widgets.register_widget(bufnr, cell, { name = "slider", object_id = cell .. "-1", value = 2 })
+
+  ws.dispatch("variables",
+    { variables = { { name = "a", declared_by = { cell } } } }, { nb = nb, bufnr = bufnr })
+  ws.dispatch("variable-values",
+    { variables = { { name = "a", value = "9", datatype = "int" } } }, { nb = nb, bufnr = bufnr })
+
+  t.eq(widgets.get_override(cell .. "-0"), nil, "ambiguous declaring cell → no override")
+  t.eq(widgets.get_override(cell .. "-1"), nil)
+  widgets.clear_all_overrides()
+end)
+
+t.case("ws: variable-values ignores null and non-scalar datatypes", function()
+  local widgets = require("neo-marimo.widgets")
+  widgets.clear_all_overrides()
+  local nb, bufnr = t.make_notebook({ "s = 1" })
+  local cell = nb.cells[1].id
+  widgets.register_widget(bufnr, cell, { name = "slider", object_id = cell .. "-0", value = 1 })
+  ws.dispatch("variables",
+    { variables = { { name = "s", declared_by = { cell } } } }, { nb = nb, bufnr = bufnr })
+
+  -- the element object itself (null value at init)
+  ws.dispatch("variable-values",
+    { variables = { { name = "s", datatype = "slider" } } }, { nb = nb, bufnr = bufnr })
+  t.eq(widgets.get_override(cell .. "-0"), nil, "null value ignored")
+
+  -- a range slider tuple — not safely representable as one override
+  ws.dispatch("variable-values",
+    { variables = { { name = "s", value = "(1, 2)", datatype = "tuple" } } }, { nb = nb, bufnr = bufnr })
+  t.eq(widgets.get_override(cell .. "-0"), nil, "non-scalar datatype ignored")
+  widgets.clear_all_overrides()
+end)

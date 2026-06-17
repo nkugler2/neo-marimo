@@ -82,6 +82,27 @@ function M.set_override(object_id, value)
   M._value_overrides[object_id] = value
 end
 
+-- Find registered widgets whose object_id begins with `prefix`. Marimo object
+-- ids are "<declaring-cell-id>-<n>", so passing "<cell>-" finds every widget a
+-- given cell produced. Returns a list of { widget = w, cell_id = <render cell> }
+-- across all cells in `bufnr`. Used to map a variable-values broadcast back to
+-- the widget that variable produced when another consumer changes its value.
+function M.find_by_object_prefix(bufnr, prefix)
+  local hits = {}
+  local bufpre = bufnr .. ":"
+  for key, list in pairs(M._by_cell) do
+    if key:sub(1, #bufpre) == bufpre then
+      local cell_id = key:sub(#bufpre + 1)
+      for _, w in ipairs(list) do
+        if w.object_id and w.object_id:sub(1, #prefix) == prefix then
+          table.insert(hits, { widget = w, cell_id = cell_id })
+        end
+      end
+    end
+  end
+  return hits
+end
+
 function M.get_override(object_id)
   if not object_id then return nil end
   return M._value_overrides[object_id]

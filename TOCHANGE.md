@@ -167,6 +167,36 @@ so it was never affected. This is also why "images worked when I added snacks"
 Note on `plt.show()`: it returns None → no output, so it's a marimo
 anti-pattern regardless — end figure cells with a bare `fig` / `plt.gca()`.
 
+**Widget glyph didn't move when a value changed in the other editor
+(browser→nvim FIXED 2026-06-17; nvim→browser is a marimo limitation).**
+Symptom: change a slider in the marimo browser and nvim's dependent cells +
+images recompute, but nvim's slider thumb stays put; change it in nvim and the
+browser recomputes but its thumb stays put.
+
+Root cause (confirmed by capturing cross-consumer WS traffic): when any
+consumer sets a UI element value, marimo reruns the *dependent* cells and
+broadcasts a `variable-values` op with the new value, but it NEVER
+re-broadcasts the widget's own cell-op. nvim handled neither `variables` nor
+`variable-values`, so it never learned the new value. The widget's displayed
+value comes from `data-initial-value` in its cached cell output (overlaid by
+`widgets._value_overrides`), and nothing was updating that override on a
+remote change.
+
+- [x] **browser→nvim FIX** — `ws_handlers.lua` now handles `variables` (keeps
+      name → declaring-cell, since a widget's object-id is `<declaring-cell>-<n>`)
+      and `variable-values` (maps the changed variable to its widget, stashes a
+      value override, re-renders the cell). Coerces int/float/bool/str; skips
+      nulls, non-scalar datatypes (range-slider tuples), and cells that produced
+      more than one widget (ambiguous). Verified both modes get `variables` +
+      `variable-values` on connect (main and kiosk). New `find_by_object_prefix`
+      in `widgets.lua`. Tests in `tests/spec/ws_dispatch_spec.lua`.
+- [ ] **nvim→browser is NOT fixable from the plugin** — the browser receives
+      the exact same `variable-values` broadcast and marimo's frontend doesn't
+      reposition another session's widget from it either (it only re-renders a
+      widget from the session's own interaction). The value and every
+      downstream cell still sync both ways; only the *other* editor's widget
+      glyph stays put. Would need an upstream marimo change (or RTC).
+
 ### Editing Issues
 
 `/Users/noahkugler/Desktop/Screenshot\ 2026-06-14\ at\ 11.19.14 PM.png`

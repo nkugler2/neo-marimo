@@ -29,7 +29,8 @@ on disk is always a normal notebook the browser (or a colleague) can open.
   and friends render as ASCII controls. Focus them with `]w`/`[w`, act
   with `<leader>mw`, nudge sliders with `<C-a>`/`<C-x>`, pin favorites,
   and re-edit the last one with `<leader>m.`. Value changes POST to the
-  kernel and reactively re-run dependent cells.
+  kernel and reactively re-run dependent cells. Cross-editor widget sync is
+  one-directional — see the note under [Widgets](#widgets).
 - **LSP in cells** — hover, goto-definition, signature help, and
   completion are routed through a hidden shadow buffer, so pyright/
   basedpyright/ruff work in the notebook view without configuration. A
@@ -210,6 +211,18 @@ All buffer-local to the notebook view.
 | `<leader>m.`      | Re-edit the last-edited widget, wherever it lives                                                                                                   |
 | `<leader>mP`      | Pin / unpin the focused widget                                                                                                                      |
 | `<leader>mp`      | Panel of pinned widgets across the notebook                                                                                                         |
+
+> **Cross-editor widget sync is one-directional.** When you change a widget in
+> the **browser**, neo-marimo moves its matching control to the new value. When
+> you change a widget in **neo-marimo**, the value and every dependent cell
+> still update everywhere (including the browser) — but the browser's own
+> widget control stays where it was. This is a marimo limitation, not a
+> neo-marimo bug: on a value change marimo reruns the dependent cells and
+> broadcasts the new value (`variable-values`), but it never re-renders the
+> widget's own cell, and its web frontend doesn't reposition a control from
+> another session's change. So the *data* stays in sync both ways; only the
+> *other* editor's widget glyph doesn't move. Re-running the widget's cell (or
+> reloading the browser tab) snaps it back to the current value.
 
 ### Data & LSP
 
