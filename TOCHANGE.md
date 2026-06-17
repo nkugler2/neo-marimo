@@ -130,6 +130,21 @@ A diagnostic note for next time: when output silently stops mid-notebook,
 check the ws_client stderr in `:messages` for `1009`/`MESSAGE_TOO_BIG` before
 chasing cell-id logic.
 
+**matplotlib figures intermittently render no output (FIXED 2026-06-17).**
+Symptom: figure cells finish `idle` with NO `output` field — the chart never
+appears in nvim (and not in the browser either, since marimo emitted nothing).
+Confirmed non-deterministic by running the user's actual file: identical
+fresh runs gave `3/3` figures one time and `EMPTY` the next. Cause: on macOS
+matplotlib defaults to the interactive `macosx` backend, which rasterises a
+figure to PNG unreliably when marimo's kernel renders it off the main thread
+in our spawned headless server (worse under nvim's process context — the user
+hit it every time). Fix: `server.lua` `M.start` now spawns marimo with
+`env = { MPLBACKEND = "Agg" }` unless the user already set `MPLBACKEND`. Agg is
+the correct backend for a headless figure-capturing server and makes rendering
+deterministic (validated 5/5). Independent of `plt.show()` — which is a
+separate marimo anti-pattern (returns None → no output; end cells with a bare
+`fig` / `plt.gca()` instead).
+
 ### Editing Issues
 
 `/Users/noahkugler/Desktop/Screenshot\ 2026-06-14\ at\ 11.19.14 PM.png`

@@ -332,6 +332,20 @@ function M.start(filepath, port, on_message)
   }
   M._servers[filepath] = srv
 
+  -- Force matplotlib's non-interactive Agg backend in the kernel unless the
+  -- user has explicitly chosen a backend. On macOS the default is the
+  -- interactive `macosx` backend, which rasterises a figure to PNG
+  -- unreliably when marimo's kernel renders it off the main thread in our
+  -- spawned headless server — the cell then finishes with NO image output
+  -- (intermittently), so the chart never appears in nvim or the browser.
+  -- Agg is the right backend for a headless figure-capturing server and makes
+  -- rendering deterministic. clear_env=false (the default) means this is
+  -- merged into the inherited environment, not a replacement.
+  local job_env = nil
+  if not vim.env.MPLBACKEND then
+    job_env = { MPLBACKEND = "Agg" }
+  end
+
   -- --no-token disables the browser-auth access_token entirely.
   -- --watch enables marimo's own file watcher; without it the server
   -- never broadcasts update-cell-codes when we save, and the browser
@@ -346,6 +360,7 @@ function M.start(filepath, port, on_message)
       filepath,
     },
     {
+      env = job_env,
       on_stdout = function(_, data)
         for _, line in ipairs(data) do
           -- Strip ANSI escapes first
