@@ -16,6 +16,14 @@ local M = {}
 -- Maximum output lines to show per cell before truncating.
 local MAX_LINES = 30
 
+-- Hard cap on the byte length of any single text payload / virt_line chunk we
+-- attempt to render. No inline cell display can use kilobytes of text on one
+-- line, and the word-wrapper (wrap_virt_line) is O(n²) in the chunk length —
+-- so a stray large string (a base64 image blob that missed the image path, a
+-- giant repr) would otherwise freeze the editor for minutes. 16 KiB is far
+-- more than the MAX_LINES cap can ever show; anything past it is truncated.
+local MAX_OUTPUT_BYTES = 16 * 1024
+
 -- Phase 8.2 / 8.5: image and widget output frequently arrives bigger than
 -- the inline cap (matplotlib figures are tall; DataFrames have many rows).
 -- Both have dedicated viewers (image.nvim handles plot rendering inline,
@@ -74,9 +82,20 @@ local function render_text_plain(data)
   if type(data) ~= "string" then
     data = tostring(data)
   end
+  local truncated = false
+  if #data > MAX_OUTPUT_BYTES then
+    data = data:sub(1, MAX_OUTPUT_BYTES)
+    -- Drop a dangling UTF-8 continuation tail left by the byte-wise cut so the
+    -- last visible character stays valid.
+    data = data:gsub("[\128-\191]*$", "")
+    truncated = true
+  end
   local lines = {}
   for line in (data .. "\n"):gmatch("([^\n]*)\n") do
     table.insert(lines, { { "  " .. line, "MarimoOutputText" } })
+  end
+  if truncated then
+    table.insert(lines, { { "  … [output truncated — too large to display inline]", "Comment" } })
   end
   return lines
 end
@@ -325,6 +344,19 @@ end
 -- Returns a list of virt_lines. Exposed as M._wrap_virt_line for tests.
 local function wrap_virt_line(chunks, width)
   width = math.max(width, 12)
+
+  -- Backstop: truncate any single chunk longer than the output cap before the
+  -- char-by-char wrap below. The wrap is O(n²) in chunk length, so without
+  -- this a stray huge chunk (a base64 blob that bypassed render_text_plain's
+  -- own cap, e.g. via the strip-tags HTML fallback) would freeze the editor.
+  -- The slack past MAX_OUTPUT_BYTES keeps an already-capped text line (which
+  -- carries a 2-space prefix) from re-triggering and double-marking.
+  for i, ch in ipairs(chunks) do
+    if type(ch[1]) == "string" and #ch[1] > MAX_OUTPUT_BYTES + 256 then
+      chunks[i] = { vim.fn.strcharpart(ch[1], 0, MAX_OUTPUT_BYTES) .. " …", ch[2] }
+    end
+  end
+
   local total = 0
   for _, ch in ipairs(chunks) do
     total = total + vim.fn.strdisplaywidth(ch[1])

@@ -79,3 +79,21 @@ t.case("wrap: pathological narrow width still terminates", function()
     t.ok(w <= 12, "respects the clamped minimum width")
   end
 end)
+
+-- Regression: a huge single chunk (a base64 image blob that missed the image
+-- path) must NOT drive the O(n²) wrap into a multi-minute freeze. It's
+-- truncated up front so the wrap stays fast and bounded.
+t.case("wrap: a megabyte-long chunk is truncated, not wrapped forever", function()
+  local line = { { string.rep("A", 1500000), "MarimoOutputText" } }  -- ~1.5 MB
+  local t0 = vim.uv.hrtime()
+  local got = wrap(line, 80)
+  local ms = (vim.uv.hrtime() - t0) / 1e6
+  t.ok(ms < 1000, "wrap completed quickly (" .. math.floor(ms) .. " ms), not frozen")
+  -- The truncation marker survives into the wrapped output.
+  local flat = t.flat_lines(got)
+  t.match(table.concat(flat, "\n"), "…", "truncation ellipsis present")
+  -- And the total kept content is bounded well under the original.
+  local total = 0
+  for _, l in ipairs(flat) do total = total + #l end
+  t.ok(total < 64 * 1024, "kept content bounded (" .. total .. " bytes)")
+end)

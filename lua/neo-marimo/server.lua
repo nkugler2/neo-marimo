@@ -42,6 +42,23 @@ local ws_client_path = utils.plugin_root() .. "/python/ws_client.py"
 
 -- ── helpers ────────────────────────────────────────────────────────────────
 
+-- Stitch Neovim's chunked stdout back into complete lines. `data` is a
+-- jobstart `on_stdout` chunk: a list of strings split on "\n" where data[1]
+-- continues the previous chunk's trailing partial line and data[#data] is
+-- itself partial until a later chunk completes it (:help channel-lines).
+-- `buf` is the carried-over partial line; `emit(line)` is called once per
+-- COMPLETE line. Returns the new partial-line buffer for the next chunk.
+-- Without this, a multi-megabyte cell-op (a matplotlib PNG) that spans
+-- several chunks is decoded fragment-by-fragment and silently dropped.
+function M._reassemble_stdout(buf, data, emit)
+  buf = buf .. data[1]
+  for i = 2, #data do
+    emit(buf)
+    buf = data[i]
+  end
+  return buf
+end
+
 local function api_url(srv, path)
   return "http://127.0.0.1:" .. tostring(srv.port) .. path
 end
@@ -461,30 +478,44 @@ function M.connect_ws(filepath, on_message, opts)
   }
   if kiosk then table.insert(ws_args, "--kiosk") end
 
+  -- Decode one complete JSON line from ws_client.py and dispatch it.
+  local function dispatch_line(line)
+    if line == "" then return end
+    local msg, err = utils.json_decode(line)
+    if err or not msg then return end
+    -- Mark the WS as live the moment we see our own neo_marimo_connected
+    -- sentinel. start_and_open waits on this flag before opening the browser,
+    -- otherwise the browser races our ws_client.py for the single allowed
+    -- EDIT-mode connection and our session never gets created (HTTP 500
+    -- "Invalid session id").
+    if msg.op == "neo_marimo_connected" then
+      local current_srv = M._servers[filepath]
+      if current_srv then current_srv.ws_connected = true end
+    end
+    vim.schedule(function()
+      local current_srv = M._servers[filepath]
+      if current_srv and current_srv.on_message then
+        current_srv.on_message(msg)
+      end
+    end)
+  end
+
+  -- marimo streams cell outputs as newline-delimited JSON on ws_client.py's
+  -- stdout, and Neovim delivers stdout in chunks split on "\n" where the
+  -- FIRST element of each `data` list continues the previous chunk's trailing
+  -- partial line and the LAST element is itself partial until a later chunk
+  -- completes it (see :help channel-lines). A rich cell-op — a matplotlib
+  -- PNG, a large DataFrame — is a single multi-megabyte JSON line that spans
+  -- many chunks, so we MUST stitch the fragments back together before
+  -- decoding. The old code decoded each raw `data` element directly, so every
+  -- fragment of a large output failed json.decode and was silently dropped:
+  -- figures/images never rendered in nvim while small single-chunk outputs
+  -- (text, sliders, markdown) did — independent of main vs. kiosk role.
+  -- `stdout_buf` is a closure upvalue so each (re)connect gets a fresh one.
+  local stdout_buf = ""
   local ws_job_id = vim.fn.jobstart(ws_args, {
     on_stdout = function(_, data)
-      for _, line in ipairs(data) do
-        if line ~= "" then
-          local msg, err = utils.json_decode(line)
-          if not err and msg then
-            -- Mark the WS as live the moment we see our own
-            -- neo_marimo_connected sentinel. start_and_open waits on this
-            -- flag before opening the browser, otherwise the browser races
-            -- our ws_client.py for the single allowed EDIT-mode connection
-            -- and our session never gets created (HTTP 500 "Invalid session id").
-            if msg.op == "neo_marimo_connected" then
-              local current_srv = M._servers[filepath]
-              if current_srv then current_srv.ws_connected = true end
-            end
-            vim.schedule(function()
-              local current_srv = M._servers[filepath]
-              if current_srv and current_srv.on_message then
-                current_srv.on_message(msg)
-              end
-            end)
-          end
-        end
-      end
+      stdout_buf = M._reassemble_stdout(stdout_buf, data, dispatch_line)
     end,
     on_stderr = function(_, data)
       for _, line in ipairs(data) do

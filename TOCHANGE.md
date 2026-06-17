@@ -130,20 +130,42 @@ A diagnostic note for next time: when output silently stops mid-notebook,
 check the ws_client stderr in `:messages` for `1009`/`MESSAGE_TOO_BIG` before
 chasing cell-id logic.
 
-**matplotlib figures intermittently render no output (FIXED 2026-06-17).**
-Symptom: figure cells finish `idle` with NO `output` field — the chart never
-appears in nvim (and not in the browser either, since marimo emitted nothing).
-Confirmed non-deterministic by running the user's actual file: identical
-fresh runs gave `3/3` figures one time and `EMPTY` the next. Cause: on macOS
-matplotlib defaults to the interactive `macosx` backend, which rasterises a
-figure to PNG unreliably when marimo's kernel renders it off the main thread
-in our spawned headless server (worse under nvim's process context — the user
-hit it every time). Fix: `server.lua` `M.start` now spawns marimo with
-`env = { MPLBACKEND = "Agg" }` unless the user already set `MPLBACKEND`. Agg is
-the correct backend for a headless figure-capturing server and makes rendering
-deterministic (validated 5/5). Independent of `plt.show()` — which is a
-separate marimo anti-pattern (returns None → no output; end cells with a bare
-`fig` / `plt.gca()` instead).
+**Images/figures never render in nvim — ROOT CAUSE: large stdout lines were
+split across chunks and dropped (FIXED 2026-06-17).** Symptom: matplotlib
+charts (and any large output) never appeared in nvim — as kiosk *or* as the
+main consumer (`<leader>ms`) — while the browser always showed them and small
+outputs (text, sliders, markdown) rendered fine in nvim too. The user's logs
+showed figure cells arriving with NO `output` field while later non-figure
+cells had outputs, so the socket was alive — the big frame was simply missing.
+
+Real root cause: `ws_client.py` writes each WS message as one newline-
+terminated JSON line on stdout, and `server.lua`'s `connect_ws` `on_stdout`
+handler decoded **each element of the jobstart `data` chunk as a complete
+line**. But Neovim splits stdout on "\n" into chunks where the first element
+continues the previous chunk's partial line and the last element is itself
+partial (`:help channel-lines`). A rich cell-op — a matplotlib PNG is a single
+multi-megabyte JSON line — spans many chunks, so every fragment failed
+`json.decode` and was silently dropped (no `else`). Small outputs fit in one
+chunk and survived. The browser uses a native WebSocket with no stdio bridge,
+so it was never affected. This is also why "images worked when I added snacks"
+— those early test images were small enough to fit a single pipe read.
+
+- [x] **THE FIX** — `connect_ws` now reassembles partial lines across chunks
+      via `M._reassemble_stdout` (carries the trailing partial in a per-job
+      closure buffer, dispatches only newline-terminated lines). Proven with a
+      deterministic headless-nvim probe: a 2 MB line arrives as 18 chunk
+      fragments — old handler decoded 1/2 messages, new handler 2/2. Regression
+      tests in `tests/spec/server_spec.lua`.
+- [x] **Headless hardening (NOT the image fix)** — `server.lua` `M.start`
+      spawns marimo with `env = { MPLBACKEND = "Agg" }` unless the user already
+      set `MPLBACKEND`. Agg is the right backend for a headless figure-capturing
+      server and stops a `plt.show()` cell from trying to open a macOS GUI
+      window from the server subprocess. An earlier note claimed Agg made
+      figures "render deterministically" — that was a degraded test harness,
+      not reality; the stdout fix above is what actually fixes images.
+
+Note on `plt.show()`: it returns None → no output, so it's a marimo
+anti-pattern regardless — end figure cells with a bare `fig` / `plt.gca()`.
 
 ### Editing Issues
 

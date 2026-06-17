@@ -55,3 +55,60 @@ t.case("server: <leader>mo when the browser already holds main just reopens the 
     t.eq(calls.open, 1, "reopened the browser tab")
   end)
 end)
+
+-- Regression: a large cell-op (a matplotlib PNG) is one multi-megabyte JSON
+-- line that Neovim's jobstart splits across several on_stdout chunks. The
+-- handler MUST reassemble partial lines before decoding, or every fragment of
+-- the big output fails json.decode and is silently dropped — which is why
+-- figures/images never rendered while small single-chunk outputs did.
+
+-- Drive M._reassemble_stdout with a sequence of chunks and collect the
+-- complete lines it emits.
+local function feed_chunks(chunks)
+  local emitted = {}
+  local buf = ""
+  for _, data in ipairs(chunks) do
+    buf = server._reassemble_stdout(buf, data, function(line)
+      table.insert(emitted, line)
+    end)
+  end
+  return emitted, buf
+end
+
+t.case("server: reassembles a line split across chunks", function()
+  -- "abc\ndef" trickling in. jobstart leaves a trailing "" as the partial
+  -- right after a newline; the next chunk's first element continues the new
+  -- (so far empty) line — there is no extra leading "".
+  local emitted, tail = feed_chunks({
+    { "ab" },          -- partial: "ab"
+    { "c", "" },       -- "abc" completed by the newline, new partial ""
+    { "de" },          -- continues the fresh line: "de"
+    { "f" },           -- partial: "def"
+  })
+  t.eq(emitted, { "abc" }, "only the newline-terminated line is emitted")
+  t.eq(tail, "def", "the unterminated remainder is carried in the buffer")
+end)
+
+t.case("server: large JSON line spanning many chunks decodes once whole", function()
+  local payload = string.rep("x", 500000)
+  local msg = vim.json.encode({ op = "cell-op", data = payload })
+  -- Simulate the kernel of the bug: the single JSON line arrives in 1 KB
+  -- slices (as a pipe would deliver a multi-MB line), newline only at the end.
+  local chunks = {}
+  for i = 1, #msg, 1024 do
+    table.insert(chunks, { msg:sub(i, i + 1023) })
+  end
+  table.insert(chunks, { "", "" })  -- final newline: completes the line
+
+  local emitted = feed_chunks(chunks)
+  t.eq(#emitted, 1, "the fragmented line is stitched into exactly one message")
+  local decoded = vim.json.decode(emitted[1])
+  t.eq(decoded.op, "cell-op")
+  t.eq(#decoded.data, 500000, "the full payload survived reassembly")
+end)
+
+t.case("server: multiple complete lines in one chunk all emit", function()
+  local emitted = feed_chunks({ { "one", "two", "three" } })
+  -- "one\ntwo\n" complete; "three" is the trailing partial.
+  t.eq(emitted, { "one", "two" })
+end)
