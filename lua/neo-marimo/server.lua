@@ -808,6 +808,30 @@ function M.start_headless(nb, on_message)
   end)
 end
 
+-- Hand the single EDIT-mode WS slot to the browser: release ours, open the
+-- tab, then reconnect as a kiosk once the browser has grabbed main. Marimo's
+-- EDIT mode allows exactly one *main* consumer per file — if nvim keeps the
+-- slot the browser loads "Network already connected" and never becomes
+-- usable. Kiosks are unlimited and get the same cell-op/kernel-ready firehose,
+-- so after the hand-off output still lands in nvim and the browser at once.
+-- The 1200ms delay lets the browser win the slot before our kiosk reconnect;
+-- without it we beat it back to /ws, end up main again, and it still collides.
+-- Shared by the fresh-start flow and start_and_open's "already running, nvim
+-- holds main" branch so both behave identically.
+local function hand_off_to_browser(filepath)
+  local share = config.options.server.share_with_browser ~= false
+  if share then M.release_ws(filepath) end
+  M.open_browser(filepath)
+  if share then
+    vim.defer_fn(function()
+      local current_srv = M._servers[filepath]
+      if not current_srv then return end
+      if current_srv.ws_connected then return end  -- user reclaimed already
+      M.connect_ws(filepath, current_srv.on_message, { kiosk = true })
+    end, 1200)
+  end
+end
+
 -- Full start-and-open flow: the startup chain above, then instantiate the
 -- kernel, hand the main WS slot to the browser, and reconnect as kiosk.
 function M.start_and_open(nb, on_message)
@@ -815,7 +839,18 @@ function M.start_and_open(nb, on_message)
   local port = config.options.server.port or 2718
 
   if M.is_running(filepath) then
-    M.open_browser(filepath)
+    -- Already running. If neovim currently holds the main slot — i.e. the
+    -- server was started nvim-only via start_headless, so we never handed off
+    -- (browser_active is false) — opening a browser tab alone collides on the
+    -- single main slot and the browser sits on "already connected". Do the
+    -- full hand-off in that case so <leader>ms then <leader>mo works. If we
+    -- already gave the slot to a browser, just (re)open the tab.
+    local srv = M._servers[filepath]
+    if srv and not srv.browser_active then
+      hand_off_to_browser(filepath)
+    else
+      M.open_browser(filepath)
+    end
     return
   end
 
@@ -828,31 +863,7 @@ function M.start_and_open(nb, on_message)
     end
 
     M.instantiate(filepath)
-
-    -- Marimo's EDIT mode allows exactly one *main* WS consumer per file.
-    -- If we hold the slot when the browser opens, the browser sees
-    -- "Network already connected" and never becomes usable. Release
-    -- ours, let the browser become main, then reconnect ourselves as
-    -- a kiosk consumer — kiosks are unlimited and receive the same
-    -- cell-op / kernel-ready firehose as main, so cell outputs land
-    -- in nvim and the browser simultaneously.
-    if config.options.server.share_with_browser ~= false then
-      M.release_ws(filepath)
-    end
-    M.open_browser(filepath)
-
-    -- Schedule the kiosk reconnect after the browser has had a moment to
-    -- grab the main slot. Without this delay we'd often beat the browser
-    -- back to the WS endpoint, end up as main again, and the browser
-    -- would still hit "already connected" on its retry.
-    if config.options.server.share_with_browser ~= false then
-      vim.defer_fn(function()
-        local current_srv = M._servers[filepath]
-        if not current_srv then return end
-        if current_srv.ws_connected then return end  -- user reclaimed already
-        M.connect_ws(filepath, current_srv.on_message, { kiosk = true })
-      end, 1200)
-    end
+    hand_off_to_browser(filepath)
   end)
 end
 

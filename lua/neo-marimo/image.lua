@@ -19,6 +19,8 @@
 
 local M = {}
 
+local log = require("neo-marimo.log")
+
 -- ── temp-file plumbing ────────────────────────────────────────────────────
 
 local function image_dir()
@@ -200,6 +202,9 @@ local function render_path(bufnr, row, mime, path, key)
   M.clear_for_cell(bufnr, key)
 
   local backend = pick_backend()
+  if log.enabled() then
+    log.write("img:render_path", { backend = backend, mime = mime, key = key })
+  end
 
   if backend == "image.nvim" then
     local ok, image = pcall(require, "image")
@@ -210,6 +215,9 @@ local function render_path(bufnr, row, mime, path, key)
         x = 2,
         y = row + 1,
       })
+      if log.enabled() then
+        log.write("img:image.nvim", { ok_create = ok_create, has_img = img ~= nil })
+      end
       if ok_create and img then
         pcall(function() img:render() end)
         register_placement(bufnr, key, path, function()
@@ -234,6 +242,13 @@ local function render_path(bufnr, row, mime, path, key)
         pos = { row + 1, 0 },
         inline = true,
       })
+      if log.enabled() then
+        log.write("img:snacks", {
+          ok_create = ok_create,
+          placement_nil = placement == nil,
+          err = (not ok_create) and tostring(placement) or nil,
+        })
+      end
       if ok_create and placement ~= nil then
         register_placement(bufnr, key, path, function() placement:close() end)
         return {}
@@ -246,6 +261,7 @@ local function render_path(bufnr, row, mime, path, key)
   end
 
   -- Fallback: announce the file so the user can open it externally.
+  if log.enabled() then log.write("img:fallback", { backend = backend, path = path }) end
   local short = vim.fn.fnamemodify(path, ":~")
   return {
     { { "  [image — ", "Comment" }, { mime, "MarimoWidgetLabel" }, { "]", "Comment" } },
