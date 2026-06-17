@@ -9,6 +9,7 @@ local widgets = require("neo-marimo.widgets")
 local dataframe = require("neo-marimo.dataframe")
 local server = require("neo-marimo.server")
 local tree_render = require("neo-marimo.tree_render")
+local log = require("neo-marimo.log")
 
 local M = {}
 
@@ -560,21 +561,45 @@ function M.handle_cell_op(bufnr, nb, msg)
 
   -- Find the cell by its server-assigned ID (nb.cell_by_id) or by scanning
   local cell = nb.cell_by_id[cell_id]
+  if log.enabled() then
+    log.write("cell-op", {
+      cell_id = cell_id,
+      known = cell ~= nil,
+      status = msg.status,
+      out_mime = msg.output and msg.output.mimetype,
+    })
+  end
   if not cell then
-    -- Unknown cell IDs almost always mean our ID mapping is out of sync with
-    -- the server's (kernel-ready didn't re-key, or marimo registered cells
-    -- under different IDs at /run time). Warn once per ID so the user can
-    -- see what's happening instead of just watching "queued" forever.
+    -- Unknown cell ID means our ID mapping diverged from the kernel's (a
+    -- reload re-keyed cells and one didn't reconcile). The cell-op we just
+    -- got — the output, or the idle status that clears a stuck "queued" —
+    -- would otherwise be dropped. Self-heal by reconnecting our kiosk WS:
+    -- marimo replays kernel-ready (re-keys the map by code) and re-emits the
+    -- existing outputs, so this op comes back under an id we now know.
+    -- Warn once per id; debounce the resync so a burst triggers one, not many.
     nb._unknown_cell_ids = nb._unknown_cell_ids or {}
     if not nb._unknown_cell_ids[cell_id] then
       nb._unknown_cell_ids[cell_id] = true
       local known = {}
       for id, _ in pairs(nb.cell_by_id) do table.insert(known, id) end
+      if log.enabled() then
+        log.write("cell-op:DROP", { cell_id = cell_id, known_ids = known })
+      end
       vim.notify(
         "[neo-marimo] cell-op for unknown cell '" .. cell_id
-          .. "'. Known: " .. table.concat(known, ", "),
+          .. "' — resyncing. Known: " .. table.concat(known, ", "),
         vim.log.levels.WARN
       )
+    end
+    local now = vim.uv.hrtime() / 1e6
+    if nb.filepath and (not nb._resync_at or (now - nb._resync_at) > 3000) then
+      nb._resync_at = now
+      vim.schedule(function()
+        local dispatched = server.resync_ws(nb.filepath)
+        if log.enabled() then
+          log.write("resync", { dispatched = dispatched, filepath = nb.filepath })
+        end
+      end)
     end
     return
   end

@@ -546,6 +546,37 @@ function M.release_ws(filepath)
   return true
 end
 
+-- Resync our kiosk WebSocket: drop the current connection and reconnect as
+-- a kiosk consumer. marimo replays the session on a fresh kiosk connect — it
+-- re-emits kernel-ready (whose handler re-keys our cell ids by code) and the
+-- existing cell outputs — without re-running anything. output.handle_cell_op
+-- calls this to self-heal when a cell-op arrives for a cell id our map no
+-- longer knows. Returns true if a reconnect was dispatched.
+function M.resync_ws(filepath)
+  local srv = M._servers[filepath]
+  if not srv or not srv.on_message then return false end
+  -- Reconnect in whatever role we currently hold. A reconnect is the reliable
+  -- self-heal: marimo replays kernel-ready (with codes, so our handler re-keys
+  -- cell ids by content) and re-emits every cell's output, so a cell-op that
+  -- arrived for an id our map had lost comes back under an id we now know.
+  --
+  -- This MUST run even when the browser holds the main slot (browser_active):
+  -- that shared-editing case is *exactly* when our kiosk cell-id map drifts and
+  -- needs healing — the previous `if srv.browser_active then return false end`
+  -- early-return disabled recovery in the one case it mattered most, so the
+  -- chart (and everything after the desynced cell) silently stopped rendering.
+  -- A kiosk reconnect alongside the browser is safe (marimo allows unlimited
+  -- kiosks) and never disturbs the browser's main connection; we force kiosk
+  -- whenever the browser is active so a stray main reconnect can't kick it off.
+  local kiosk = (srv.ws_kiosk == true) or (srv.browser_active == true)
+  if srv.ws_job_id then
+    pcall(vim.fn.jobstop, srv.ws_job_id)
+    srv.ws_job_id = nil
+  end
+  srv.ws_connected = false
+  return M.connect_ws(filepath, srv.on_message, { kiosk = kiosk })
+end
+
 -- Reclaim the WebSocket connection. By default this connects as a kiosk
 -- consumer (the safe choice — works whether or not the browser is still
 -- holding the main slot, and won't kick the browser off). Pass
@@ -732,6 +763,48 @@ local function start_and_connect(filepath, port, on_message, cb)
         cb(srv, connected)
       end)
     end)
+  end)
+end
+
+-- Start the server (if needed) and connect nvim as the sole *main* consumer
+-- without ever opening a browser — "nvim-only" mode. nvim owns the single
+-- EDIT-mode slot, so it receives kernel-ready (with codes) and the full
+-- cell-op stream directly, and runs cells over HTTP against its own session.
+-- No browser handoff means no kiosk re-key churn, which makes this the most
+-- robust mode: use it whenever you want marimo entirely inside neovim. The
+-- shared flow (start_and_open) is the one that also drives/observes from the
+-- marimo web editor.
+function M.start_headless(nb, on_message)
+  local filepath = nb.filepath
+  local port = config.options.server.port or 2718
+
+  if M.is_running(filepath) then
+    local srv = M._servers[filepath]
+    if srv and not srv.ws_connected then
+      -- Server is up but our WS isn't (e.g. we'd handed it to a browser).
+      -- Take the main slot back rather than spawning a second server.
+      M.reclaim_ws(filepath, { as_main = true })
+    else
+      vim.notify("[neo-marimo] Server already running for this notebook.", vim.log.levels.INFO)
+    end
+    return
+  end
+
+  vim.notify("[neo-marimo] Starting marimo server (nvim-only)...", vim.log.levels.INFO)
+
+  start_and_connect(filepath, port, on_message, function(srv, connected)
+    if not srv then return end
+    if not connected then
+      utils.warn("WebSocket didn't connect within 5s — try :MarimoReclaim.")
+    end
+    -- Instantiate so the kernel registers and runs the cells; output streams
+    -- back over our main WS and renders inline. We never release the slot, so
+    -- no browser tab is ever opened.
+    M.instantiate(filepath)
+    vim.notify(
+      "[neo-marimo] Connected (nvim-only). Run cells with the run keymaps.",
+      vim.log.levels.INFO
+    )
   end)
 end
 

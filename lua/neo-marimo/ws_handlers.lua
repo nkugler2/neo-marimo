@@ -17,6 +17,7 @@
 
 local output = require("neo-marimo.output")
 local utils = require("neo-marimo.utils")
+local log = require("neo-marimo.log")
 
 local M = {}
 
@@ -65,21 +66,91 @@ M.register("cell-op", function(payload, ctx)
   end
 end)
 
--- Walk the cells by position and re-key them to whatever cell_ids the
--- server is announcing. Used by both kernel-ready (initial sync) and
--- update-cell-ids (every reload). When the cell counts mismatch we
--- bail — that means the file has structurally diverged and the
--- file-watcher path will fix things up via apply_remote_changes.
-local function rekey_cells_from_server(nb, cell_ids)
-  if type(cell_ids) ~= "table" then return end
-  if #cell_ids ~= #nb.cells then return end
+-- Rebuild nb.cell_by_id from the current nb.cells ids. The only
+-- collision-safe way to re-key: assigning ids cell-by-cell while also
+-- mutating cell_by_id can null an entry we just set when one cell's new id
+-- equals another cell's old id (the latent bug in the old positional walk).
+local function rebuild_index(nb)
+  nb.cell_by_id = {}
+  for _, c in ipairs(nb.cells) do nb.cell_by_id[c.id] = c end
+end
+
+-- Positional re-key: assign the i-th server id to the i-th nvim cell, then
+-- rebuild the index in one pass. Caller guarantees counts line up.
+local function rekey_by_position(nb, cell_ids)
   for i, srv_id in ipairs(cell_ids) do
-    local cell = nb.cells[i]
-    if cell and srv_id ~= cell.id then
-      nb.cell_by_id[cell.id] = nil
-      cell.id = srv_id
-      nb.cell_by_id[srv_id] = cell
+    if nb.cells[i] then nb.cells[i].id = srv_id end
+  end
+  rebuild_index(nb)
+end
+
+-- Content-based re-key: pair each server (id, code) with the nvim cell that
+-- has identical code, consuming each nvim cell at most once so two cells
+-- with the same source (e.g. duplicate mo.ui.slider cells) still map 1:1 in
+-- order. Returns true only if every server id found a distinct match — the
+-- caller falls back to positional/reload re-keying when it returns false.
+local function rekey_by_code(nb, cell_ids, codes)
+  if type(codes) ~= "table" or #cell_ids ~= #codes then return false end
+  local used, assign = {}, {}
+  for i, srv_id in ipairs(cell_ids) do
+    local want, match = codes[i], nil
+    for j, cell in ipairs(nb.cells) do
+      if not used[j] and (cell.code or "") == want then
+        match, used[j] = cell, true
+        break
+      end
     end
+    if not match then return false end
+    assign[match] = srv_id
+  end
+  for cell, srv_id in pairs(assign) do cell.id = srv_id end
+  rebuild_index(nb)
+  return true
+end
+
+-- Re-key nb.cells to the server's authoritative cell_ids. Preference order:
+--   1. Match by code when the server sends codes (kernel-ready, update-cell-
+--      codes) — robust to reorders and to a count that hasn't reconciled yet.
+--   2. Positional re-key when counts already line up.
+--   3. Ids-only with a count mismatch → rebuild nb.cells from disk (the same
+--      file marimo just parsed, so order/count align by construction) and
+--      then re-key positionally. This replaces the old "bail on mismatch",
+--      which left stale ids so the cell's later cell-ops landed on an unknown
+--      id and were dropped — the root of the cell-id desync bug.
+local function rekey_cells_from_server(nb, cell_ids, codes)
+  if type(cell_ids) ~= "table" then return end
+  if log.enabled() then
+    log.write("rekey:in", {
+      server_ids = cell_ids,
+      server_count = #cell_ids,
+      has_codes = type(codes) == "table",
+      nb_count = #nb.cells,
+      nb_ids = log.cell_ids(nb),
+    })
+  end
+  if codes and rekey_by_code(nb, cell_ids, codes) then
+    if log.enabled() then log.write("rekey:done", { via = "code", nb_ids = log.cell_ids(nb) }) end
+    return
+  end
+  if #cell_ids == #nb.cells then
+    rekey_by_position(nb, cell_ids)
+    if log.enabled() then log.write("rekey:done", { via = "position", nb_ids = log.cell_ids(nb) }) end
+    return
+  end
+  -- Ids-only with a count mismatch. Don't clobber unsaved edits mid-write;
+  -- the paired update-cell-codes (or a later broadcast) reconciles by code.
+  local sync = require("neo-marimo.sync")
+  if sync.is_writing(nb) then
+    if log.enabled() then log.write("rekey:skip", { reason = "writing" }) end
+    return
+  end
+  if sync.reload_from_file(nb) and #cell_ids == #nb.cells then
+    rekey_by_position(nb, cell_ids)
+    if log.enabled() then log.write("rekey:done", { via = "reload+position", nb_ids = log.cell_ids(nb) }) end
+  elseif log.enabled() then
+    log.write("rekey:fail", {
+      reason = "count_mismatch", server_count = #cell_ids, nb_count = #nb.cells,
+    })
   end
 end
 
@@ -89,7 +160,9 @@ M.register("kernel-ready", function(payload, ctx)
   -- replaces them on connection — we re-key cells so subsequent cell-op
   -- messages find their target.
   if not payload.cell_ids then return end
-  rekey_cells_from_server(ctx.nb, payload.cell_ids)
+  -- kernel-ready carries codes alongside cell_ids; matching by code re-keys
+  -- correctly even after the local order has drifted from the server's.
+  rekey_cells_from_server(ctx.nb, payload.cell_ids, payload.codes)
 end)
 
 -- update-cell-ids: marimo broadcasts the authoritative cell_id list
@@ -138,6 +211,14 @@ M.register("update-cell-codes", function(payload, ctx)
   if sync.is_writing(ctx.nb) then return end
   local codes = payload.codes
   if type(codes) ~= "table" then return end
+  -- Re-key before patching code. A reload that changed cell ids broadcasts
+  -- update-cell-ids (ids only) and update-cell-codes (ids + codes) together;
+  -- if the ids-only handler had to bail, matching by code here recovers the
+  -- mapping so later cell-ops don't land on unknown ids. By this point the
+  -- run path has already written our edits, so nb.cells holds these codes.
+  if payload.cell_ids then
+    rekey_cells_from_server(ctx.nb, payload.cell_ids, codes)
+  end
   if #codes ~= #ctx.nb.cells then
     -- Cell count mismatch — the WS payload doesn't carry names/options,
     -- so we can't safely synthesize new cells. Defer to the file

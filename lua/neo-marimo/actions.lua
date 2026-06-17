@@ -244,6 +244,13 @@ function M.open_in_browser(nb)
   server.start_and_open(nb, nb._on_ws_message)
 end
 
+-- Start the marimo server (if needed) and connect nvim as the main consumer
+-- without opening a browser — nvim-only mode. Mirror of open_in_browser for
+-- the no-browser workflow.
+function M.start_server(nb)
+  server.start_headless(nb, nb._on_ws_message)
+end
+
 local function require_server(nb)
   if not server.is_running(nb.filepath) then
     vim.notify("[neo-marimo] No server running. Press <leader>mo to start.", vim.log.levels.WARN)

@@ -108,6 +108,13 @@ function M.setup(bufnr, nb)
     end, o("Marimo: start server and open in browser"))
   end
 
+  -- Start server in nvim-only mode (no browser tab)
+  if km.start then
+    vim.keymap.set("n", km.start, function()
+      actions.start_server(nb)
+    end, o("Marimo: start server (nvim-only, no browser)"))
+  end
+
   -- Stop server
   if km.stop_server then
     vim.keymap.set("n", km.stop_server, function()

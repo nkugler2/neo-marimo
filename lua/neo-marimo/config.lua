@@ -4,10 +4,15 @@ M.defaults = {
   -- Path to Python interpreter that has marimo installed.
   -- Override if marimo is in a virtualenv:
   --   python_path = "/path/to/venv/bin/python"
-  python_path = "python3",
+  -- ### This was the original value before me changing it for updated marimo environment
+  -- python_path = "python3",
+
+  python_path = "/Users/noahkugler/.pyenv/versions/MarimoLatest/bin/python",
+  marimo_cmd  = "/Users/noahkugler/.pyenv/versions/MarimoLatest/bin/marimo",
 
   -- The marimo CLI command (for opening in browser)
-  marimo_cmd = "marimo",
+  -- ### This was the original value before me changing it for updated marimo environment
+  -- marimo_cmd = "marimo",
 
   -- Marimo server settings (Phase 2)
   server = {
@@ -58,6 +63,11 @@ M.defaults = {
     move_cell_down = "<leader>mJ",
     move_cell_up = "<leader>mK",
     open_in_browser = "<leader>mo",
+    -- Start the server in nvim-only mode: nvim holds the editor session and
+    -- renders all output inline, and NO browser tab is opened. Use this when
+    -- you want marimo entirely inside neovim; use open_in_browser (<leader>mo)
+    -- to also drive/observe from the marimo web editor.
+    start = "<leader>ms",
     stop_server = "<leader>mx",
     run_cell = "<leader>mr",
     run_all = "<leader>mR",

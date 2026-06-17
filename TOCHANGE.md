@@ -30,9 +30,18 @@ current roadmap) and flesh out the implementation steps there.
 
 **Cell below what visable on my screen** when I create a new cell, and that cell is below what is visable in my screen in neovim, I cant press j to go down to it nor can I use ]m to go to that next cell, i have to do something like `zz` to center my screen where my cursor is, the last cell that is visable, and then I can see and navigate to the last cell
 
+**Comments move things underneath them** when i use `gcc` to make a comment, the top line of the cell below goes above the output of the cell that I am commenting in. this is a weird behavior, I don't think im explaining it perfectly. I 1. run the cell, output is in the right place without any problem. 2. `gcc` the bottom line of a cell, and then the ouptput of the cell im in is in the next cell below the first line of that cell. I think this must relate to other problems I am having with behaviors of lines on the top/bottom of any given cell, that is something that I should look into.
+
 ### Cell ID desync
 
-This may have already been fixed, need to double check
+**RESOLVED (2026-06-16)** — fixed in `ws_handlers.lua` + `output.lua` + `server.lua`.
+Re-keying now matches cells by **code content** (kernel-ready / update-cell-codes)
+instead of by position; ids-only `update-cell-ids` with a count mismatch rebuilds
+from disk then re-keys instead of bailing; and an unknown-id cell-op now triggers a
+debounced **kiosk-WS resync** (marimo replays kernel-ready + outputs) instead of
+being dropped. Covered both marimo 0.19.x (update-cell-ids path) and 0.23.x (reload
+path). Tests in `tests/spec/ws_dispatch_spec.lua`. Original diagnosis kept below for
+reference.
 
 **Cell-id desync → a cell silently stops working ("queued" forever, widget writes no-op)**
 Hit this with two identical `mo.ui.slider` cells (`x`, `y`) in the week-one
@@ -63,18 +72,57 @@ from the same on-disk file — `:w` to persist `# id:` comments, close the nvim
 notebook (tear down the kiosk WS), stop the marimo server, restart and reopen.
 Fresh `kernel-ready` re-keys every cell by position and they match again.
 
-Proper fix (two parts):
+Proper fix (two parts) — both DONE 2026-06-16:
 
-1. `output.lua:handle_cell_op` — don't silently drop cell-ops for unknown ids;
-   buffer them and replay after `kernel-ready`/`update-cell-ids` rekeys.
-2. `rekey_cells_from_server` — don't hard-bail on a count mismatch; reconcile
-   what can be matched (and/or fall back to the "or by scanning" the comment
-   at `output.lua:561` already promises but never implements).
+1. [x] `output.lua:handle_cell_op` — no longer drops cell-ops for unknown ids;
+   warns once and triggers a debounced `server.resync_ws` (kiosk reconnect →
+   marimo replays kernel-ready, which re-keys by code, and re-emits outputs).
+2. [x] `rekey_cells_from_server` — no longer hard-bails on a count mismatch;
+   re-keys by code content when codes are available (kernel-ready /
+   update-cell-codes) and, for ids-only with a count mismatch, rebuilds
+   nb.cells from disk then re-keys positionally.
    Repro+diagnosis chat: Claude Code session `fc7c2961-2fc8-4909-83b2-6d95b761b2f7`
    (2026-06-15), transcript at
    `~/.claude/projects/-Users-noahkugler-Documents-code-learning-ml-marimo/fc7c2961-2fc8-4909-83b2-6d95b761b2f7.jsonl`
    — resume with `claude --resume fc7c2961-2fc8-4909-83b2-6d95b761b2f7`. To confirm
    on a fresh repro: enable WS logging and `grep "unknown cell" /tmp/neo-marimo-ws.log`.
+
+### Live sync / browser sharing
+
+**Dropped output + broken bidirectional sync in share-with-browser mode**
+(P0 + P1 done 2026-06-16; P2/P3 open). Symptom: with the browser open
+(`<leader>mo`), cell output stops rendering in neo-marimo from the first
+desynced cell onward — a matplotlib chart, and everything after it (incl. a
+later `print("hello")`) — even though the marimo web editor shows it all.
+Widget value changes also stopped propagating in both directions.
+
+Root cause: cell-ops arriving under cell-ids neo-marimo's map no longer knows
+were dropped (`output.handle_cell_op` early-return), and the self-heal —
+`server.resync_ws`, a kiosk reconnect that replays kernel-ready+codes and
+re-emits every cell-op (verified against marimo 0.23.9 with a headless probe:
+both main *and* kiosk `kernel-ready` carry `cell_ids` + `codes`, and kiosk
+replay re-emits one cell-op per cell) — was gated behind
+`if srv.browser_active then return false end`, i.e. disabled in exactly the
+shared-editing case it was meant to fix. Same machinery as **Cell ID desync**
+above (the resync churn there also widens this window). Separately,
+`/api/kernel/run` 500s with "Invalid session id" when nvim's kiosk (whose
+consumer id == our session id) is detached during a reconnect gap, because
+marimo's `get_session` only resolves our id via the consumer fallback while
+the kiosk is attached.
+
+- [x] P0 — `resync_ws` now runs regardless of `browser_active`, forcing kiosk
+      when the browser is active so it can't kick the browser's main slot
+      (`server.lua`).
+- [x] P1 — nvim-only mode: `server.start_headless` + `:MarimoStart` +
+      `<leader>ms` start the server and connect nvim as the sole main consumer
+      with no browser tab. Most robust mode — no kiosk handoff churn.
+- [ ] P2 — detect HTTP 500 "Invalid session id" in `server.http_post_raw`
+      (run + set_ui_element_value) and reclaim/resync + retry once.
+- [ ] P3 — confirm and fix the desync *root* (suspected: a reorder where
+      `rekey_by_code` fails all-or-nothing and the positional fallback then
+      mis-assigns). Use the new `:MarimoWsDebug` traces — `rekey:in`/`rekey:done`,
+      `cell-op` known/unknown, `cell-op:DROP`, `resync dispatched` — added in
+      `log.lua` + `output.lua` + `ws_handlers.lua` to see the divergence.
 
 ### Editing Issues
 
@@ -85,6 +133,10 @@ Proper fix (two parts):
 **`Shift O` on first line of cell** when I do `Shift O` to add a line above the only line in a cell, that line goes to the cell above. This doesn't just happen on shift O, this also happens when i try to press enter and move the one line in the cell down, same bug
 
 **External Editing warning** need more info on when this happens
+
+### other bugs
+
+**Queued cell but still can use** sometimes I make a cell with a variable, and then run it and it is only saying queued. However, I can still use that variable later in the notebook, so it is working
 
 ## Ideas / rough requests
 

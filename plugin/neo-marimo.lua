@@ -313,6 +313,18 @@ vim.api.nvim_create_user_command("MarimoWsDebug", function(opts)
   vim.notify("[neo-marimo] WS debug logging → " .. path, vim.log.levels.INFO)
 end, { nargs = "?", desc = "Toggle WebSocket message logging (path or 'off')" })
 
+-- Start the marimo server (if needed) and connect nvim as the main consumer
+-- without opening a browser — nvim-only mode (same as the <leader>ms keymap).
+vim.api.nvim_create_user_command("MarimoStart", function()
+  local marimo = require("neo-marimo")
+  local nb = marimo.current_notebook()
+  if not nb then
+    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    return
+  end
+  require("neo-marimo.actions").start_server(nb)
+end, { desc = "Start the marimo server in nvim-only mode (no browser)" })
+
 -- Same as the <leader>mo keymap: start the marimo server (if needed) and
 -- open the notebook in the browser.
 vim.api.nvim_create_user_command("MarimoEdit", function()

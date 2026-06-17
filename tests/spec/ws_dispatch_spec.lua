@@ -77,3 +77,64 @@ t.case("ws: reload skips resync during write-suppression window", function()
   t.ok(nb._last_cell_ids_at > 0, "reload still stamps _last_cell_ids_at while writing")
   t.eq(resynced, 0, "reload does not clobber the buffer during our own write")
 end)
+
+-- Cell-id desync fix: a reload can hand us the authoritative ids in a
+-- different order than our local cells. kernel-ready (and update-cell-codes)
+-- carry codes, so we re-key by content instead of by position — the old
+-- positional walk mis-mapped exactly the cells the user had edited/split.
+t.case("ws: kernel-ready re-keys by code when local order has drifted", function()
+  local nb = t.make_notebook({ "a = 1", "b = 2", "c = 3" })
+  ws.dispatch("kernel-ready", {
+    cell_ids = { "S2", "S1", "S3" },
+    codes = { "b = 2", "a = 1", "c = 3" },
+  }, { nb = nb })
+
+  t.eq(nb.cell_by_id["S1"].code, "a = 1", "S1 maps to the a=1 cell")
+  t.eq(nb.cell_by_id["S2"].code, "b = 2", "S2 maps to the b=2 cell")
+  t.eq(nb.cell_by_id["S3"].code, "c = 3", "S3 maps to the c=3 cell")
+end)
+
+-- Two cells with identical source (the repro: duplicate mo.ui.slider cells)
+-- must still map 1:1 — each nvim cell is consumed at most once.
+t.case("ws: kernel-ready maps duplicate-code cells one-to-one", function()
+  local nb = t.make_notebook({ "x = slider()", "x = slider()" })
+  ws.dispatch("kernel-ready", {
+    cell_ids = { "D1", "D2" },
+    codes = { "x = slider()", "x = slider()" },
+  }, { nb = nb })
+
+  t.ok(nb.cell_by_id["D1"], "D1 mapped to a cell")
+  t.ok(nb.cell_by_id["D2"], "D2 mapped to a cell")
+  t.ok(nb.cell_by_id["D1"] ~= nb.cell_by_id["D2"], "duplicate-code cells stay distinct")
+end)
+
+-- Ids-only broadcast (0.19's update-cell-ids) with a count mismatch used to
+-- bail and leave stale ids. Now it rebuilds nb.cells from disk so order/count
+-- align, then re-keys — except inside our own write-suppression window.
+t.case("ws: update-cell-ids reloads from disk on a count mismatch", function()
+  local sync = require("neo-marimo.sync")
+  local orig_is_writing, orig_reload = sync.is_writing, sync.reload_from_file
+  local reloaded = 0
+  sync.is_writing = function() return false end
+  sync.reload_from_file = function() reloaded = reloaded + 1; return true end
+
+  local nb = t.make_notebook({ "a = 1", "b = 2" })
+  ws.dispatch("update-cell-ids", { cell_ids = { "X1", "X2", "X3" } }, { nb = nb })
+
+  sync.is_writing, sync.reload_from_file = orig_is_writing, orig_reload
+  t.eq(reloaded, 1, "count mismatch with no codes triggers reload_from_file")
+end)
+
+t.case("ws: update-cell-ids skips the reload during our own write", function()
+  local sync = require("neo-marimo.sync")
+  local orig_is_writing, orig_reload = sync.is_writing, sync.reload_from_file
+  local reloaded = 0
+  sync.is_writing = function() return true end
+  sync.reload_from_file = function() reloaded = reloaded + 1; return true end
+
+  local nb = t.make_notebook({ "a = 1", "b = 2" })
+  ws.dispatch("update-cell-ids", { cell_ids = { "X1", "X2", "X3" } }, { nb = nb })
+
+  sync.is_writing, sync.reload_from_file = orig_is_writing, orig_reload
+  t.eq(reloaded, 0, "no reload while writing — would clobber unsaved edits")
+end)
