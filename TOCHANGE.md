@@ -89,40 +89,46 @@ Proper fix (two parts) — both DONE 2026-06-16:
 
 ### Live sync / browser sharing
 
-**Dropped output + broken bidirectional sync in share-with-browser mode**
-(P0 + P1 done 2026-06-16; P2/P3 open). Symptom: with the browser open
-(`<leader>mo`), cell output stops rendering in neo-marimo from the first
-desynced cell onward — a matplotlib chart, and everything after it (incl. a
-later `print("hello")`) — even though the marimo web editor shows it all.
-Widget value changes also stopped propagating in both directions.
+**Dropped output + broken sync — ROOT CAUSE: WS frame > 1 MiB killed the
+socket (FIXED 2026-06-17).** Symptom: cell output stops rendering in
+neo-marimo from the first big-output cell onward — a matplotlib chart, and
+everything after it (incl. a later `print("hello")`) — even though the marimo
+web editor shows it all; widget changes stopped syncing both ways; and
+`/api/kernel/run` 500s with "Invalid session id".
 
-Root cause: cell-ops arriving under cell-ids neo-marimo's map no longer knows
-were dropped (`output.handle_cell_op` early-return), and the self-heal —
-`server.resync_ws`, a kiosk reconnect that replays kernel-ready+codes and
-re-emits every cell-op (verified against marimo 0.23.9 with a headless probe:
-both main *and* kiosk `kernel-ready` carry `cell_ids` + `codes`, and kiosk
-replay re-emits one cell-op per cell) — was gated behind
-`if srv.browser_active then return false end`, i.e. disabled in exactly the
-shared-editing case it was meant to fix. Same machinery as **Cell ID desync**
-above (the resync churn there also widens this window). Separately,
-`/api/kernel/run` 500s with "Invalid session id" when nvim's kiosk (whose
-consumer id == our session id) is detached during a reconnect gap, because
-marimo's `get_session` only resolves our id via the consumer fallback while
-the kiosk is attached.
+Real root cause (found from a snacks.nvim log dump, not the desync theory
+below): `python/ws_client.py` called `websockets.connect()` with the library
+**default `max_size` of 1 MiB**. marimo streams cell outputs as WS frames, and
+one rich output (a matplotlib PNG, a large DataFrame's dataresource JSON, an
+inline `data:` URI) exceeds 1 MiB, so `websockets` closed the connection with
+**1009 MESSAGE_TOO_BIG**. That silently killed the WS mid-run: the oversized
+cell-op was dropped, every cell-op after it was lost, and the now-detached
+session made HTTP runs 500. The browser's native WebSocket has no such cap —
+hence it always worked there. Reproduced both ways with a headless probe:
+default → `1009 ... 1414068 bytes exceeds limit of 1048576`; `max_size=None` →
+a 1.87 MB cell-op delivered cleanly.
 
-- [x] P0 — `resync_ws` now runs regardless of `browser_active`, forcing kiosk
-      when the browser is active so it can't kick the browser's main slot
-      (`server.lua`).
+- [x] **THE FIX** — `ws_client.py` now passes `max_size=None` (unbounded,
+      matching the browser; kernel is local + trusted). Resolves the dropped
+      chart/`print`, the 500, and the broken widget sync in one shot.
 - [x] P1 — nvim-only mode: `server.start_headless` + `:MarimoStart` +
       `<leader>ms` start the server and connect nvim as the sole main consumer
       with no browser tab. Most robust mode — no kiosk handoff churn.
-- [ ] P2 — detect HTTP 500 "Invalid session id" in `server.http_post_raw`
-      (run + set_ui_element_value) and reclaim/resync + retry once.
-- [ ] P3 — confirm and fix the desync *root* (suspected: a reorder where
-      `rekey_by_code` fails all-or-nothing and the positional fallback then
-      mis-assigns). Use the new `:MarimoWsDebug` traces — `rekey:in`/`rekey:done`,
-      `cell-op` known/unknown, `cell-op:DROP`, `resync dispatched` — added in
-      `log.lua` + `output.lua` + `ws_handlers.lua` to see the divergence.
+- [x] P0 (kept as hardening, NOT the root cause) — `resync_ws` now runs
+      regardless of `browser_active`, forcing kiosk when the browser is active
+      so it can't kick the browser's main slot. Still correct for genuine
+      cell-id desyncs; just wasn't what bit here.
+- [ ] P2 (now likely moot) — the 500 "Invalid session id" was a *downstream*
+      symptom of the dead socket; with the frame no longer killing the WS the
+      session stays attached. Revisit a `http_post_raw` 500 reclaim+retry only
+      if 500s still appear.
+- [ ] P3 — only if real cell-id desync resurfaces: use the new `:MarimoWsDebug`
+      traces (`rekey:in`/`rekey:done`, `cell-op` known/unknown, `cell-op:DROP`,
+      `resync dispatched`) added in `log.lua` + `output.lua` + `ws_handlers.lua`.
+
+A diagnostic note for next time: when output silently stops mid-notebook,
+check the ws_client stderr in `:messages` for `1009`/`MESSAGE_TOO_BIG` before
+chasing cell-id logic.
 
 ### Editing Issues
 

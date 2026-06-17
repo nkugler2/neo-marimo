@@ -97,6 +97,18 @@ async def main(
             ping_interval=20,
             ping_timeout=10,
             open_timeout=10,
+            # No frame-size cap. marimo streams cell outputs as WebSocket
+            # frames, and a single rich output — a matplotlib PNG, a large
+            # DataFrame's dataresource JSON, an inline data: URI — routinely
+            # exceeds the `websockets` default max_size of 1 MiB. When it did,
+            # the library closed the connection with code 1009 MESSAGE_TOO_BIG,
+            # silently killing the WS mid-run: the oversized cell-op was
+            # dropped, every cell-op after it was lost, and the now-detached
+            # session made HTTP /api/kernel/run 500 with "Invalid session id".
+            # The browser's native WebSocket has no such limit — which is why
+            # output always rendered there but not in nvim. None = unbounded,
+            # matching the browser; the kernel is local and trusted.
+            max_size=None,
         ) as ws:
             emit({"op": "neo_marimo_connected", "session_id": session_id, "port": port})
 
