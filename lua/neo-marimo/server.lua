@@ -286,6 +286,20 @@ function M.fetch_virtual_file(filepath, vf_path, dest_path)
   -- absolute URL on this notebook's server.
   local rel = vf_path:gsub("^%./", "")
   if rel:sub(1, 1) ~= "/" then rel = "/" .. rel end
+
+  -- Reject path traversal. The reference comes from server-rendered output
+  -- (an <img src> in a cell's HTML); a hostile notebook could emit
+  -- <img src='./@file/../../etc/passwd'> and curl would normalise the `..`
+  -- before sending, pulling a path outside the @file namespace off the local
+  -- server. The bytes only ever come from marimo's own read-gated routes, but
+  -- refusing `..` outright is cheap defence in depth. See SECURITY.md.
+  for seg in rel:gmatch("[^/]+") do
+    if seg == ".." then
+      utils.warn("Refusing to fetch virtual file with '..' in its path: " .. vf_path)
+      return false
+    end
+  end
+
   local url = "http://127.0.0.1:" .. tostring(srv.port) .. rel
 
   local args = {
@@ -309,9 +323,29 @@ end
 function M.start(filepath, port, on_message)
   local start_port = port or config.options.server.port or 2718
   local marimo_cmd = config.options.marimo_cmd or "marimo"
+  local host = (config.options.server and config.options.server.host) or "127.0.0.1"
 
   if M.is_running(filepath) then
     return M._servers[filepath]
+  end
+
+  -- SECURITY: we spawn marimo with --no-token (no authentication) so the
+  -- browser can share the single EDIT-mode slot without a token dance. On a
+  -- loopback bind that's a local-only trust model; on a non-loopback bind it
+  -- publishes an UNAUTHENTICATED arbitrary-Python execution endpoint to the
+  -- network. Warn loudly so a non-loopback host is always a conscious choice.
+  -- See SECURITY.md.
+  local function is_loopback(h)
+    return h == "127.0.0.1" or h == "localhost" or h == "::1"
+      or h == "::ffff:127.0.0.1"
+  end
+  if not is_loopback(host) then
+    vim.notify(
+      "[neo-marimo] server.host = '" .. host .. "' is not loopback — the marimo "
+        .. "server runs WITHOUT authentication (--no-token), so this exposes "
+        .. "arbitrary Python execution to the network. See SECURITY.md.",
+      vim.log.levels.WARN
+    )
   end
 
   -- Pick a free port up front. Without this an orphan process on the
@@ -373,6 +407,7 @@ function M.start(filepath, port, on_message)
     {
       marimo_cmd, "edit",
       "--headless", "--no-token", "--watch",
+      "--host", host,
       "--port", tostring(actual_port),
       filepath,
     },

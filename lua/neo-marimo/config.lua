@@ -16,7 +16,18 @@ M.defaults = {
 
   -- Marimo server settings (Phase 2)
   server = {
-    host = "localhost",
+    -- Host the marimo server binds to, passed through as `marimo edit
+    -- --host`. Defaults to 127.0.0.1 (loopback only), which is also the
+    -- address every HTTP/WS call in this plugin connects to — keep them
+    -- in sync (e.g. don't set "localhost" if it resolves to ::1 on your
+    -- box, or the client's 127.0.0.1 calls won't reach the server).
+    --
+    -- SECURITY: the server is launched with `--no-token` (no
+    -- authentication), so binding to a non-loopback address ("0.0.0.0",
+    -- a LAN IP, …) publishes an UNAUTHENTICATED arbitrary-Python
+    -- execution endpoint to the network. neo-marimo warns when host is
+    -- not loopback. Read SECURITY.md before changing this.
+    host = "127.0.0.1",
     port = 2718,
     auto_start = true,
     -- Stop the marimo server when the notebook buffer is wiped (:bw).
