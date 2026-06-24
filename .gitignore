@@ -3,3 +3,8 @@ __pycache__/
 notebooks/
 
 invest-data/
+
+# Local agent / tooling artifacts — regenerable working state, not plugin code.
+# (understand-anything analysis cache + graph; Claude Code local settings.)
+.understand-anything/
+.claude/
