@@ -118,7 +118,7 @@ a 1.87 MB cell-op delivered cleanly.
       regardless of `browser_active`, forcing kiosk when the browser is active
       so it can't kick the browser's main slot. Still correct for genuine
       cell-id desyncs; just wasn't what bit here.
-- [ ] P2 (now likely moot) — the 500 "Invalid session id" was a *downstream*
+- [ ] P2 (now likely moot) — the 500 "Invalid session id" was a _downstream_
       symptom of the dead socket; with the frame no longer killing the WS the
       session stays attached. Revisit a `http_post_raw` 500 reclaim+retry only
       if 500s still appear.
@@ -132,7 +132,7 @@ chasing cell-id logic.
 
 **Images/figures never render in nvim — ROOT CAUSE: large stdout lines were
 split across chunks and dropped (FIXED 2026-06-17).** Symptom: matplotlib
-charts (and any large output) never appeared in nvim — as kiosk *or* as the
+charts (and any large output) never appeared in nvim — as kiosk _or_ as the
 main consumer (`<leader>ms`) — while the browser always showed them and small
 outputs (text, sliders, markdown) rendered fine in nvim too. The user's logs
 showed figure cells arriving with NO `output` field while later non-figure
@@ -174,7 +174,7 @@ images recompute, but nvim's slider thumb stays put; change it in nvim and the
 browser recomputes but its thumb stays put.
 
 Root cause (confirmed by capturing cross-consumer WS traffic): when any
-consumer sets a UI element value, marimo reruns the *dependent* cells and
+consumer sets a UI element value, marimo reruns the _dependent_ cells and
 broadcasts a `variable-values` op with the new value, but it NEVER
 re-broadcasts the widget's own cell-op. nvim handled neither `variables` nor
 `variable-values`, so it never learned the new value. The widget's displayed
@@ -194,7 +194,7 @@ remote change.
       the exact same `variable-values` broadcast and marimo's frontend doesn't
       reposition another session's widget from it either (it only re-renders a
       widget from the session's own interaction). The value and every
-      downstream cell still sync both ways; only the *other* editor's widget
+      downstream cell still sync both ways; only the _other_ editor's widget
       glyph stays put. Would need an upstream marimo change (or RTC).
 
 ### Editing Issues
