@@ -118,8 +118,17 @@ end
 --      then re-key positionally. This replaces the old "bail on mismatch",
 --      which left stale ids so the cell's later cell-ops landed on an unknown
 --      id and were dropped — the root of the cell-id desync bug.
+--
+-- Returns true iff nb.cell_by_id was actually reconciled to the server's
+-- ids, false when it bailed (still-writing skip, or a failed reload+count
+-- mismatch). Callers that gate on "ids are now safe to run against" (see
+-- update-cell-ids below) must check this — stamping unconditionally is the
+-- root of the "queued forever" bug: a bailed re-key leaves stale local ids,
+-- a run POSTs under them, and the eventual real re-key drops the mapping so
+-- the terminal cell-op lands on an unknown id and the queued status never
+-- clears.
 local function rekey_cells_from_server(nb, cell_ids, codes)
-  if type(cell_ids) ~= "table" then return end
+  if type(cell_ids) ~= "table" then return false end
   if log.enabled() then
     log.write("rekey:in", {
       server_ids = cell_ids,
@@ -131,28 +140,30 @@ local function rekey_cells_from_server(nb, cell_ids, codes)
   end
   if codes and rekey_by_code(nb, cell_ids, codes) then
     if log.enabled() then log.write("rekey:done", { via = "code", nb_ids = log.cell_ids(nb) }) end
-    return
+    return true
   end
   if #cell_ids == #nb.cells then
     rekey_by_position(nb, cell_ids)
     if log.enabled() then log.write("rekey:done", { via = "position", nb_ids = log.cell_ids(nb) }) end
-    return
+    return true
   end
   -- Ids-only with a count mismatch. Don't clobber unsaved edits mid-write;
   -- the paired update-cell-codes (or a later broadcast) reconciles by code.
   local sync = require("neo-marimo.sync")
   if sync.is_writing(nb) then
     if log.enabled() then log.write("rekey:skip", { reason = "writing" }) end
-    return
+    return false
   end
   if sync.reload_from_file(nb) and #cell_ids == #nb.cells then
     rekey_by_position(nb, cell_ids)
     if log.enabled() then log.write("rekey:done", { via = "reload+position", nb_ids = log.cell_ids(nb) }) end
+    return true
   elseif log.enabled() then
     log.write("rekey:fail", {
       reason = "count_mismatch", server_count = #cell_ids, nb_count = #nb.cells,
     })
   end
+  return false
 end
 
 M.register("kernel-ready", function(payload, ctx)
@@ -176,12 +187,18 @@ end)
 -- it knows about, and our shadow-registered cells aren't in its view.
 M.register("update-cell-ids", function(payload, ctx)
   if not ctx.nb then return end
-  rekey_cells_from_server(ctx.nb, payload.cell_ids)
-  -- Stamp the moment marimo's reload broadcast reached us. The run
-  -- path waits for this stamp to overtake nb._last_save_at so it
-  -- never POSTs /api/kernel/run with cell IDs that are about to be
-  -- replaced — see actions.flush_pending_edits.
-  ctx.nb._last_cell_ids_at = (vim.uv.hrtime() / 1e6)
+  local reconciled = rekey_cells_from_server(ctx.nb, payload.cell_ids)
+  -- Stamp the moment marimo's reload broadcast reached us — but only if
+  -- the re-key actually landed. actions.flush_pending_edits treats this
+  -- stamp as "ids are safe to run against"; a bailed re-key (mismatch
+  -- while writing, or a failed reload) leaves nb.cells keyed by stale
+  -- local ids, so stamping unconditionally let a run POST under an id
+  -- that a later, real re-key would drop — the terminal cell-op then
+  -- arrives under an unknown id and the optimistic "queued" status never
+  -- clears. See docs/plan-refinement.md F1.2.
+  if reconciled then
+    ctx.nb._last_cell_ids_at = (vim.uv.hrtime() / 1e6)
+  end
 end)
 
 M.register("neo_marimo_connected", function(_, _)

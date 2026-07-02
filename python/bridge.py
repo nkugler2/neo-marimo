@@ -26,24 +26,27 @@ def extract_cell_ids(content: str) -> list:
     cell ids parsed from `# id: XXXX` comments immediately preceding each
     `@app.cell` line. Cells without a preceding id comment get None and
     will be minted fresh on the Lua side.
+
+    F1.4: "immediately preceding" means the literal line right above
+    `@app.cell` — no blank-line tolerance. The previous implementation let
+    an id-comment binding survive across blank lines, so a user comment
+    that happened to match the `# id: XXXX` shape as the *last* line of
+    cell N's body (with no other code after it before N+1's decorator)
+    could get misattributed as cell N+1's id — silently overwriting a real
+    `cell_by_id` entry on collision. inject_cell_ids below always emits the
+    id comment directly adjacent to its `@app.cell` line with no blank
+    between, so tightening the match to "the immediately preceding line"
+    loses nothing for our own round-trip and closes the misattribution.
+    This mirrors the equally-tightened rule in sync.lua's
+    strip_id_comments so both sides agree on what "is" an id comment.
     """
+    lines = content.splitlines()
     ids = []
-    pending = None
-    for line in content.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue  # blank lines preserve the pending id binding
-        m = ID_COMMENT_RE.match(stripped)
-        if m:
-            pending = m.group(1)
-        elif stripped.startswith("@app.cell"):
-            ids.append(pending)
-            pending = None
-        else:
-            # Any other content breaks the id-comment → @app.cell binding,
-            # so a stray comment further up doesn't get glued onto the
-            # next cell down.
-            pending = None
+    for i, line in enumerate(lines):
+        if line.strip().startswith("@app.cell"):
+            prev = lines[i - 1].strip() if i > 0 else ""
+            m = ID_COMMENT_RE.match(prev)
+            ids.append(m.group(1) if m else None)
     return ids
 
 

@@ -112,3 +112,28 @@ t.case("server: multiple complete lines in one chunk all emit", function()
   -- "one\ntwo\n" complete; "three" is the trailing partial.
   t.eq(emitted, { "one", "two" })
 end)
+
+-- F1.3 regression: ws_client.py used to exit 0 on an abnormal WS close (the
+-- async-for over the socket raised ConnectionClosedError inside a task, and
+-- asyncio.wait() silently discarded the never-inspected exception). A dead
+-- WS looked exactly like a clean shutdown, so on_exit above never warned and
+-- an in-flight run stayed stuck at "queued". This drives the real
+-- ws_client.main() (not a Lua-side reimplementation of the fix) via a small
+-- standalone script — see tests/ws_client_smoke.py for why that's a plain
+-- script instead of a pytest harness (this is the first Python-side test in
+-- the repo). Requires a `websockets`-equipped python; self-skips otherwise.
+local py = vim.fn.expand(vim.env.NEO_MARIMO_TEST_PYTHON or "python3")
+local py_has_websockets = vim.fn.executable(py) == 1
+  and vim.system({ py, "-c", "import websockets" }):wait().code == 0
+
+if not py_has_websockets then
+  io.write("[server_spec] skipped ws_client smoke check: no websockets-equipped python"
+    .. " (set NEO_MARIMO_TEST_PYTHON)\n")
+else
+  t.case("server: ws_client.py exits nonzero and reports neo_marimo_error on abnormal WS close", function()
+    local script = t.root .. "/tests/ws_client_smoke.py"
+    local result = vim.system({ py, script }, { stdin = "" }):wait()
+    t.eq(result.code, 0, "smoke script assertions failed: " .. tostring(result.stderr))
+    t.match(result.stdout, "SMOKE_OK")
+  end)
+end

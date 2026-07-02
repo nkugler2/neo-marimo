@@ -43,6 +43,46 @@ function M.sync_cells_from_extmarks(bufnr, nb)
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
   local total_lines = vim.api.nvim_buf_line_count(bufnr)
 
+  -- Snapshot each cell's start_row as it stood coming into this sync, before
+  -- the anchor-read pass below overwrites it. Needed for the undo-trash push:
+  -- when several adjacent one-line cells are deleted in a single edit (e.g.
+  -- `V2jd`), their point-anchors don't get invalidated — they all collapse
+  -- onto the same post-delete row — so by the time we detect the collapse,
+  -- cell.start_row has already been clobbered to that shared row for every
+  -- cell in the run. Keyed by cell table identity since it must survive the
+  -- upcoming removals/sort/reindex untouched.
+  local orig_start_row = {}
+  for _, c in ipairs(nb.cells) do orig_start_row[c] = c.start_row end
+
+  -- All cells trashed by this sync call — whether by the dead-anchor sweep
+  -- right below or the collapsed-range sweep further down — stem from the
+  -- same buffer edit, so they share one batch id. try_undo_restore only
+  -- grows a contiguous "run" match within a single batch; this stops it
+  -- from gluing together two cells trashed by unrelated edits whose cached
+  -- rows happen to land adjacently (plan-refinement F1.1 finding #2).
+  local batch_id = notebook.next_undo_batch(nb)
+
+  -- Guard against a single edit invalidating every cell's anchor at once
+  -- (e.g. a `%d` or an equivalent whole-buffer replace). Without this, the
+  -- loop below would drop every dead cell in turn and leave nb.cells == {}
+  -- long before prune_phantoms ever runs — prune_phantoms' own last-survivor
+  -- guard (below in notebook.lua) only protects *its* sweep over whatever
+  -- cells are still standing when it runs, not this one. Pick the cell with
+  -- the most surviving code (as of the last successful sync, since a dead
+  -- anchor gives us no fresh row data to score with) as the designated
+  -- survivor and never drop it here, even if its anchor comes back dead —
+  -- mirrors prune_phantoms' survivor-selection approach one function down.
+  local survivor_id = nb.cells[1] and nb.cells[1].id
+  local survivor_score = nb.cells[1] and cell_mod.line_count(nb.cells[1]) or 0
+  for idx = 2, #nb.cells do
+    local c = nb.cells[idx]
+    local score = cell_mod.line_count(c)
+    if score > survivor_score then
+      survivor_score = score
+      survivor_id = c.id
+    end
+  end
+
   -- First pass: read start_row from each anchor. If an anchor came back
   -- empty (vim removed it because its row range was wiped by a
   -- nvim_buf_set_lines), the cell is dead — drop it from the list before
@@ -62,6 +102,14 @@ function M.sync_cells_from_extmarks(bufnr, nb)
         dead = true
       end
     end
+    if dead and cell.id == survivor_id then
+      -- Designated survivor: never drop it, even though its own anchor is
+      -- gone. It keeps whatever start_row/code it had cached before this
+      -- sync; the second pass below and validate_offsets will surface any
+      -- resulting collapse or misplacement, but the notebook is never left
+      -- with zero cells.
+      dead = false
+    end
     if dead then
       -- Push to undo trash before dropping. A `dd` on the only row of a
       -- 1-line cell removes the cell's anchor along with the line; the
@@ -69,7 +117,7 @@ function M.sync_cells_from_extmarks(bufnr, nb)
       -- this push, the trash-matching path in notebook.try_undo_restore
       -- can splice the cell back when the user hits `u`. Mirrors the
       -- push that the delete-cell action does explicitly.
-      notebook.push_undo_trash(nb, cell)
+      notebook.push_undo_trash(nb, cell, orig_start_row[cell], batch_id)
 
       nb.cell_by_id[cell.id] = nil
       table.remove(nb.cells, i)
@@ -108,8 +156,11 @@ function M.sync_cells_from_extmarks(bufnr, nb)
     if cell.end_row < cell.start_row then
       -- Snapshot the cell as it stood before its rows were consumed. The
       -- pre-collapse cell.code still holds the deleted content from the
-      -- last successful sync, and start_row is the row `u` restores to.
-      notebook.push_undo_trash(nb, cell)
+      -- last successful sync; orig_start_row[cell] is the cell's true
+      -- original row (see the snapshot comment above), which is where `u`
+      -- restores it — cell.start_row itself may have already been
+      -- overwritten to a row shared with siblings collapsed in the same edit.
+      notebook.push_undo_trash(nb, cell, orig_start_row[cell], batch_id)
 
       cell.code = ""
     else

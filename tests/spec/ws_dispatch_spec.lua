@@ -139,6 +139,27 @@ t.case("ws: update-cell-ids skips the reload during our own write", function()
   t.eq(reloaded, 0, "no reload while writing — would clobber unsaved edits")
 end)
 
+-- F1.2 regression: a bailed re-key (count mismatch while sync.is_writing)
+-- must NOT stamp _last_cell_ids_at. The stamp is the run-gate's signal that
+-- ids are safe to POST against (actions.flush_pending_edits); stamping it
+-- unconditionally here — even though nb.cell_by_id was never reconciled —
+-- let a run go out under stale local ids, and the eventual real re-key
+-- dropped that mapping so the terminal cell-op landed on an unknown id and
+-- the optimistic "queued" status never cleared ("queued forever").
+t.case("ws: update-cell-ids does not stamp _last_cell_ids_at when the re-key bails", function()
+  local sync = require("neo-marimo.sync")
+  local orig_is_writing, orig_reload = sync.is_writing, sync.reload_from_file
+  sync.is_writing = function() return true end
+  sync.reload_from_file = function() error("must not be called while writing") end
+
+  local nb = t.make_notebook({ "a = 1", "b = 2" })
+  nb._last_cell_ids_at = 0
+  ws.dispatch("update-cell-ids", { cell_ids = { "X1", "X2", "X3" } }, { nb = nb })
+
+  sync.is_writing, sync.reload_from_file = orig_is_writing, orig_reload
+  t.eq(nb._last_cell_ids_at, 0, "stamp must not advance when the re-key bailed")
+end)
+
 -- Widget value sync (browser/other consumer → nvim): marimo never re-broadcasts
 -- the widget's own cell when its value changes, only a "variable-values" op.
 -- We map the variable to its widget via the "variables" declaring-cell graph

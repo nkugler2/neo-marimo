@@ -132,23 +132,60 @@ end
 --      cell's worth of content there; the empty/phantom cell is the one to
 --      drop. If both are non-empty we leave them and let validate_offsets
 --      surface the problem instead of guessing.
+--
+-- This sweep never prunes the notebook down to zero cells (mirrors
+-- delete_cell's floor of 1, notebook.lua:77-91): a compound delete that
+-- collapses *every* remaining cell's range in one buffer edit would
+-- otherwise walk this loop to `nb.cells == {}`, and nothing re-seeds it
+-- afterward — sync.write_to_file and marimo both assume >=1 cell exists
+-- (plan-refinement F1.5). If a single cell is left, it's kept as-is even if
+-- it still looks collapsed. If pruning would otherwise wipe out every
+-- candidate in one pass, one is picked ahead of time to survive: the cell
+-- with the most surviving lines (end_row - start_row; least-negative for a
+-- fully collapsed range, ties broken by earliest original index) — a
+-- "least-broken" placeholder beats an empty notebook, and validate_offsets
+-- will still flag it for the user.
+--
+-- Note this guard only protects *this* sweep, run on whatever cells are
+-- still standing by the time it's called. It does not by itself guarantee
+-- the notebook is never emptied end-to-end: buffer.sync_cells_from_extmarks
+-- runs its own dead-anchor sweep first (removing cells whose extmark vim
+-- invalidated outright), which needed and now has an analogous
+-- last-survivor guard of its own — see the comment there (plan-refinement
+-- F1.5 finding #1). Both sweeps have to hold the line independently since
+-- either one, run alone, could otherwise walk the notebook to zero cells.
 -- Returns the number of cells removed.
 function M.prune_phantoms(nb)
+  if #nb.cells <= 1 then return 0 end
+
+  local survivor_id = nb.cells[1].id
+  local survivor_score = nb.cells[1].end_row - nb.cells[1].start_row
+  for idx = 2, #nb.cells do
+    local c = nb.cells[idx]
+    local score = c.end_row - c.start_row
+    if score > survivor_score then
+      survivor_score = score
+      survivor_id = c.id
+    end
+  end
+
   local removed = 0
   local i = 1
   while i <= #nb.cells do
+    if #nb.cells <= 1 then break end
     local cell = nb.cells[i]
     local kill = false
-    if cell.end_row < cell.start_row then
+    if cell.id ~= survivor_id and cell.end_row < cell.start_row then
       kill = true
     elseif i > 1 then
       local prev = nb.cells[i - 1]
       if cell.start_row <= prev.end_row then
         -- Overlap. Drop whichever side is empty; if both are empty drop
         -- this one (arbitrary but deterministic); if both non-empty leave
-        -- them for the validator.
-        local cell_empty = (cell.code or "") == ""
-        local prev_empty = (prev.code or "") == ""
+        -- them for the validator. The designated survivor is never treated
+        -- as the empty/droppable side here.
+        local cell_empty = cell.id ~= survivor_id and (cell.code or "") == ""
+        local prev_empty = prev.id ~= survivor_id and (prev.code or "") == ""
         if cell_empty then
           kill = true
         elseif prev_empty then
@@ -182,11 +219,38 @@ end
 -- whichever cell now occupies that position.
 local UNDO_TRASH_CAP = 5
 
+-- Monotonic counter identifying which single buffer edit ("batch") a trash
+-- entry came from. try_undo_restore's contiguous-run matcher (below) only
+-- grows a run within one batch — two entries from unrelated deletes must
+-- never be spliced together just because their cached rows happen to end up
+-- adjacent (plan-refinement F1.1 finding #2). Callers that push several
+-- cells from the same edit (buffer.sync_cells_from_extmarks) call this once
+-- and pass the same id to every push_undo_trash call for that edit; callers
+-- that push a single cell in isolation (actions.delete_cell_at_cursor) can
+-- omit it and push_undo_trash mints a fresh one per call.
+function M.next_undo_batch(nb)
+  nb._undo_batch_seq = (nb._undo_batch_seq or 0) + 1
+  return nb._undo_batch_seq
+end
+
 -- Snapshot `cell` onto nb._undo_trash so try_undo_restore can splice it back
 -- on undo. Every delete path pushes through here — the delete-cell action and
 -- both sweeps in buffer.sync_cells_from_extmarks (dead anchor, collapsed
 -- range) — so the entry shape can't drift between call sites.
-function M.push_undo_trash(nb, cell)
+--
+-- `start_row` is optional and defaults to cell.start_row. Callers must pass
+-- it explicitly when a *contiguous run* of cells collapses in the same
+-- buffer edit (e.g. `V2jd` over 3 one-line cells): vim's anchors for all of
+-- them collapse onto the same post-delete row, so by the time
+-- sync_cells_from_extmarks notices the collapse, cell.start_row has already
+-- been overwritten to that shared row for every cell in the run — pushing
+-- that value would give b/c/d identical, wrong start_rows instead of their
+-- true original 1/2/3, and the contiguous-run match in try_undo_restore
+-- would never find them. The caller snapshots each cell's start_row before
+-- the anchor-read pass mutates it and passes that snapshot through here.
+--
+-- `batch_id` is likewise optional; see next_undo_batch above.
+function M.push_undo_trash(nb, cell, start_row, batch_id)
   nb._undo_trash = nb._undo_trash or {}
   table.insert(nb._undo_trash, 1, {
     id = cell.id,
@@ -197,21 +261,49 @@ function M.push_undo_trash(nb, cell)
     output = cell.output,
     console = cell.console,
     type = cell.type,
-    start_row = cell.start_row,
+    start_row = start_row or cell.start_row,
     line_count = cell_mod.line_count(cell),
     trashed_at = vim.uv.hrtime() / 1e6,
+    batch_id = batch_id or M.next_undo_batch(nb),
   })
   while #nb._undo_trash > UNDO_TRASH_CAP do
     table.remove(nb._undo_trash)
   end
 end
 
--- Try to match an on_bytes change set against a recently-trashed cell
+-- Try to match an on_bytes change set against recently-trashed cells
 -- (`nb._undo_trash`, populated by push_undo_trash above). If the user
 -- just did `<leader>md` then `u`, vim restores the deleted rows and on_bytes
 -- fires with a single +N insertion at the same row the cell originally
--- occupied. Splice the cell back into nb.cells with its original id and
--- consume the matching change so on_bytes_changed doesn't double-count.
+-- occupied. Splice the cell(s) back into nb.cells with their original ids
+-- and consume the matching change so on_bytes_changed doesn't double-count.
+--
+-- A multi-cell delete (e.g. `V2jd` spanning 3 cells) pushes one trash entry
+-- per cell, but vim's undo restores the whole span as a *single* on_bytes
+-- insertion whose delta is the combined line count — no single entry
+-- matches it on its own. So below we also look for a contiguous run of
+-- entries (by their original start_row/line_count, ascending) whose summed
+-- line_count equals the delta and whose first start_row equals the
+-- insertion row; matching a run splices every cell in the run back in
+-- order instead of losing them into whichever cell now precedes the
+-- restored rows (plan-refinement F1.1).
+--
+-- A run is only ever grown within a single push_undo_trash batch (see
+-- next_undo_batch). Numeric row-adjacency alone isn't enough to prove two
+-- entries came from the same delete: two unrelated single-cell deletes can
+-- leave cached rows that happen to be adjacent, and a later, unrelated
+-- insertion whose delta coincidentally equals their summed line_count would
+-- otherwise splice both back as one fabricated run (plan-refinement F1.1
+-- finding #2). Requiring a shared batch id closes that window.
+--
+-- Known limitation: this only works if no other edit happened between the
+-- delete and the undo. An intervening edit shifts buffer rows, so the
+-- trash entries' cached start_row no longer lines up with where vim
+-- restores the text; the match fails, the restored rows fall through to
+-- the generic sync path, and the cell comes back with a fresh id instead
+-- of its original one. Not cheaply fixable (we'd need to track the trash
+-- entries' rows through every subsequent edit, like a second set of
+-- extmarks) so it's left as a known gap rather than solved here.
 --
 -- Returns the (possibly shortened) change list. The buffer state is already
 -- correct when this runs (vim restored it); only the model needs updating.
@@ -225,17 +317,80 @@ function M.try_undo_restore(nb, changes)
   local buffer = require("neo-marimo.buffer")
   local filtered = {}
 
+  -- Live (non-expired) trash entries sorted by original start_row, each
+  -- carrying its index into nb._undo_trash so a matched run can be removed
+  -- afterward without the indices shifting mid-removal. Ties on start_row
+  -- (two entries pushed at the same cached row, e.g. by different batches)
+  -- are broken by trashed_at so the ordering is deterministic — table.sort
+  -- is not stable and an unstable order here could flip which entry the
+  -- run-growth loop below considers "first" from one call to the next.
+  local function live_entries()
+    local live = {}
+    for ti, t in ipairs(nb._undo_trash) do
+      if (now - t.trashed_at) <= TTL then
+        table.insert(live, { entry = t, trash_index = ti })
+      end
+    end
+    table.sort(live, function(a, b)
+      if a.entry.start_row == b.entry.start_row then
+        return a.entry.trashed_at < b.entry.trashed_at
+      end
+      return a.entry.start_row < b.entry.start_row
+    end)
+    return live
+  end
+
   for _, change in ipairs(changes) do
     local matched = false
     if change.delta > 0 then
-      for ti, t in ipairs(nb._undo_trash) do
-        if (now - t.trashed_at) > TTL then
-          -- entry is too old; leave it for the LRU eviction below
-        elseif t.start_row == change.start_row
-            and t.line_count == change.delta then
-          -- delta is `new_end_row - old_end_row`; for an insertion of N
-          -- whole rows it equals N. line_count is the cell's prior row
-          -- count, which is exactly the number of rows vim re-inserts.
+      local live = live_entries()
+
+      -- Greedily grow a contiguous run starting at change.start_row: each
+      -- next entry's start_row must pick up exactly where the previous one
+      -- left off (they were adjacent cells before the delete) AND share the
+      -- first entry's batch id (they were trashed by the same edit — see
+      -- next_undo_batch/push_undo_trash). `live` is sorted ascending, so
+      -- once an entry breaks contiguity or batch nothing later can restart
+      -- it — a later entry from the run's batch, if any, would already be
+      -- unreachable once row order has moved past it.
+      local run = {}
+      local sum = 0
+      for _, item in ipairs(live) do
+        if #run == 0 then
+          if item.entry.start_row == change.start_row then
+            table.insert(run, item)
+            sum = item.entry.line_count
+          end
+        else
+          local last = run[#run].entry
+          if item.entry.batch_id == last.batch_id
+              and item.entry.start_row == last.start_row + last.line_count then
+            table.insert(run, item)
+            sum = sum + item.entry.line_count
+          else
+            break
+          end
+        end
+        if sum >= change.delta then break end
+      end
+
+      if #run > 0 and sum == change.delta then
+        -- delta is `new_end_row - old_end_row`; for an insertion of N
+        -- whole rows it equals N. The run's summed line_count is exactly
+        -- the number of rows vim re-inserts across all matched cells.
+        --
+        -- Compute where the run belongs once, against nb.cells as it
+        -- stands before any of the run is inserted (inserting them one at
+        -- a time and re-deriving the index from each other's still-unset
+        -- start_row would misplace later cells in the run).
+        local insert_idx = 1
+        for j, c in ipairs(nb.cells) do
+          if c.start_row >= run[1].entry.start_row then break end
+          insert_idx = j + 1
+        end
+
+        for offset, item in ipairs(run) do
+          local t = item.entry
           local restored = cell_mod.new({
             id = t.id, name = t.name, code = t.code, options = t.options,
           }, 0)
@@ -244,28 +399,29 @@ function M.try_undo_restore(nb, changes)
           restored.console = t.console
           if t.type then restored.type = t.type end
 
-          local insert_idx = 1
-          for j, c in ipairs(nb.cells) do
-            if c.start_row >= t.start_row then break end
-            insert_idx = j + 1
-          end
-          table.insert(nb.cells, insert_idx, restored)
+          table.insert(nb.cells, insert_idx + offset - 1, restored)
           nb.cell_by_id[restored.id] = restored
-          for k, c in ipairs(nb.cells) do c.index = k end
           if nb.bufnr and vim.api.nvim_buf_is_valid(nb.bufnr) then
             -- Place a fresh anchor at the row vim just restored. Other
             -- cells' anchors already moved themselves via gravity, so a
             -- post-anchor sync picks up the new contiguous layout.
             buffer.place_cell_anchor(nb.bufnr, restored, t.start_row)
-            buffer.sync_cells_from_extmarks(nb.bufnr, nb)
-          else
-            M.recompute_offsets(nb)
           end
-
-          table.remove(nb._undo_trash, ti)
-          matched = true
-          break
         end
+        for k, c in ipairs(nb.cells) do c.index = k end
+        if nb.bufnr and vim.api.nvim_buf_is_valid(nb.bufnr) then
+          buffer.sync_cells_from_extmarks(nb.bufnr, nb)
+        else
+          M.recompute_offsets(nb)
+        end
+
+        -- Remove matched entries highest-index-first so earlier removals
+        -- don't shift the trash_index of ones still to be removed.
+        table.sort(run, function(a, b) return a.trash_index > b.trash_index end)
+        for _, item in ipairs(run) do
+          table.remove(nb._undo_trash, item.trash_index)
+        end
+        matched = true
       end
     end
     if not matched then table.insert(filtered, change) end

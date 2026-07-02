@@ -87,11 +87,28 @@ local RECENT_WRITES_CAP = 16
 -- to our original write, which is what we want for dedup purposes
 -- (the stable-id round trip from 7.5.7 lives in the .py *source*, not
 -- in marimo's in-memory state, and is restored on the next save).
+--
+-- F1.4: only strip a line matching the `# id: XXXX` shape when it is
+-- *immediately* followed by an `@app.cell` line — the exact shape
+-- inject_cell_ids (python/bridge.py) writes. Previously any line of that
+-- shape was stripped unconditionally, so a user's own literal comment
+-- (anywhere in a cell body, matching the pattern by coincidence) would
+-- vanish from the hash too. That could make a genuinely external edit
+-- hash-collide with our own last write and get silently swallowed by the
+-- file-watcher's own-echo dedup. This mirrors the equally-tightened rule
+-- in bridge.py's extract_cell_ids so both sides agree on what "is" an
+-- id comment.
 local function strip_id_comments(content)
   if not content or content == "" then return content end
-  local out = {}
+  local lines = {}
   for line in (content .. "\n"):gmatch("([^\n]*)\n") do
-    if not line:match("^%s*#%s*id:%s*[%w_]+%s*$") then
+    table.insert(lines, line)
+  end
+  local out = {}
+  for i, line in ipairs(lines) do
+    local is_id_comment = line:match("^%s*#%s*id:%s*[%w_]+%s*$") ~= nil
+    local next_is_cell = lines[i + 1] and lines[i + 1]:match("^%s*@app%.cell") ~= nil
+    if not (is_id_comment and next_is_cell) then
       table.insert(out, line)
     end
   end

@@ -61,15 +61,37 @@ async def _pump_stdin_to_ws(ws) -> None:
 
 
 async def _pump_ws_to_stdout(ws) -> None:
-    """Read frames from the WS and emit them on stdout for Lua to consume."""
-    async for raw in ws:
-        if isinstance(raw, bytes):
-            raw = raw.decode("utf-8")
-        try:
-            msg = json.loads(raw)
-            emit(msg)
-        except json.JSONDecodeError:
-            pass
+    """Read frames from the WS and emit them on stdout for Lua to consume.
+
+    A closed WS surfaces here one of two ways: the `async for` loop simply
+    ends (server closed cleanly, code 1000/1001 — no exception), or it
+    raises `ConnectionClosedError` (abnormal: kernel restart, session
+    eviction, the session getting dropped from under us). We used to let
+    both look the same from the caller's side — the abnormal case
+    propagated as an unhandled exception on this task, which `main()`
+    never inspected, so it was silently discarded and the process exited
+    0. `ConnectionClosedError` is intentionally left uncaught here (not
+    swallowed) so it lands on this task's result and `main()` can detect
+    it via `task.exception()` and fail loudly instead.
+    """
+    from websockets.exceptions import ConnectionClosedOK
+
+    try:
+        async for raw in ws:
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            try:
+                msg = json.loads(raw)
+                emit(msg)
+            except json.JSONDecodeError:
+                pass
+    except ConnectionClosedOK:
+        # Clean server-initiated close — not an error, nothing to report.
+        # Defensive only: websockets 15.x's __aiter__ already swallows
+        # ConnectionClosedOK and ends the loop without raising, so this
+        # clause never fires today. Kept in case a future websockets
+        # version lets the clean close propagate.
+        return
 
 
 async def main(
@@ -123,6 +145,20 @@ async def main(
             )
             for task in pending:
                 task.cancel()
+
+            # asyncio.wait() never raises on a failed task — it just marks it
+            # done — and an unretrieved task exception is silently dropped by
+            # asyncio's default handler. Without this check, an abnormal WS
+            # close (kernel restart, session eviction — ConnectionClosedError
+            # from _pump_ws_to_stdout) exited this process with code 0, which
+            # looked identical to a clean shutdown to server.lua's on_exit
+            # (only warns on nonzero). The in-flight run was left stuck at
+            # "queued" with nothing left to trigger the resync self-heal.
+            for task in done:
+                exc = task.exception()
+                if exc is not None:
+                    emit({"op": "neo_marimo_error", "message": f"WS connection lost: {exc}"})
+                    sys.exit(1)
 
     except ConnectionRefusedError:
         emit({"op": "neo_marimo_error", "message": f"Connection refused on port {port}"})
