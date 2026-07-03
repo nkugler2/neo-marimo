@@ -48,14 +48,6 @@ local function flush_pending_edits(bufnr, nb, opts)
   end, 25)
 end
 
-local function jump_to_cell(cell)
-  if not cell then return end
-  local row = cell.start_row + 1
-  local line_count = vim.api.nvim_buf_line_count(0)
-  if row > line_count then row = line_count end
-  vim.api.nvim_win_set_cursor(0, { row, 0 })
-end
-
 -- Insert a blank cell after the cell containing the cursor (or at end of
 -- notebook if the cursor isn't over any cell). Renders borders and jumps to
 -- the new cell.
@@ -77,7 +69,7 @@ function M.new_cell_below(bufnr, nb)
     buffer.place_cell_anchor(bufnr, new_cell, insert_row)
     buffer.refresh_after_mutation(bufnr, nb)
   end)
-  jump_to_cell(new_cell)
+  buffer.jump_to_cell(bufnr, new_cell)
 end
 
 -- Insert a blank cell before the cell containing the cursor (or at the top
@@ -97,7 +89,7 @@ function M.new_cell_above(bufnr, nb)
     buffer.place_cell_anchor(bufnr, new_cell, insert_row)
     buffer.refresh_after_mutation(bufnr, nb)
   end)
-  jump_to_cell(new_cell)
+  buffer.jump_to_cell(bufnr, new_cell)
 end
 
 -- Delete the cell containing the cursor. Snapshots the cell to undo trash
@@ -132,6 +124,29 @@ function M.delete_cell_at_cursor(bufnr, nb)
     vim.api.nvim_buf_clear_namespace(
       bufnr, highlights.ns_output, cell.start_row, cell.end_row + 1
     )
+    -- Widget value overrides are NOT cleared here but on undo-trash expiry:
+    -- if the user undoes this delete within notebook.UNDO_TRASH_TTL_MS, the
+    -- cell comes back with its cached output HTML, and only the lingering
+    -- override keeps the widget display in sync with the value the kernel
+    -- still holds (the HTML's data-initial-value is stale). Once the TTL
+    -- passes the trash entry can't be restored, so the overrides — keyed by
+    -- object_id at module level — would just leak; drop them then, unless
+    -- an undo already brought the cell back (plan-refinement F2.5). Capture
+    -- the ids now, before clear_for_cell wipes the registry they live in.
+    local override_ids = {}
+    for _, w in ipairs(widgets.list_for_cell(bufnr, cell.id)) do
+      if w.object_id then table.insert(override_ids, w.object_id) end
+    end
+    if #override_ids > 0 then
+      local cell_id = cell.id
+      vim.defer_fn(function()
+        if nb.cell_by_id[cell_id] then return end
+        for _, oid in ipairs(override_ids) do
+          widgets.clear_override(oid)
+        end
+      end, notebook.UNDO_TRASH_TTL_MS + 1000)
+    end
+
     widgets.clear_for_cell(bufnr, cell.id)
 
     -- Drop the cell anchor before set_lines so vim doesn't try to
@@ -154,7 +169,7 @@ function M.delete_cell_at_cursor(bufnr, nb)
   -- Move cursor to a valid position
   local target_idx = math.min(idx, #nb.cells)
   if target_idx >= 1 then
-    jump_to_cell(nb.cells[target_idx])
+    buffer.jump_to_cell(bufnr, nb.cells[target_idx])
   end
 end
 
@@ -200,7 +215,7 @@ function M.move_cell_down_at_cursor(bufnr, nb)
     buffer.place_cell_anchor(bufnr, new_cell, start_at + next_count)
     buffer.refresh_after_mutation(bufnr, nb)
   end)
-  jump_to_cell(nb.cells[idx + 1])
+  buffer.jump_to_cell(bufnr, nb.cells[idx + 1])
 end
 
 -- Swap the cell containing the cursor with the one above it.
@@ -236,7 +251,7 @@ function M.move_cell_up_at_cursor(bufnr, nb)
     buffer.place_cell_anchor(bufnr, new_prev, start_at + cell_count)
     buffer.refresh_after_mutation(bufnr, nb)
   end)
-  jump_to_cell(nb.cells[idx - 1])
+  buffer.jump_to_cell(bufnr, nb.cells[idx - 1])
 end
 
 -- Start the marimo server (if needed) and open the notebook in the browser.
@@ -270,10 +285,12 @@ function M.run_cell_at_cursor(bufnr, nb)
   local cell = notebook.get_cell_at_row(nb, row)
   if not cell then return end
 
-  -- User-driven re-execution is the *only* place we clear widget value
-  -- overrides for a cell. Auto-clearing on cell-op echoes was snapping
-  -- sliders back to their parsed data-initial-value milliseconds after
-  -- the user moved them via :MarimoWidget — see output.handle_cell_op.
+  -- User-driven re-execution is the only *immediate* place we clear widget
+  -- value overrides for a cell (delete clears them too, but deferred until
+  -- the cell's undo-trash entry expires — see delete_cell_at_cursor).
+  -- Auto-clearing on cell-op echoes was snapping sliders back to their
+  -- parsed data-initial-value milliseconds after the user moved them via
+  -- :MarimoWidget — see output.handle_cell_op.
   widgets.clear_overrides_for_cell(bufnr, cell.id)
 
   cell.status = "queued"

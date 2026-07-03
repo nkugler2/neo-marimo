@@ -5,6 +5,7 @@ local t = require("helpers")
 local output = require("neo-marimo.output")
 local widgets = require("neo-marimo.widgets")
 local hl = require("neo-marimo.highlights")
+local markdown = require("neo-marimo.markdown")
 
 local _next = 0
 
@@ -93,6 +94,34 @@ t.case("output: plain text over the cap is truncated", function()
   t.no_match(joined, "<leader>mD", "no table hint for plain text")
 end)
 
+t.case("output: console output is capped on append and truncated on render (F2.3)", function()
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  local cell = make_cell(bufnr, { mimetype = "text/plain", data = "" })
+  local nb = { cell_by_id = { [cell.id] = cell } }
+
+  -- Simulate a print-heavy loop: one cell-op per print, each appending a
+  -- single console entry — the exact growth pattern F2.3 guards against.
+  for i = 1, 250 do
+    output.handle_cell_op(bufnr, nb, {
+      cell_id = cell.id,
+      console = { channel = "stdout", mimetype = "text/plain", data = "line " .. i },
+    })
+  end
+
+  t.ok(#cell.console <= 200,
+    "stored console list bounded (" .. #cell.console .. " entries)")
+  t.eq(cell.console[1].data, "line 51", "oldest entries dropped first")
+  t.eq(cell.console[#cell.console].data, "line 250", "most recent entry kept")
+
+  -- handle_cell_op defers the actual re-render via vim.schedule; render
+  -- synchronously here so the test doesn't need to pump the event loop.
+  output.render(bufnr, cell, nil)
+  local joined = table.concat(virt_lines_at(bufnr), "\n")
+  t.match(joined, "console output truncated")
+  t.match(joined, "line 51", "earliest surviving entry still painted")
+  t.no_match(joined, "line 250", "render stops at MAX_CONSOLE_LINES")
+end)
+
 t.case("output: dataframe output points at the full panel", function()
   local bufnr = vim.api.nvim_create_buf(false, true)
   local rows = {}
@@ -115,6 +144,33 @@ t.case("output: dataframe output points at the full panel", function()
   local joined = table.concat(virt_lines_at(bufnr), "\n")
   t.match(joined, "<leader>mD", "panel hint present for table output")
   t.match(joined, "195 more rows")
+end)
+
+t.case("output: ns_output mark stays pinned to end_row across a gcc-style last-line rewrite", function()
+  -- F2.1 regression: right_gravity defaulted to true, so replacing the
+  -- cell's last line (delete+insert of that exact line — what a comment
+  -- toggle like gcc does) rode the mark onto the next row, i.e. past this
+  -- cell's boundary. right_gravity = false must keep it pinned to end_row.
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  local cell = make_cell(bufnr, { mimetype = "text/plain", data = "hello" })
+  output.render(bufnr, cell)
+
+  local marks = vim.api.nvim_buf_get_extmarks(
+    bufnr, hl.ns_output, 0, -1, { details = true })
+  t.eq(#marks, 1, "one output mark before the edit")
+  t.eq(marks[1][2], cell.end_row, "mark starts at end_row")
+
+  -- gcc-style rewrite: replace the exact last line (row 2, "z = 3") with
+  -- new content — a delete + insert of that one line, buffer length
+  -- unchanged.
+  vim.api.nvim_buf_set_lines(bufnr, cell.end_row, cell.end_row + 1, false,
+    { "# z = 3" })
+
+  marks = vim.api.nvim_buf_get_extmarks(
+    bufnr, hl.ns_output, 0, -1, { details = true })
+  t.eq(#marks, 1, "still one output mark after the edit")
+  t.eq(marks[1][2], cell.end_row,
+    "mark stays pinned to end_row instead of riding onto the next row")
 end)
 
 t.case("output: full notebook.py cell-4 payload renders every tab", function()
@@ -158,4 +214,49 @@ t.case("output: full notebook.py cell-4 payload renders every tab", function()
   t.eq(names.text, 1)
   t.eq(names.text_area, 1)
   t.eq(names.refresh, 1)
+end)
+
+t.case("highlights: MarimoOutputText is readable, not a dim/italic Comment link (F2.4)", function()
+  -- F2.4: MarimoOutputText used to `link = "Comment"`, which is dim + italic
+  -- in most colorschemes and made all plain repr() output unreadable.
+  hl.setup()
+  local def = vim.api.nvim_get_hl(0, { name = "MarimoOutputText" })
+  t.ok(def.link ~= "Comment", "no longer linked to Comment")
+  t.ok(not def.italic, "not italic")
+  t.ok(def.fg ~= nil, "has its own foreground color")
+end)
+
+t.case("highlights: MarimoMarkdownText exists and is readable (F2.4)", function()
+  -- Split from MarimoOutputText so markdown prose and plain output can be
+  -- tuned independently, without reintroducing the dim/italic Comment link.
+  hl.setup()
+  local def = vim.api.nvim_get_hl(0, { name = "MarimoMarkdownText" })
+  t.ok(def.link ~= "Comment", "no longer linked to Comment")
+  t.ok(not def.italic, "not italic")
+  t.ok(def.fg ~= nil, "has its own foreground color")
+end)
+
+t.case("highlights: markdown prose uses MarimoMarkdownText, not MarimoOutputText (F2.4)", function()
+  local virt = markdown.render("plain unmarked paragraph text")
+  t.eq(#virt, 1, "one rendered line")
+  local groups = {}
+  for _, ch in ipairs(virt[1]) do groups[ch[2]] = true end
+  t.ok(groups["MarimoMarkdownText"], "prose base chunk uses MarimoMarkdownText")
+  t.ok(not groups["MarimoOutputText"], "markdown path no longer references MarimoOutputText")
+end)
+
+t.case("highlights: plain repr() output still uses MarimoOutputText (F2.4)", function()
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  local cell = make_cell(bufnr, { mimetype = "text/plain", data = "42" })
+  output.render(bufnr, cell)
+
+  local marks = vim.api.nvim_buf_get_extmarks(
+    bufnr, hl.ns_output, 0, -1, { details = true })
+  local groups = {}
+  for _, m in ipairs(marks) do
+    for _, vl in ipairs(m[4].virt_lines or {}) do
+      for _, ch in ipairs(vl) do groups[ch[2]] = true end
+    end
+  end
+  t.ok(groups["MarimoOutputText"], "plain output still uses MarimoOutputText")
 end)

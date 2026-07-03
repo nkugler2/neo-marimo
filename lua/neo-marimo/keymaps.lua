@@ -10,17 +10,6 @@ local widgets = require("neo-marimo.widgets")
 
 local M = {}
 
--- Move cursor to the start of a cell
-local function jump_to_cell(cell)
-  if cell then
-    -- +1 because nvim_win_set_cursor is 1-indexed
-    local row = cell.start_row + 1
-    local line_count = vim.api.nvim_buf_line_count(0)
-    if row > line_count then row = line_count end
-    vim.api.nvim_win_set_cursor(0, { row, 0 })
-  end
-end
-
 -- Get the notebook state from a buffer (stored as buffer variable)
 local function get_nb(bufnr)
   return vim.b[bufnr]._marimo_notebook
@@ -49,7 +38,7 @@ function M.setup(bufnr, nb)
       local row = vim.api.nvim_win_get_cursor(0)[1] - 1
       local cell = notebook.get_cell_at_row(nb, row)
       if cell and cell.index < #nb.cells then
-        jump_to_cell(nb.cells[cell.index + 1])
+        buffer.jump_to_cell(bufnr, nb.cells[cell.index + 1])
       end
     end, o("Marimo: next cell"))
   end
@@ -61,7 +50,7 @@ function M.setup(bufnr, nb)
       local row = vim.api.nvim_win_get_cursor(0)[1] - 1
       local cell = notebook.get_cell_at_row(nb, row)
       if cell and cell.index > 1 then
-        jump_to_cell(nb.cells[cell.index - 1])
+        buffer.jump_to_cell(bufnr, nb.cells[cell.index - 1])
       end
     end, o("Marimo: previous cell"))
   end
@@ -326,12 +315,9 @@ function M.setup(bufnr, nb)
     output.render(bufnr, target.cell, nb.filepath)
     -- Park the cursor on the cell's LAST line, not its first: the widgets
     -- are virt_lines attached below end_row, so jumping to the top of a
-    -- tall cell would scroll them out of view. zz centers, leaving half a
-    -- window for the output underneath.
-    local row = math.min(target.cell.end_row + 1, vim.api.nvim_buf_line_count(bufnr))
-    vim.api.nvim_win_set_cursor(0, { row, 0 })
-    vim.cmd("normal! zz")
-    vim.cmd("redraw")
+    -- tall cell would scroll them out of view. buffer.jump_to_row's zz +
+    -- redraw centers, leaving half a window for the output underneath.
+    buffer.jump_to_row(bufnr, target.cell.end_row)
   end
 
   if km.next_widget then

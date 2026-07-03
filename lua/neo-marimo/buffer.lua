@@ -29,6 +29,31 @@ function M.clear_cell_anchor(bufnr, cell)
   end
 end
 
+-- Move the cursor to buffer row `row` (0-indexed, clamped to the last line)
+-- in bufnr's current window, then center and force a redraw.
+--
+-- virt_lines-inflated cell outputs desync the viewport on a bare
+-- nvim_win_set_cursor: the destination row can land outside the window's
+-- painted region (or the window just doesn't repaint) until the next
+-- manual keystroke, leaving the cursor apparently "stuck". `normal! zz` +
+-- `redraw` forces the scroll immediately — first worked out for widget
+-- focus-cycling (keymaps.lua) and now shared by every programmatic jump.
+function M.jump_to_row(bufnr, row)
+  local line_count = vim.api.nvim_buf_line_count(bufnr)
+  local target = math.min(row + 1, line_count) -- +1: nvim_win_set_cursor is 1-indexed
+  vim.api.nvim_win_set_cursor(0, { target, 0 })
+  vim.cmd("normal! zz")
+  vim.cmd("redraw")
+end
+
+-- Move the cursor to the start of `cell`. No-op if cell is nil (e.g. an
+-- insert/delete that left no valid target). See jump_to_row for the
+-- scroll/redraw rationale.
+function M.jump_to_cell(bufnr, cell)
+  if not cell then return end
+  M.jump_to_row(bufnr, cell.start_row)
+end
+
 -- Re-derive cell.start_row / cell.end_row / cell.code / cell.type from the
 -- live extmark positions and the current buffer content. This is the only
 -- code path that mutates cell.start_row/end_row after the initial create;
@@ -482,6 +507,34 @@ function M.refresh_after_mutation(bufnr, nb)
   notebook.prune_phantoms(nb)
   M.sync_cells_from_extmarks(bufnr, nb)
   M.render_all_borders(bufnr, nb)
+
+  -- Re-render outputs after borders on every mutation, not just resize.
+  -- render_all_borders above just recreated every border mark at
+  -- cell.end_row; the output mark (also at cell.end_row, see output.lua)
+  -- needs re-rendering too, for a reason that's about *content*, not
+  -- stacking order: with right_gravity = false, the output mark's render
+  -- position relative to the border's bottom mark is already deterministic
+  -- (verified: a right_gravity = false mark always sorts/renders before a
+  -- right_gravity = true one at the same anchor, regardless of creation
+  -- order — priority doesn't enter into it either). What isn't automatic
+  -- is the *content*: an edit anywhere in the notebook can shift
+  -- cell.end_row for cells below it, and the output virt_lines themselves
+  -- may need rewrapping (window width) or just haven't been touched since
+  -- the buffer changed underneath them. Re-rendering here keeps the output
+  -- pinned to the live end_row and its content current, not stale.
+  -- Goes through the same debounced closure init.lua wires up for
+  -- WinResized so a burst of keystrokes doesn't re-run the (comparatively
+  -- expensive) output tree walk on every single mutation.
+  if nb._redraw_outputs then
+    nb._redraw_outputs()
+  else
+    -- Tests build notebooks without the full attach path (no init.lua
+    -- autocmds), so nb._redraw_outputs may not exist. Fall back to a
+    -- direct, unthrottled render loop rather than silently doing nothing —
+    -- this path is not hit in production, where attach always sets
+    -- nb._redraw_outputs.
+    require("neo-marimo.output").render_all(bufnr, nb, nb.filepath)
+  end
 end
 
 -- Refresh cell offsets after vim has applied buffer changes. With cell

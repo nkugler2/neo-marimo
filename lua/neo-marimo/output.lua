@@ -24,6 +24,23 @@ local MAX_LINES = 30
 -- more than the MAX_LINES cap can ever show; anything past it is truncated.
 local MAX_OUTPUT_BYTES = 16 * 1024
 
+-- plan-refinement F2.3: cell.console accumulates one entry per cell-op that
+-- carries console data — a print-heavy loop (e.g. `for i in range(...): print(i)`
+-- inside one cell) drives many cell-ops, each appending a single entry, so the
+-- list grows without bound for the life of the buffer. Two caps address the
+-- two costs: MAX_CONSOLE_ENTRIES bounds the *stored* list (memory — see the
+-- append site in M.handle_cell_op), MAX_CONSOLE_LINES bounds what gets
+-- *repainted* on every M.render pass (paint cost — see the console loop
+-- below). Both mirror MAX_OUTPUT_BYTES's rationale: without them, a
+-- print-heavy cell reopens the same freeze scenario MAX_OUTPUT_BYTES was
+-- written to prevent, just paid across many small entries/lines instead of
+-- one oversized string.
+local MAX_CONSOLE_ENTRIES = 200
+-- Value coincidentally matches MAX_LINES above — the two caps bound
+-- different things (console repaint vs. output display budget) and aren't
+-- meant to be kept in lockstep; change either independently as needed.
+local MAX_CONSOLE_LINES = 30
+
 -- Phase 8.2 / 8.5: image and widget output frequently arrives bigger than
 -- the inline cap (matplotlib figures are tall; DataFrames have many rows).
 -- Both have dedicated viewers (image.nvim handles plot rendering inline,
@@ -524,15 +541,27 @@ function M.render(bufnr, cell, filepath)
     end
   end
 
-  -- Console output (stdout/stderr printed during execution)
+  -- Console output (stdout/stderr printed during execution). Line-capped at
+  -- MAX_CONSOLE_LINES (see the constant's comment above) so a print-heavy
+  -- cell doesn't repaint an ever-growing console block on every render pass.
   if cell.console and #cell.console > 0 then
+    local shown = 0
+    local truncated = false
     for _, cout in ipairs(cell.console) do
-      if cout.data and cout.data ~= "" then
+      if not truncated and cout.data and cout.data ~= "" then
         local console_lines = render_text_plain(cout.data)
         for _, vl in ipairs(console_lines) do
+          if shown >= MAX_CONSOLE_LINES then
+            truncated = true
+            break
+          end
           table.insert(virt_lines, vl)
+          shown = shown + 1
         end
       end
+    end
+    if truncated then
+      table.insert(virt_lines, { { "  … [console output truncated]", "Comment" } })
     end
   end
 
@@ -560,12 +589,43 @@ function M.render(bufnr, cell, filepath)
     end
   end
 
-  -- Attach at end_row so the output moves with the cell as it grows
+  -- Attach at end_row so the output moves with the cell as it grows.
+  -- right_gravity = false (not the default true), for two independently
+  -- verified reasons (plan-refinement F2.1):
+  --   1. With the default right_gravity = true, a `gcc`-style delete+insert
+  --      of the cell's exact last line rides the mark onto the next cell's
+  --      start row, so the output renders after the next cell's top line
+  --      instead of after this cell.
+  --   2. ns_border's bottom-border mark shares this exact anchor
+  --      (cell.end_row, 0) and defaults to right_gravity = true. Verified
+  --      empirically (nvim_buf_get_extmarks with ns_id = -1, cross-checked
+  --      against actual screen output via :TOhtml): at the *same* (row,
+  --      col), a right_gravity = false mark always sorts — and renders —
+  --      before a right_gravity = true one, regardless of which was
+  --      created or recreated more recently. So this isn't just a "pins
+  --      the gcc case" fix — it's what makes the output mark deterministically
+  --      render before (inside the cell, above) the border's bottom line
+  --      instead of flip-flopping with it.
   vim.api.nvim_buf_set_extmark(bufnr, hl.ns_output, cell.end_row, 0, {
     virt_lines = virt_lines,
     virt_lines_above = false,
+    right_gravity = false,
     priority = 90,
   })
+end
+
+-- Render every cell that's actually showing something (skips hidden-output
+-- cells and cells that have never run and have nothing to show). Shared by
+-- init.lua's debounced WinResized/refresh_after_mutation redraw and
+-- buffer.lua's unthrottled fallback (tests, which build notebooks without
+-- the full attach path) — same predicate, same loop, one place to fix.
+function M.render_all(bufnr, nb, filepath)
+  for _, cell in ipairs(nb.cells) do
+    if not cell._output_hidden
+        and (cell.output or cell.console or cell._has_run) then
+      M.render(bufnr, cell, filepath)
+    end
+  end
 end
 
 -- Clear output for all cells.
@@ -681,6 +741,12 @@ function M.handle_cell_op(bufnr, nb, msg)
       elseif msg.console.channel then
         cell.console = cell.console or {}
         table.insert(cell.console, msg.console)
+        -- Bound the stored list (see MAX_CONSOLE_ENTRIES comment above) —
+        -- drop the oldest entries first so the most recent output (what a
+        -- user watching stdout actually wants) survives.
+        while #cell.console > MAX_CONSOLE_ENTRIES do
+          table.remove(cell.console, 1)
+        end
       end
     end
   end

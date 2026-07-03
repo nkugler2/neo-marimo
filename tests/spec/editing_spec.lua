@@ -362,3 +362,172 @@ t.case("editing: stress sequence stays validator-clean", function()
 
   t.eq(#nb.cells, 4)
 end)
+
+t.case("editing: jump_to_cell scrolls to a cell beyond the viewport (plan-refinement F2.2)", function()
+  -- A full viewport-desync repro needs virt_lines-inflated output plus a
+  -- real terminal redraw cycle, neither of which is reproducible headless.
+  -- This pins the two things that ARE checkable: the cursor lands exactly
+  -- on the target cell's first line even when that row starts off-screen,
+  -- and the shared helper's `zz` actually ran (winline sits near vertical
+  -- center rather than wherever nvim_win_set_cursor alone would have left
+  -- it) — the same mechanics actions.lua / keymaps.lua now share via
+  -- buffer.jump_to_cell instead of each keeping its own bare-cursor copy.
+  local buffer = require("neo-marimo.buffer")
+  local codes = {}
+  for i = 1, 60 do
+    table.insert(codes, "x" .. i .. " = " .. i)
+  end
+  local nb, bufnr = t.make_notebook(codes)
+
+  local win_height = vim.api.nvim_win_get_height(0)
+  t.ok(#nb.cells > win_height, "need more cells than the window can show at once")
+
+  -- Start scrolled to the top so the last cell is off the initial viewport.
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  vim.cmd("normal! zt")
+
+  local target = nb.cells[#nb.cells]
+  buffer.jump_to_cell(bufnr, target)
+
+  local cursor_row = vim.api.nvim_win_get_cursor(0)[1]
+  t.eq(cursor_row, target.start_row + 1, "cursor lands on the target cell's first line")
+
+  local winline = vim.fn.winline()
+  local mid = math.ceil(win_height / 2)
+  t.ok(math.abs(winline - mid) <= 1,
+    string.format("expected cursor near vertical center after zz (winline=%d, height=%d)",
+      winline, win_height))
+end)
+
+t.case("editing: output mark renders before (inside) the border mark after an unrelated edit (F2.1)", function()
+  -- F2.1: ns_border (bottom border) and ns_output (status/output) both
+  -- anchor at the same row (cell.end_row). Verified empirically (cross-
+  -- checked against actual rendered output via :TOhtml, and against
+  -- nvim_buf_get_extmarks with ns_id = -1 — which returns same-position
+  -- marks from every namespace in their actual render order): at a shared
+  -- (row, col), a right_gravity = false mark always sorts/renders before a
+  -- right_gravity = true one, *regardless* of which was created or
+  -- recreated more recently, and regardless of `priority`. output.lua sets
+  -- right_gravity = false on the output mark, so it should deterministically
+  -- render before (i.e. inside the cell, above) ns_border's bottom mark
+  -- (right_gravity defaults to true) — that ordering is not supposed to be
+  -- an accident of creation timing.
+  --
+  -- This test isn't primarily probing that gravity rule (see output_spec.lua
+  -- for the pinning behavior) — it's checking that refresh_after_mutation
+  -- still re-renders cell 1's output after an edit to a *different* cell,
+  -- so a stale or missing output mark doesn't silently drop out of the
+  -- picture when render_all_borders repaints every border on every
+  -- mutation.
+  local hl = require("neo-marimo.highlights")
+  local output = require("neo-marimo.output")
+  -- Cell 1 spans two lines so its top border (virt_lines_above = true, at
+  -- start_row) and bottom border (virt_lines_above = false, at end_row)
+  -- land on different rows — otherwise a single-line cell's top and bottom
+  -- border would both match end_row and pollute the row-0 probe below.
+  local nb, bufnr = t.make_notebook({ "a = 1\nx = 9", "b = 2" })
+
+  -- Give cell 1 an output and render it — this is the initial (now oldest)
+  -- ns_output mark, anchored at cell 1's end_row.
+  nb.cells[1].status = "idle"
+  nb.cells[1]._has_run = true
+  nb.cells[1].output = { mimetype = "text/plain", data = "hello" }
+  output.render(bufnr, nb.cells[1])
+
+  local function order_at(row)
+    local marks = vim.api.nvim_buf_get_extmarks(bufnr, -1, 0, -1, { details = true })
+    local out = {}
+    for _, m in ipairs(marks) do
+      -- Only the bottom-border variant (virt_lines_above = false) actually
+      -- competes with the output mark for the same slot below `row`; the
+      -- top border of the *next* cell can also land on this row but points
+      -- its virt_lines upward, so it's excluded here.
+      if m[2] == row and m[4].virt_lines_above == false then
+        if m[4].ns_id == hl.ns_border then
+          table.insert(out, "border")
+        elseif m[4].ns_id == hl.ns_output then
+          table.insert(out, "output")
+        end
+      end
+    end
+    return table.concat(out, ",")
+  end
+
+  -- An unrelated edit elsewhere in the buffer (cell 2, not cell 1) still
+  -- goes through refresh_after_mutation, which reruns render_all_borders
+  -- for the whole notebook — including cell 1's border.
+  vim.api.nvim_win_set_cursor(0, { 3, #vim.api.nvim_buf_get_lines(bufnr, 2, 3, false)[1] })
+  vim.cmd("normal! A0")
+  nb._flush_pending()
+
+  -- Tests build notebooks without the full attach path, so
+  -- nb._redraw_outputs is nil and refresh_after_mutation takes the direct
+  -- fallback render loop instead of the debounced one — see buffer.lua.
+  -- Either path must leave cell 1's output mark present and still ordered
+  -- ahead of its border, i.e. it must not have been dropped or left stale
+  -- by the unrelated edit to cell 2.
+  t.eq(order_at(nb.cells[1].end_row), "output,border",
+    "output still renders before (inside) the border at their shared anchor row")
+  t.assert_consistent(nb, bufnr)
+end)
+
+t.case("editing: debounced nb._redraw_outputs (production wiring) re-anchors output after a mutation", function()
+  -- The test above exercises refresh_after_mutation's *fallback* branch
+  -- (nb._redraw_outputs nil, direct unthrottled loop). Nothing in the suite
+  -- previously drove the *other* branch — the debounced closure init.lua
+  -- actually installs in production — so a regression there (wrong wiring,
+  -- wrong order against render_all_borders) could slip through with every
+  -- test still green. Build that same debounce wiring here and prove the
+  -- output mark still ends up pinned to the cell's live end_row once the
+  -- timer fires.
+  local hl = require("neo-marimo.highlights")
+  local utils = require("neo-marimo.utils")
+  local output = require("neo-marimo.output")
+
+  local nb, bufnr = t.make_notebook({ "a = 1", "b = 2\nc = 2" })
+  nb.cells[2].status = "idle"
+  nb.cells[2]._has_run = true
+  nb.cells[2].output = { mimetype = "text/plain", data = "hello" }
+
+  -- Mirror init.lua's redraw_outputs closure exactly (buf-valid + in-a-window
+  -- guards, then output.render_all through the same shared helper
+  -- buffer.lua's fallback now also calls) and stash it the same way attach
+  -- does, so refresh_after_mutation takes the debounced branch instead of
+  -- the fallback. `calls` counts actual fires so the test can tell a
+  -- debounced call apart from an extmark just riding the buffer edit under
+  -- its own gravity (which would happen regardless of any render).
+  local calls = 0
+  nb._redraw_outputs = utils.debounce(function()
+    if not vim.api.nvim_buf_is_valid(bufnr) then return end
+    if #vim.fn.win_findbuf(bufnr) == 0 then return end
+    calls = calls + 1
+    output.render_all(bufnr, nb, nb.filepath)
+  end, 200)
+
+  -- Prime an initial render so there's a pre-existing mark to prove moved,
+  -- not just created.
+  nb._redraw_outputs()
+  vim.wait(300, function() return calls == 1 end, 10)
+  local before_end_row = nb.cells[2].end_row
+
+  -- Grow cell 1 so cell 2's start/end rows shift down — the same kind of
+  -- unrelated-edit mutation the fallback test above exercises, but this
+  -- time through refresh_after_mutation's debounced branch.
+  vim.api.nvim_win_set_cursor(0, { 1, 0 })
+  vim.cmd("normal! oz = 99")
+  nb._flush_pending()
+  t.ok(nb.cells[2].end_row > before_end_row,
+    "cell 2 pushed down by the new line inserted above it")
+
+  -- refresh_after_mutation only (re)armed the debounce timer synchronously —
+  -- the render closure itself must not have fired yet.
+  t.eq(calls, 1, "debounced redraw hasn't fired again yet — timer just (re)armed")
+
+  vim.wait(500, function() return calls == 2 end, 10)
+  t.eq(calls, 2, "debounced redraw fired once the 200ms timer elapsed")
+
+  local marks = vim.api.nvim_buf_get_extmarks(bufnr, hl.ns_output, 0, -1, {})
+  t.eq(#marks, 1, "one output mark after the debounced redraw")
+  t.eq(marks[1][2], nb.cells[2].end_row,
+    "output mark re-anchored to the cell's live end_row once the debounce fires")
+end)

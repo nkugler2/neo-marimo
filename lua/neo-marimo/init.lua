@@ -278,14 +278,14 @@ function M.attach(source_bufnr)
   local redraw_outputs = utils.debounce(function()
     if not vim.api.nvim_buf_is_valid(nb_bufnr) then return end
     if #vim.fn.win_findbuf(nb_bufnr) == 0 then return end
-    local output = require("neo-marimo.output")
-    for _, cell in ipairs(nb.cells) do
-      if not cell._output_hidden
-          and (cell.output or cell.console or cell._has_run) then
-        output.render(nb_bufnr, cell, filepath)
-      end
-    end
+    require("neo-marimo.output").render_all(nb_bufnr, nb, filepath)
   end, 200)
+
+  -- Stashed on the notebook so buffer.refresh_after_mutation (which runs on
+  -- every buffer mutation, not just resize) can reuse this same debounced
+  -- redraw to re-anchor output marks after render_all_borders recreates the
+  -- border marks — see the comment there for why ordering matters.
+  nb._redraw_outputs = redraw_outputs
 
   -- Re-apply window settings whenever the buffer enters a new window
   -- (e.g. user runs :split). Also re-render borders and outputs so they

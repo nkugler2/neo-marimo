@@ -136,7 +136,7 @@ end
 --   *italic*            → MarimoMarkdownItalic
 --   [text](url)         → MarimoMarkdownLink (text + dim url)
 local function build_inline_chunks(line, base_hl)
-  base_hl = base_hl or "MarimoOutputText"
+  base_hl = base_hl or "MarimoMarkdownText"
   local chunks = {}
   local i, len = 1, #line
   local plain_start = i
@@ -246,7 +246,7 @@ local function render_md_lines(md_lines)
   -- block-level `\n…\n` wrappers don't accumulate into double-spacing.
   local function push_blank()
     if not saw_content or last_was_blank then return end
-    table.insert(virt, { { "  ", "MarimoOutputText" } })
+    table.insert(virt, { { "  ", "MarimoMarkdownText" } })
     last_was_blank = true
   end
 
@@ -279,7 +279,7 @@ local function render_md_lines(md_lines)
       if hashes and #hashes <= 6 then
         local hl_group = "MarimoMarkdownH" .. tostring(#hashes)
         local prefix = (#hashes == 1) and "▍ " or "▎ "
-        local chunks = { { "  ", "MarimoOutputText" },
+        local chunks = { { "  ", "MarimoMarkdownText" },
                          { prefix, hl_group },
                          { htext, hl_group } }
         push(chunks)
@@ -287,7 +287,7 @@ local function render_md_lines(md_lines)
 
       -- Horizontal rule
       elseif line:match("^%-%-%-+%s*$") or line:match("^%*%*%*+%s*$") then
-        push({ { "  ", "MarimoOutputText" },
+        push({ { "  ", "MarimoMarkdownText" },
                { string.rep("─", 40), "MarimoMarkdownRule" } })
         saw_content = true
 
@@ -316,7 +316,7 @@ local function render_md_lines(md_lines)
       -- Block quote
       elseif line:match("^>%s?") then
         local quote = line:gsub("^>%s?", "")
-        push({ { "  ", "MarimoOutputText" },
+        push({ { "  ", "MarimoMarkdownText" },
                { "▎ ", "MarimoMarkdownQuoteBorder" },
                { quote, "MarimoMarkdownQuote" } })
         saw_content = true
@@ -328,7 +328,7 @@ local function render_md_lines(md_lines)
       -- Default paragraph line
       else
         local inline = build_inline_chunks(line)
-        local out = { { "  ", "MarimoOutputText" } }
+        local out = { { "  ", "MarimoMarkdownText" } }
         for _, ch in ipairs(inline) do table.insert(out, ch) end
         push(out)
         saw_content = true

@@ -289,3 +289,63 @@ t.case("last: set/get round-trips", function()
   t.eq(last.object_id, "obj9")
   widgets._last_widget = nil
 end)
+
+-- ── delete → override lifecycle (plan-refinement F2.5) ────────────────────
+--
+-- delete_cell_at_cursor must NOT clear value overrides eagerly: an undo
+-- inside the trash window re-renders the cell's cached output HTML, whose
+-- data-initial-value is stale, and only the lingering override keeps the
+-- display in sync with the kernel-held value. The clear is deferred to
+-- notebook.UNDO_TRASH_TTL_MS + 1s; both cases shrink the TTL so the
+-- deferred fn fires on the next event-loop yield instead of a minute out.
+
+t.case("overrides: cell delete drops overrides after the undo-trash window (plan-refinement F2.5)", function()
+  local notebook = require("neo-marimo.notebook")
+  local actions = require("neo-marimo.actions")
+  local nb, bufnr = t.make_notebook({ "a = 1", "s = mo.ui.slider(1, 10)" })
+  local cell = nb.cells[2]
+  local oid = cell.id .. "-0"
+  widgets.register_widget(bufnr, cell.id, { name = "slider", object_id = oid })
+  widgets.set_override(oid, 7)
+
+  local saved_ttl = notebook.UNDO_TRASH_TTL_MS
+  notebook.UNDO_TRASH_TTL_MS = -1000
+  vim.api.nvim_win_set_cursor(0, { 2, 0 })
+  actions.delete_cell_at_cursor(bufnr, nb)
+  notebook.UNDO_TRASH_TTL_MS = saved_ttl
+
+  -- Synchronously after the delete the override is still alive — the lazy
+  -- clear is the fix's whole point (see rationale in delete_cell_at_cursor).
+  t.eq(widgets.get_override(oid), 7, "override survives the delete itself")
+
+  vim.wait(500, function() return widgets.get_override(oid) == nil end, 10)
+  t.eq(widgets.get_override(oid), nil, "override dropped once the trash entry expired")
+end)
+
+t.case("overrides: undo-restore within the window keeps the override (plan-refinement F2.5)", function()
+  local notebook = require("neo-marimo.notebook")
+  local actions = require("neo-marimo.actions")
+  local nb, bufnr = t.make_notebook({ "a = 1", "s = mo.ui.slider(1, 10)" })
+  local cell_id = nb.cells[2].id
+  local oid = cell_id .. "-0"
+  widgets.register_widget(bufnr, cell_id, { name = "slider", object_id = oid })
+  widgets.set_override(oid, 7)
+
+  local saved_ttl = notebook.UNDO_TRASH_TTL_MS
+  notebook.UNDO_TRASH_TTL_MS = -1000
+  vim.api.nvim_win_set_cursor(0, { 2, 0 })
+  t.undo_break()
+  actions.delete_cell_at_cursor(bufnr, nb)
+  notebook.UNDO_TRASH_TTL_MS = saved_ttl
+
+  -- Undo before yielding to the event loop: defer_fn callbacks only run
+  -- once vim.wait below yields, so the restore always wins this race. The
+  -- restored cell reclaims its id in nb.cell_by_id — exactly the liveness
+  -- check the deferred clear consults before dropping anything.
+  vim.cmd("silent undo")
+  nb._flush_pending()
+  t.ok(nb.cell_by_id[cell_id] ~= nil, "undo restored the cell id")
+
+  vim.wait(300, function() return widgets.get_override(oid) == nil end, 10)
+  t.eq(widgets.get_override(oid), 7, "override kept for the undo-restored cell")
+end)

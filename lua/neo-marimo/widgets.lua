@@ -43,7 +43,10 @@ M._by_cell = {}
 -- cell re-render would parse the original `data-initial-value` from the
 -- cached output HTML and snap the displayed thumb back to where it started.
 -- Overrides persist for the lifetime of the cell; the user clears them by
--- re-running the cell or via :MarimoResetWidgets.
+-- re-running the cell or via :MarimoResetWidgets. Deleting a cell clears
+-- them too, but only after its undo-trash entry expires (see
+-- actions.delete_cell_at_cursor) so an undo-restore keeps the display in
+-- sync with the kernel-held value.
 M._value_overrides = {}
 
 local function registry_key(bufnr, cell_id) return bufnr .. ":" .. cell_id end
@@ -80,6 +83,15 @@ end
 function M.set_override(object_id, value)
   if not object_id then return end
   M._value_overrides[object_id] = value
+end
+
+-- Drop a single override by object id. Used by the deferred trash-expiry
+-- clear in actions.delete_cell_at_cursor, which captures object ids at
+-- delete time (before clear_for_cell wipes the registry this module would
+-- need to resolve them from).
+function M.clear_override(object_id)
+  if not object_id then return end
+  M._value_overrides[object_id] = nil
 end
 
 -- Find registered widgets whose object_id begins with `prefix`. Marimo object
