@@ -209,53 +209,7 @@ function M.setup(bufnr, nb)
     )
   end
 
-  -- Smart paste: when the cursor sits on the only row of a cell and that
-  -- row is empty (typical right after `<leader>mn`), vanilla `p` would
-  -- put the yanked content *below* the empty row, leaving a stray blank
-  -- line above the paste inside the cell. Both `Vp` and a plain
-  -- nvim_buf_set_lines substitution at the cell's row drag this cell's
-  -- start anchor onto the next cell's (the single-line substitution
-  -- moves both right-gravity marks past the new content), so the paste
-  -- ends up swallowed by the *previous* cell. Do the substitution
-  -- ourselves and immediately re-place this cell's anchor at the
-  -- original row so it claims the pasted lines.
-  local function paste_in_empty_cell(default_key)
-    return function()
-      local row = vim.api.nvim_win_get_cursor(0)[1] - 1
-      local cell = notebook.get_cell_at_row(nb, row)
-      if cell and cell.start_row == cell.end_row then
-        local line = vim.api.nvim_buf_get_lines(bufnr, row, row + 1, false)[1]
-        if line == "" then
-          local reg = vim.fn.getreg('"')
-          local regtype = vim.fn.getregtype('"')
-          -- Only linewise yanks (yy, dd, <leader>md trash) need the
-          -- empty-row replacement dance. Charwise / blockwise paste
-          -- inserts bytes at the cursor and the empty row absorbs them
-          -- without leaving a stray blank.
-          if reg ~= "" and regtype:sub(1, 1) == "V" then
-            local content = reg:gsub("\n$", "")
-            local lines = vim.split(content, "\n", { plain = true })
-            buffer.with_suppressed_bytes(nb, function()
-              vim.api.nvim_buf_set_lines(bufnr, row, row + 1, false, lines)
-              -- The substitution collapsed cell.start_mark_id onto the
-              -- next cell's anchor at row + #lines. Re-create it at the
-              -- original row so this cell owns the pasted slice; the
-              -- next cell's anchor is already where it needs to be.
-              buffer.place_cell_anchor(bufnr, cell, row)
-              buffer.refresh_after_mutation(bufnr, nb)
-            end)
-            vim.api.nvim_win_set_cursor(0, { row + 1, 0 })
-            return
-          end
-        end
-      end
-      vim.cmd("normal! " .. vim.v.count1 .. default_key)
-    end
-  end
-  vim.keymap.set("n", "p", paste_in_empty_cell("p"),
-    vim.tbl_extend("force", opts, { desc = "Marimo: smart paste (p)" }))
-  vim.keymap.set("n", "P", paste_in_empty_cell("P"),
-    vim.tbl_extend("force", opts, { desc = "Marimo: smart paste (P)" }))
+  M.setup_editing_keymaps(bufnr, nb)
 
   -- Phase 8.5: DataFrame side-panel for the cell under the cursor.
   if km.dataframe_panel then
@@ -399,6 +353,130 @@ function M.setup(bufnr, nb)
   end
   bind_nudge(km.widget_nudge_up, 1, "Marimo: nudge widget up")
   bind_nudge(km.widget_nudge_down, -1, "Marimo: nudge widget down")
+end
+
+-- Buffer-local editing keymaps that need to know about cell boundaries:
+-- smart paste (p/P) and the boundary-aware `o`. Extracted out of M.setup
+-- (plan-refinement F3.1) so the headless test harness can wire them up too
+-- (tests/helpers.lua) — driving a boundary edit via script-only `normal!`
+-- bypasses mappings entirely and can't exercise the keymap's rewrite, only
+-- whatever the raw anchors do on their own.
+function M.setup_editing_keymaps(bufnr, nb)
+  local opts = { buffer = bufnr, silent = true, noremap = true }
+
+  -- Smart paste: when the cursor sits on the only row of a cell and that
+  -- row is empty (typical right after `<leader>mn`), vanilla `p` would
+  -- put the yanked content *below* the empty row, leaving a stray blank
+  -- line above the paste inside the cell. Both `Vp` and a plain
+  -- nvim_buf_set_lines substitution at the cell's row drag this cell's
+  -- start anchor onto the next cell's (the single-line substitution
+  -- moves both right-gravity marks past the new content), so the paste
+  -- ends up swallowed by the *previous* cell. Do the substitution
+  -- ourselves and immediately re-place this cell's anchor at the
+  -- original row so it claims the pasted lines.
+  local function paste_in_empty_cell(default_key)
+    return function()
+      -- Drain any debounced on_bytes deltas first — cell.start_row/end_row
+      -- can be up to 300ms stale after the last keystroke (see
+      -- buffer.attach_change_tracking), and both branches below read those
+      -- rows (this cell's and, in the second branch, the next cell's) to
+      -- decide where to splice. The sibling `o` boundary keymap already
+      -- flushes for the same reason.
+      if nb._flush_pending then nb._flush_pending() end
+      local row = vim.api.nvim_win_get_cursor(0)[1] - 1
+      local cell = notebook.get_cell_at_row(nb, row)
+      if cell and cell.start_row == cell.end_row then
+        local line = vim.api.nvim_buf_get_lines(bufnr, row, row + 1, false)[1]
+        if line == "" then
+          local reg = vim.fn.getreg('"')
+          local regtype = vim.fn.getregtype('"')
+          -- Only linewise yanks (yy, dd, <leader>md trash) need the
+          -- empty-row replacement dance. Charwise / blockwise paste
+          -- inserts bytes at the cursor and the empty row absorbs them
+          -- without leaving a stray blank.
+          if reg ~= "" and regtype:sub(1, 1) == "V" then
+            local content = reg:gsub("\n$", "")
+            local lines = vim.split(content, "\n", { plain = true })
+            buffer.with_suppressed_bytes(nb, function()
+              vim.api.nvim_buf_set_lines(bufnr, row, row + 1, false, lines)
+              -- Under gravity-false starts (plan-refinement F3.1) the
+              -- substitution pulls the NEXT cell's start anchor back onto
+              -- `row`, not this cell's anchor onto the next cell's as the
+              -- old right_gravity = true comment said. This cell's fresh
+              -- trailing anchor placed here is authoritative regardless;
+              -- refresh_after_mutation's sync re-normalizes the neighbor
+              -- via the clamp-forward pass (buffer.sync_cells_from_extmarks
+              -- pass 3). Origin of this whole dance: 61cc648.
+              buffer.place_cell_anchors(bufnr, cell, row, row + #lines - 1)
+              buffer.refresh_after_mutation(bufnr, nb)
+            end)
+            vim.api.nvim_win_set_cursor(0, { row + 1, 0 })
+            return
+          end
+        end
+      end
+
+      -- Second case: cursor sits on a NON-empty cell's LAST row, a next
+      -- cell exists, and the register is linewise. Plain `p` here splices
+      -- at (next_row, 0) — the same byte-identical-to-`O` ambiguity class
+      -- the boundary `o` keymap below handles — so vanilla `p` would
+      -- donate the pasted lines to the next cell instead of growing this
+      -- one (a real behavior regression vs. the old right_gravity anchor,
+      -- not a new feature). Run the native paste, then re-place the next
+      -- cell's anchors shifted down by the pasted line count.
+      if default_key == "p" and cell and row == cell.end_row and cell.index < #nb.cells then
+        local reg = vim.fn.getreg('"')
+        local regtype = vim.fn.getregtype('"')
+        if reg ~= "" and regtype:sub(1, 1) == "V" then
+          local reg_lines = vim.split(reg, "\n", { plain = true })
+          if reg_lines[#reg_lines] == "" then table.remove(reg_lines) end
+          local pasted_count = #reg_lines * vim.v.count1
+          local next_cell = nb.cells[cell.index + 1]
+          local next_start, next_end = next_cell.start_row, next_cell.end_row
+          buffer.with_suppressed_bytes(nb, function()
+            vim.cmd("normal! " .. vim.v.count1 .. default_key)
+            buffer.place_cell_anchors(bufnr, next_cell,
+              next_start + pasted_count, next_end + pasted_count)
+            buffer.refresh_after_mutation(bufnr, nb)
+          end)
+          return
+        end
+      end
+
+      vim.cmd("normal! " .. vim.v.count1 .. default_key)
+    end
+  end
+  vim.keymap.set("n", "p", paste_in_empty_cell("p"),
+    vim.tbl_extend("force", opts, { desc = "Marimo: smart paste (p)" }))
+  vim.keymap.set("n", "P", paste_in_empty_cell("P"),
+    vim.tbl_extend("force", opts, { desc = "Marimo: smart paste (P)" }))
+
+  -- `o` at a cell boundary (plan-refinement F3.1). Normal-mode `o` on a
+  -- cell's LAST line splices "\n" at (row+1, 0) — byte-identical to `O` on
+  -- the NEXT cell's first line: same on_bytes, same mark movement, verified
+  -- by isolated probe. No anchor/gravity scheme can tell them apart, so
+  -- rewrite the boundary case into the unambiguous byte shape `A<CR>`
+  -- instead: inserting "\n" at (row, eol) hits exactly this cell's own
+  -- trailing anchor (end_right_gravity = true), so the cell grows rather
+  -- than donating the line to its neighbor — the case the OLD
+  -- right_gravity = true point mark used to protect, now handled here
+  -- instead of by anchor placement (same precedent as the smart-paste
+  -- keymap above, 61cc648).
+  vim.keymap.set("n", "o", function()
+    if nb._flush_pending then nb._flush_pending() end
+    local row = vim.api.nvim_win_get_cursor(0)[1] - 1
+    local cell = notebook.get_cell_at_row(nb, row)
+    if cell and row == cell.end_row and cell.index < #nb.cells and vim.v.count == 0 then
+      -- "in": "i" runs before any pending typeahead (so `normal ox = 9`
+      -- executes A<CR> before `x = 9` is typed), "n" is noremap.
+      vim.api.nvim_feedkeys("A\r", "in", false)
+    else
+      -- Counted `o` (e.g. `3o`) falls through to native — count semantics
+      -- for the rewrite aren't well-defined, and this is an accepted
+      -- boundary quirk, not a regression.
+      vim.api.nvim_feedkeys(vim.v.count1 .. "o", "in", false)
+    end
+  end, { buffer = bufnr, silent = true, desc = "Marimo: open line below (cell-boundary aware)" })
 end
 
 return M

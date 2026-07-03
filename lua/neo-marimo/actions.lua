@@ -63,10 +63,27 @@ function M.new_cell_below(bufnr, nb)
     vim.api.nvim_buf_set_lines(bufnr, insert_row, insert_row, false, { "" })
 
     new_cell = notebook.insert_cell_after(nb, idx)
-    -- Anchor the new cell at insert_row. The existing cells at and below
-    -- have already been pushed down by extmark gravity from the set_lines
-    -- call above, so insert_row is now the empty row we just created.
-    buffer.place_cell_anchor(bufnr, new_cell, insert_row)
+    -- Anchor the new cell at insert_row — the blank line the set_lines
+    -- call above just inserted.
+    buffer.place_cell_anchors(bufnr, new_cell, insert_row, insert_row)
+
+    -- With gravity-false starts (plan-refinement F3.1), a pure insertion
+    -- exactly at a cell's start endpoint does NOT push that endpoint down —
+    -- verified by probe: typing at col 0 of a fresh line leaves the
+    -- gravity-false mark pinned there, which is exactly what we want for a
+    -- user typing into a new cell, but means the *next* cell (whose start
+    -- byte is exactly insert_row, the old right_gravity = true comment's
+    -- premise) does not get carried down by the splice either. Every cell
+    -- after that one is strictly past insert_row and does move itself via
+    -- gravity, so only the immediate follower needs an explicit re-place.
+    -- Without this, the follower's start would still claim insert_row,
+    -- contend with the new cell's anchor for the same row, and the
+    -- resolver would collapse the new cell as a zero-width phantom.
+    local follower = nb.cells[idx + 2]
+    if follower then
+      buffer.place_cell_anchors(bufnr, follower, follower.start_row + 1, follower.end_row + 1)
+    end
+
     buffer.refresh_after_mutation(bufnr, nb)
   end)
   buffer.jump_to_cell(bufnr, new_cell)
@@ -81,12 +98,24 @@ function M.new_cell_above(bufnr, nb)
     local row = vim.api.nvim_win_get_cursor(0)[1] - 1
     local cell = notebook.get_cell_at_row(nb, row)
     local idx = cell and cell.index or 1
+    -- The cell being displaced downward by the insert — the cell under the
+    -- cursor, or (defensively) whatever currently occupies slot 1 if the
+    -- cursor wasn't over any cell.
+    local displaced = cell or nb.cells[1]
 
     local insert_row = cell and cell.start_row or 0
     vim.api.nvim_buf_set_lines(bufnr, insert_row, insert_row, false, { "" })
 
     new_cell = notebook.insert_cell_before(nb, idx)
-    buffer.place_cell_anchor(bufnr, new_cell, insert_row)
+    buffer.place_cell_anchors(bufnr, new_cell, insert_row, insert_row)
+
+    -- Symmetric with new_cell_below: the displaced cell's start byte is
+    -- exactly insert_row, so its gravity-false start endpoint doesn't move
+    -- itself under the splice above. Re-place it explicitly one row down.
+    if displaced then
+      buffer.place_cell_anchors(bufnr, displaced, displaced.start_row + 1, displaced.end_row + 1)
+    end
+
     buffer.refresh_after_mutation(bufnr, nb)
   end)
   buffer.jump_to_cell(bufnr, new_cell)
@@ -193,6 +222,7 @@ function M.move_cell_down_at_cursor(bufnr, nb)
     -- anchor too far down and its content would flow into the cell
     -- after it.
     local next_count = #next_lines
+    local cell_count = #cell_lines
     local start_at = cell.start_row
 
     -- Drop both anchors before set_lines; we re-place them at the
@@ -211,8 +241,22 @@ function M.move_cell_down_at_cursor(bufnr, nb)
     local new_next = nb.cells[idx]      -- was next_cell, now at idx
     local new_cell = nb.cells[idx + 1]  -- was cell, now at idx+1
 
-    buffer.place_cell_anchor(bufnr, new_next, start_at)
-    buffer.place_cell_anchor(bufnr, new_cell, start_at + next_count)
+    buffer.place_cell_anchors(bufnr, new_next, start_at, start_at + next_count - 1)
+    buffer.place_cell_anchors(bufnr, new_cell, start_at + next_count,
+      start_at + next_count + cell_count - 1)
+
+    -- The whole-line replace above (probe 5, plan-refinement F3.1) pulls
+    -- the FOLLOWING cell's gravity-false start endpoint back onto the
+    -- replaced region's start, even though the total line count — and so
+    -- this cell's true row — hasn't changed. The next sync's clamp-forward
+    -- pass would heal it, but a deterministic action shouldn't depend on
+    -- that resolution; re-place it explicitly at its own (unchanged)
+    -- cached span.
+    local follower = nb.cells[idx + 2]
+    if follower then
+      buffer.place_cell_anchors(bufnr, follower, follower.start_row, follower.end_row)
+    end
+
     buffer.refresh_after_mutation(bufnr, nb)
   end)
   buffer.jump_to_cell(bufnr, nb.cells[idx + 1])
@@ -234,6 +278,7 @@ function M.move_cell_up_at_cursor(bufnr, nb)
     -- Capture before list_extend mutates cell_lines (see
     -- move_cell_down_at_cursor for the same trap).
     local cell_count = #cell_lines
+    local prev_count = #prev_lines
     local start_at = prev_cell.start_row
 
     buffer.clear_cell_anchor(bufnr, cell)
@@ -247,8 +292,20 @@ function M.move_cell_up_at_cursor(bufnr, nb)
     local new_cell = nb.cells[idx - 1]
     local new_prev = nb.cells[idx]
 
-    buffer.place_cell_anchor(bufnr, new_cell, start_at)
-    buffer.place_cell_anchor(bufnr, new_prev, start_at + cell_count)
+    buffer.place_cell_anchors(bufnr, new_cell, start_at, start_at + cell_count - 1)
+    buffer.place_cell_anchors(bufnr, new_prev, start_at + cell_count,
+      start_at + cell_count + prev_count - 1)
+
+    -- Mirror of move_cell_down_at_cursor's follower fix: the cell after the
+    -- swapped pair (unchanged array position idx + 1) has its gravity-false
+    -- start endpoint pulled back onto the replaced region's start by the
+    -- whole-line replace above, even though its true row is unchanged.
+    -- Re-place it explicitly rather than rely on the next sync's clamp.
+    local follower = nb.cells[idx + 1]
+    if follower then
+      buffer.place_cell_anchors(bufnr, follower, follower.start_row, follower.end_row)
+    end
+
     buffer.refresh_after_mutation(bufnr, nb)
   end)
   buffer.jump_to_cell(bufnr, nb.cells[idx - 1])

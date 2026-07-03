@@ -2,10 +2,11 @@ local M = {}
 
 M.ns_border = vim.api.nvim_create_namespace("neo_marimo_border")
 M.ns_output = vim.api.nvim_create_namespace("neo_marimo_output")
--- Cell start-row anchors. Each cell owns one extmark in this namespace,
--- placed at its start_row with right_gravity so insertions at the
--- boundary extend the previous cell (paste-after-end-of-A intuition).
--- Never cleared by border re-renders.
+-- Cell-boundary anchors. Each cell owns exactly one RANGE extmark in this
+-- namespace spanning [start_row, end_row] (plan-refinement F3.1). The start
+-- endpoint uses right_gravity = false and the end endpoint uses
+-- end_right_gravity = true — see buffer.place_cell_anchors for the full
+-- rationale. Never cleared by border re-renders.
 M.ns_cell_anchor = vim.api.nvim_create_namespace("neo_marimo_cell_anchor")
 
 function M.setup()

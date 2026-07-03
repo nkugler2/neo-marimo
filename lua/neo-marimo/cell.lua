@@ -73,6 +73,10 @@ function M.new(data, index)
     -- extmark IDs, populated during rendering
     top_mark_id = nil,
     bot_mark_id = nil,
+    -- Range extmark in ns_cell_anchor spanning [start_row, end_row]; set by
+    -- buffer.place_cell_anchors, not here (a fresh cell has no buffer rows
+    -- yet at construction time). See buffer.lua for the gravity rationale.
+    anchor_mark_id = nil,
   }
   cell.type = M.detect_type(cell.code)
   return cell

@@ -411,7 +411,7 @@ function M.try_undo_restore(nb, changes)
             -- Place a fresh anchor at the row vim just restored. Other
             -- cells' anchors already moved themselves via gravity, so a
             -- post-anchor sync picks up the new contiguous layout.
-            buffer.place_cell_anchor(nb.bufnr, restored, t.start_row)
+            buffer.place_cell_anchors(nb.bufnr, restored, t.start_row, t.start_row + t.line_count - 1)
           end
         end
         for k, c in ipairs(nb.cells) do c.index = k end

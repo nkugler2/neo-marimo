@@ -6,26 +6,62 @@ local utils = require("neo-marimo.utils")
 
 local M = {}
 
--- Place a fresh start-anchor extmark for `cell` at buffer row `row`. The
--- extmark sits in `ns_cell_anchor` (never wiped by border re-renders) with
--- right_gravity = true so an insertion at the boundary row pushes B down
--- and grows A. cell.start_mark_id stores the mark for later resolution.
-function M.place_cell_anchor(bufnr, cell, row)
-  if cell.start_mark_id then
-    pcall(vim.api.nvim_buf_del_extmark, bufnr, hl.ns_cell_anchor, cell.start_mark_id)
-    cell.start_mark_id = nil
-  end
-  cell.start_mark_id = vim.api.nvim_buf_set_extmark(bufnr, hl.ns_cell_anchor, row, 0, {
-    right_gravity = true,
+-- Place (or move-in-place) `cell`'s anchor: a single RANGE extmark spanning
+-- [start_row, end_row] in `ns_cell_anchor` (never wiped by border
+-- re-renders). cell.anchor_mark_id stores the mark for later resolution.
+--
+-- plan-refinement F3.1 (cell-boundary anchor redesign). A single point mark
+-- can't disambiguate the two boundary-insert intents: typing/`<CR>`/`O` at
+-- a cell's first byte should stay IN that cell (needs right_gravity =
+-- false on the start endpoint), while `A<CR>`/append at a cell's last byte
+-- should GROW that cell (needs end_right_gravity = true on the end
+-- endpoint). "End of A" and "start of B" are the same buffer position, so
+-- one mark with two independently-gravitied endpoints makes them distinct
+-- positions with distinct owners instead of re-aiming the same ambiguity.
+--
+-- A range mark over two point marks also buys: (1) nvim clamps end >= start
+-- by construction, so a fully-deleted cell collapses to a zero-width point
+-- (e.g. (1,0)-(1,0)) rather than an inverted range — the inversion class is
+-- eliminated, not guarded against; (2) one id threads every lifecycle path
+-- (undo trash, smart paste, moves, reload) and one
+-- nvim_buf_get_extmark_by_id(..., {details=true}) call per cell in the sync
+-- hot loop reads both endpoints at once.
+--
+-- Deliberately NOT invalidate = true — that would change the dead-anchor
+-- semantics the F1.5 survivor-guard tests pin (a fully-collapsed cell must
+-- still resolve to an empty-but-present range, not vanish outright).
+--
+-- Note: normal-mode `o` on a cell's LAST line is byte-identical to `O` on
+-- the NEXT cell's first line — both splice "\n" at (next_row, 0), so
+-- gravity alone cannot tell them apart. That case is handled by a
+-- buffer-local `o` keymap (keymaps.lua), not by anchor placement.
+--
+-- end_row is defensively clamped to [start_row, line_count-1] since callers
+-- occasionally compute it from arithmetic that could stray past either
+-- bound (e.g. a shrinking neighbor).
+function M.place_cell_anchors(bufnr, cell, start_row, end_row)
+  local line_count = vim.api.nvim_buf_line_count(bufnr)
+  if end_row < start_row then end_row = start_row end
+  if end_row > line_count - 1 then end_row = line_count - 1 end
+  if start_row > end_row then start_row = end_row end
+
+  local end_line = vim.api.nvim_buf_get_lines(bufnr, end_row, end_row + 1, false)[1] or ""
+
+  cell.anchor_mark_id = vim.api.nvim_buf_set_extmark(bufnr, hl.ns_cell_anchor, start_row, 0, {
+    id = cell.anchor_mark_id,   -- reuse in place when present: no delete/create churn
+    end_row = end_row,
+    end_col = #end_line,
+    right_gravity = false,      -- start: an insert at this cell's first byte stays in it
+    end_right_gravity = true,   -- end: an insert at this cell's last byte grows it
   })
 end
 
 -- Drop a cell's anchor. Used when the cell is removed (delete keymap, full
 -- buffer rebuild before reload). Safe to call when no anchor is present.
 function M.clear_cell_anchor(bufnr, cell)
-  if cell.start_mark_id then
-    pcall(vim.api.nvim_buf_del_extmark, bufnr, hl.ns_cell_anchor, cell.start_mark_id)
-    cell.start_mark_id = nil
+  if cell.anchor_mark_id then
+    pcall(vim.api.nvim_buf_del_extmark, bufnr, hl.ns_cell_anchor, cell.anchor_mark_id)
+    cell.anchor_mark_id = nil
   end
 end
 
@@ -108,32 +144,67 @@ function M.sync_cells_from_extmarks(bufnr, nb)
     end
   end
 
-  -- First pass: read start_row from each anchor. If an anchor came back
+  -- Pass 1: read each live cell's anchor geometry (both endpoints — the
+  -- anchor is now a single RANGE extmark, plan-refinement F3.1) into `raw`,
+  -- keyed by cell table identity so it threads through the sort/resolve
+  -- passes below without re-reading the extmark. If an anchor came back
   -- empty (vim removed it because its row range was wiped by a
-  -- nvim_buf_set_lines), the cell is dead — drop it from the list before
-  -- we try to compute end_row, otherwise we'd keep a phantom cell with a
-  -- stale cached start_row.
+  -- nvim_buf_set_lines), the cell is dead — drop it from the list before we
+  -- try to resolve spans, otherwise we'd keep a phantom cell with stale
+  -- cached rows.
+  local raw = {}
   local i = 1
   while i <= #nb.cells do
     local cell = nb.cells[i]
     local dead = false
-    if cell.start_mark_id then
+    if cell.anchor_mark_id then
       local mark = vim.api.nvim_buf_get_extmark_by_id(
-        bufnr, hl.ns_cell_anchor, cell.start_mark_id, {}
+        bufnr, hl.ns_cell_anchor, cell.anchor_mark_id, { details = true }
       )
       if mark and mark[1] then
-        cell.start_row = mark[1]
+        local details = mark[3]
+        local r = {
+          srow = mark[1], scol = mark[2],
+          erow = details.end_row, ecol = details.end_col,
+        }
+        -- A whole-line replace/<CR> can leave the end endpoint at
+        -- (row+1, 0) — a "past the trailing newline" sentinel (possibly one
+        -- past the last buffer row). When that happens the cell's real
+        -- content ends one row earlier.
+        r.content_end = (r.erow > r.srow and r.ecol == 0) and (r.erow - 1) or r.erow
+        -- A zero-width range (start == end exactly) means the cell's bytes
+        -- are gone — nvim clamps a range extmark so end can never invert
+        -- past start, so a fully-deleted cell collapses to a point instead
+        -- of an inverted range. See pass 2 for why this matters.
+        r.zero_width = (r.srow == r.erow and r.scol == r.ecol)
+        raw[cell] = r
+        cell.start_row = r.srow
       else
         dead = true
       end
+    else
+      -- Freshly minted cell, anchor not placed yet (see the docstring
+      -- above M.sync_cells_from_extmarks): fall back to its cached rows
+      -- and skip the anchor re-normalization in pass 3 below.
+      raw[cell] = {
+        srow = cell.start_row, erow = cell.end_row,
+        content_end = cell.end_row, zero_width = false,
+      }
     end
     if dead and cell.id == survivor_id then
       -- Designated survivor: never drop it, even though its own anchor is
       -- gone. It keeps whatever start_row/code it had cached before this
-      -- sync; the second pass below and validate_offsets will surface any
+      -- sync; the resolve pass below and validate_offsets will surface any
       -- resulting collapse or misplacement, but the notebook is never left
-      -- with zero cells.
+      -- with zero cells. Its anchor came back empty, so — like the
+      -- no-anchor-yet branch above — fall back to its cached rows; pass 3
+      -- will re-place a fresh anchor at the resolved span (place_cell_anchors
+      -- happily reuses a stale/now-nonexistent id).
       dead = false
+      raw[cell] = {
+        srow = cell.start_row, erow = cell.end_row,
+        content_end = cell.end_row, zero_width = false,
+      }
     end
     if dead then
       -- Push to undo trash before dropping. A `dd` on the only row of a
@@ -152,45 +223,81 @@ function M.sync_cells_from_extmarks(bufnr, nb)
   end
   for k, c in ipairs(nb.cells) do c.index = k end
 
-  -- Sort cells by their current start_row so end_row computation (next
-  -- cell's start - 1) works even if two cells momentarily share a row
-  -- after a paste-then-immediate-something edge case. The reorder is
-  -- only a defensive measure; in steady state the order is preserved
-  -- by vim's gravity-respecting extmark movement.
+  -- Pass 2: sort by (start_row, zero-width-last, index). A zero-width range
+  -- means the cell's bytes are gone (e.g. `dd`'d down to nothing); when it
+  -- contends for a row with a content-bearing cell at the same start (a
+  -- phantom vs. the cell that inherited its row), the phantom must lose the
+  -- row and fall into the collapsed path in pass 3, rather than stealing
+  -- the row out from under the cell that actually owns the content. Ties
+  -- among otherwise-equal cells keep today's index rule — the reorder is
+  -- only a defensive measure; in steady state order is preserved by vim's
+  -- gravity-respecting extmark movement.
   table.sort(nb.cells, function(a, b)
-    if a.start_row == b.start_row then
-      return (a.index or 0) < (b.index or 0)
-    end
-    return a.start_row < b.start_row
+    local ra, rb = raw[a], raw[b]
+    if ra.srow ~= rb.srow then return ra.srow < rb.srow end
+    if ra.zero_width ~= rb.zero_width then return not ra.zero_width end
+    return (a.index or 0) < (b.index or 0)
   end)
-  for i, c in ipairs(nb.cells) do c.index = i end
+  for k, c in ipairs(nb.cells) do c.index = k end
 
-  -- Second pass: end_row = next cell's start - 1; last cell ends at the
-  -- buffer's last line. Cells that come out collapsed (end < start) here
-  -- get stashed to undo trash before prune_phantoms kills them, so a
-  -- subsequent `u` can splice them back. This handles the `dd` case
-  -- where vim moves the anchor to a collision with the next cell rather
-  -- than deleting it outright — the cell isn't "dead" (anchor is fine)
-  -- but its claimed range collapsed.
-  for i, cell in ipairs(nb.cells) do
-    if i < #nb.cells then
-      cell.end_row = nb.cells[i + 1].start_row - 1
+  -- Pass 3: resolve each cell's span from its own raw geometry (no longer
+  -- derived from the next cell's start — each cell's end is read directly
+  -- off its own anchor's end endpoint), clamped forward past whatever an
+  -- earlier cell's end anchor already claimed, and trash any cell whose
+  -- resolved span collapses.
+  local next_free = 0
+  for k, cell in ipairs(nb.cells) do
+    local r = raw[cell]
+    -- Clamp forward past rows an earlier cell already claimed. Needed
+    -- because a whole-line nvim_buf_set_lines replacement (gcc, smart
+    -- paste, apply_remote_changes, cell swap) pulls the FOLLOWING cell's
+    -- gravity-false start endpoint back onto the replaced region's start —
+    -- without this clamp two cells would both claim the same row.
+    local s = math.max(r.srow, next_free)
+    local e
+    if k == #nb.cells then
+      e = total_lines - 1 -- last cell owns to buffer end (today's rule)
     else
-      cell.end_row = total_lines - 1
+      -- Gap rows (rows between this cell's own content end and the next
+      -- cell's raw start) go to the earlier cell — the old derived
+      -- end_row semantics, preserved even though end_row is now primarily
+      -- read off this cell's own anchor.
+      e = math.max(r.content_end, raw[nb.cells[k + 1]].srow - 1)
     end
-    if cell.end_row < cell.start_row then
-      -- Snapshot the cell as it stood before its rows were consumed. The
-      -- pre-collapse cell.code still holds the deleted content from the
-      -- last successful sync; orig_start_row[cell] is the cell's true
-      -- original row (see the snapshot comment above), which is where `u`
-      -- restores it — cell.start_row itself may have already been
-      -- overwritten to a row shared with siblings collapsed in the same edit.
+    if e > total_lines - 1 then e = total_lines - 1 end
+
+    if s > total_lines - 1 or e < s then
+      -- Collapsed: EXACT existing handling. Snapshot the cell as it stood
+      -- before its rows were consumed — the pre-collapse cell.code still
+      -- holds the deleted content from the last successful sync;
+      -- orig_start_row[cell] is the cell's true original row (see the
+      -- snapshot comment above), which is where `u` restores it — cell's
+      -- resolved start_row itself may have already collided with a sibling
+      -- collapsed in the same edit. This is the `dd` case where vim moves
+      -- the anchor to a collision with the next cell rather than deleting
+      -- it outright — the cell isn't "dead" (anchor is fine) but its
+      -- claimed range collapsed.
+      cell.start_row, cell.end_row = s, s - 1
       notebook.push_undo_trash(nb, cell, orig_start_row[cell], batch_id)
 
       cell.code = ""
     else
-      local lines = vim.api.nvim_buf_get_lines(bufnr, cell.start_row, cell.end_row + 1, false)
+      cell.start_row, cell.end_row = s, e
+      next_free = e + 1
+      local lines = vim.api.nvim_buf_get_lines(bufnr, s, e + 1, false)
       cell.code = table.concat(lines, "\n")
+
+      -- Re-normalize this cell's anchor to its resolved canonical span.
+      -- Whole-line replacements pull the NEXT cell's gravity-false start
+      -- endpoint back onto the replaced region's start, and <CR>/replaces
+      -- can leave end endpoints at past-end (row+1, 0) sentinels. Left in
+      -- place, those skewed marks compound on the next edit; re-placing
+      -- every live cell's mark at its resolved canonical span makes each
+      -- sync self-healing. Extmark moves fire no on_bytes, so this is safe
+      -- both inside and outside with_suppressed_bytes.
+      if cell.anchor_mark_id then
+        M.place_cell_anchors(bufnr, cell, s, e)
+      end
     end
     cell.type = cell_mod.detect_type(cell.code)
   end
@@ -423,12 +530,12 @@ function M.create(nb, source_bufnr)
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
   vim.api.nvim_set_option_value("modified", false, { buf = bufnr })
 
-  -- Anchor each cell with an extmark at its start_row. From this moment
-  -- on, vim's extmark machinery tracks where the cell lives across every
-  -- subsequent buffer mutation — the integer start_row/end_row become
+  -- Anchor each cell with a [start_row, end_row] range extmark. From this
+  -- moment on, vim's extmark machinery tracks where the cell lives across
+  -- every subsequent buffer mutation — the integer start_row/end_row become
   -- cached values refreshed by sync_cells_from_extmarks.
   for _, cell in ipairs(nb.cells) do
-    M.place_cell_anchor(bufnr, cell, cell.start_row)
+    M.place_cell_anchors(bufnr, cell, cell.start_row, cell.end_row)
   end
 
   -- Render cell borders as virtual lines
@@ -450,7 +557,7 @@ function M.sync_cells_from_buffer(nb)
     return false
   end
 
-  if nb.cells[1] and nb.cells[1].start_mark_id then
+  if nb.cells[1] and nb.cells[1].anchor_mark_id then
     M.sync_cells_from_extmarks(bufnr, nb)
     return true
   end

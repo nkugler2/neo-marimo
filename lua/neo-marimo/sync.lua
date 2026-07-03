@@ -263,7 +263,7 @@ function M.reload_from_file(nb)
   -- namespace and shadow the fresh ones we place below.
   local hl = require("neo-marimo.highlights")
   vim.api.nvim_buf_clear_namespace(bufnr, hl.ns_cell_anchor, 0, -1)
-  for _, c in ipairs(nb.cells) do c.start_mark_id = nil end
+  for _, c in ipairs(nb.cells) do c.anchor_mark_id = nil end
 
   -- Rebuild cells
   local cell_mod = require("neo-marimo.cell")
@@ -295,7 +295,7 @@ function M.reload_from_file(nb)
     vim.api.nvim_set_option_value("modified", false, { buf = bufnr })
 
     for _, cell in ipairs(nb.cells) do
-      buffer.place_cell_anchor(bufnr, cell, cell.start_row)
+      buffer.place_cell_anchors(bufnr, cell, cell.start_row, cell.end_row)
     end
 
     buffer.render_all_borders(bufnr, nb)
@@ -397,7 +397,7 @@ function M.apply_remote_changes(nb, new_cells_data)
         vim.api.nvim_buf_set_lines(
           bufnr, cell.start_row, cell.end_row + 1, false, new_lines
         )
-        buffer.place_cell_anchor(bufnr, cell, at)
+        buffer.place_cell_anchors(bufnr, cell, at, at + #new_lines - 1)
 
         cell.code = new_code
         if new.name then cell.name = new.name end

@@ -264,26 +264,39 @@ keep resurfacing with every boundary-adjacent whole-line replace
 highest-leverage fix in this plan and should land **before any further
 editing features**.
 
-- [ ] Design + implement a genuine second anchor per cell: a trailing
+- [x] Design + implement a genuine second anchor per cell: a trailing
       anchor at the cell's last line end with `right_gravity = true`,
       and flip the start anchor to `right_gravity = false`. "Append after
       A" and "insert before B" become distinct positions; the ambiguity
-      is eliminated rather than re-aimed.
-- [ ] `sync_cells_from_extmarks` reads both anchors; keep prune as the
+      is eliminated rather than re-aimed. (Landed as ONE range extmark
+      per cell — `right_gravity = false` start, `end_right_gravity =
+      true` end — nvim clamps end ≥ start, so the inversion class is
+      gone by construction. One residual: `o` on a cell's last line is
+      byte-identical to `O` on the next cell's first line, so no gravity
+      scheme can split them; a buffer-local `o` map rewrites the
+      boundary case as `A<CR>` — same precedent as smart paste.)
+- [x] `sync_cells_from_extmarks` reads both anchors; keep prune as the
       defensive sweep for collapsed cells; audit `push_undo_trash` /
       `try_undo_restore` and the smart-paste re-anchor (`61cc648`
       rationale comment) for assumptions about start-only anchoring.
-- [ ] Regression tests (all currently missing from `editing_spec.lua`):
+      (3-pass resolver: read range geometry → zero-width-last sort →
+      forward-clamp + anchor re-normalization; whole-line replaces pull
+      the next cell's start back, healed by the clamp. Smart paste
+      gained a linewise-`p`-at-boundary branch for the same reason.)
+- [x] Regression tests (all currently missing from `editing_spec.lua`):
       (a) feedkeys-driven: type two lines with an `<CR>` into a fresh
       `<leader>mn` cell starting at col 0 → both land in the new cell;
       (b) `O` on a cell's first/only line → opened line belongs to that
       cell; (c) `o` at the end of the previous cell → line grows the
       previous cell (the case the old gravity protected);
-      (d) the full 7.5.x suite stays green.
-- [ ] This is the one item that should NOT go straight to an implementer
+      (d) the full 7.5.x suite stays green. (Plus: gcc-shape whole-line
+      replace at a boundary, linewise `p` on a cell's last row, and a
+      partial-dead-anchor survivor case from review. 187 passing.)
+- [x] This is the one item that should NOT go straight to an implementer
       subagent without a design pass — run it through the Plan agent or a
       dedicated session first; it touches the invariant every editing
-      path relies on.
+      path relies on. (Done: Plan-agent design pass with headless-nvim
+      probes → implementer → lua-reviewer → review fixes.)
 
 ---
 
