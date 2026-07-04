@@ -202,6 +202,68 @@ t.case("ws: variable-values is ambiguous when a cell has >1 widget — skip", fu
   widgets.clear_all_overrides()
 end)
 
+-- F2.6 regression: rekey_by_position/rekey_by_code overwrite cell.id in
+-- place; without migrating image.lua's and widgets.lua's cell-id-keyed
+-- registries, the old key is orphaned (never closed) and the new key finds
+-- nothing to clear, so the next render draws a second, stale-painting image
+-- placement on top of the fresh one. See docs/plan-refinement.md F2.6.
+t.case("ws: update-cell-ids migrates image and widget registries on re-key", function()
+  local image = require("neo-marimo.image")
+  local widgets = require("neo-marimo.widgets")
+  local nb, bufnr = t.make_notebook({ "a = 1" })
+  local old_id = nb.cells[1].id
+
+  local closed = 0
+  image._register_for_test(bufnr, old_id, "/tmp/neo-marimo-test.png", function()
+    closed = closed + 1
+  end)
+  widgets.register_widget(bufnr, old_id, { name = "slider", object_id = old_id .. "-0", value = 1 })
+
+  ws.dispatch("update-cell-ids", { cell_ids = { "NEW1" } }, { nb = nb })
+
+  t.eq(nb.cells[1].id, "NEW1", "cell re-keyed to the server id")
+  t.eq(closed, 0, "migrated placement was not closed")
+  t.eq(#widgets.list_for_cell(bufnr, old_id), 0, "old widget key is empty after migration")
+  t.eq(#widgets.list_for_cell(bufnr, "NEW1"), 1, "widget registry followed the id flip")
+
+  -- The old key is now a dead end (already migrated away, nothing to close);
+  -- the new key is where the live placement actually lives.
+  image.clear_for_cell(bufnr, old_id)
+  t.eq(closed, 0, "clearing the stale old key is a no-op")
+  image.clear_for_cell(bufnr, "NEW1")
+  t.eq(closed, 1, "clearing the new key closes the migrated placement")
+end)
+
+-- Reload rebuilds nb.cells as brand-new objects with fresh parse-minted ids
+-- (cell.new mints one whenever the parsed data has no id) — there's no
+-- old->new mapping to migrate by, so the registries must be torn down
+-- instead of leaked.
+t.case("sync: reload_from_file tears down image and widget registries", function()
+  local sync = require("neo-marimo.sync")
+  local parser = require("neo-marimo.parser")
+  local image = require("neo-marimo.image")
+  local widgets = require("neo-marimo.widgets")
+
+  local nb, bufnr = t.make_notebook({ "a = 1" })
+  local old_id = nb.cells[1].id
+
+  local closed = 0
+  image._register_for_test(bufnr, old_id, "/tmp/neo-marimo-test.png", function()
+    closed = closed + 1
+  end)
+  widgets.register_widget(bufnr, old_id, { name = "slider", object_id = old_id .. "-0", value = 1 })
+
+  local orig_parse_file = parser.parse_file
+  parser.parse_file = function() return { cells = { { name = "_", code = "a = 1" } } } end
+  local ok = sync.reload_from_file(nb)
+  parser.parse_file = orig_parse_file
+
+  t.eq(ok, true)
+  t.ok(nb.cells[1].id ~= old_id, "reload mints a fresh id, distinct from the old one")
+  t.eq(closed, 1, "reload closes the stale image placement")
+  t.eq(#widgets.list_for_cell(bufnr, old_id), 0, "reload clears the stale widget entry")
+end)
+
 t.case("ws: variable-values ignores null and non-scalar datatypes", function()
   local widgets = require("neo-marimo.widgets")
   widgets.clear_all_overrides()

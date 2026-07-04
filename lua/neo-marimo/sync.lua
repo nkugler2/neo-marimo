@@ -265,6 +265,23 @@ function M.reload_from_file(nb)
   vim.api.nvim_buf_clear_namespace(bufnr, hl.ns_cell_anchor, 0, -1)
   for _, c in ipairs(nb.cells) do c.anchor_mark_id = nil end
 
+  -- Tear down image placements and widget registry entries too: the cells
+  -- rebuilt below are brand-new objects with fresh parse-minted ids, so
+  -- every old registry key (keyed by the *old* cell.id) becomes permanently
+  -- unreachable — nothing will ever look it up again. An unmigrated image
+  -- placement doesn't just leak, it keeps painting its stale plot at its old
+  -- row for the rest of the session (docs/plan-refinement.md F2.6). Unlike
+  -- the re-key path (migrate_registries in ws_handlers.lua), there's no
+  -- old->new mapping to migrate by here — the cells are new objects, not
+  -- renamed ones — so clearing is the correct move, not just the simplest.
+  -- The next render of each cell (driven by the caller's subsequent cell-op
+  -- or a fresh run) redraws images from scratch under the new ids.
+  local widgets = require("neo-marimo.widgets")
+  require("neo-marimo.image").clear_for_cell(bufnr)
+  for _, c in ipairs(nb.cells) do
+    widgets.clear_for_cell(bufnr, c.id)
+  end
+
   -- Rebuild cells
   local cell_mod = require("neo-marimo.cell")
   nb.cells = {}

@@ -169,6 +169,36 @@ local function register_placement(bufnr, key, path, closer)
   _placements[bufnr][key] = { path = path, close = closer }
 end
 
+-- Move placement registry entries to follow a cell re-key, without closing
+-- or recreating them — the underlying image is still valid, only the key
+-- that finds it changed. `moves` is `{ [old_cell_id] = new_cell_id }` for
+-- cells whose id actually changed (see ws_handlers.lua's rekey_by_position /
+-- rekey_by_code). Without this, overwriting cell.id in place orphans the
+-- entry under its old key: the next render looks up the new id, finds
+-- nothing to close, and draws a *second* backend placement on top of the
+-- stale one, which keeps painting until session end
+-- (docs/plan-refinement.md F2.6).
+--
+-- Two passes, mirroring rebuild_index's own comment: collect every moved
+-- entry against the OLD table state first, then write them under their new
+-- keys, so a chain/swap of ids (one cell's new id equal to another cell's
+-- old id) can't drop or double an entry.
+function M.migrate_keys(bufnr, moves)
+  local buf_pl = _placements[bufnr]
+  if not buf_pl or not moves or next(moves) == nil then return end
+  local snapshot = {}
+  for old_key, new_key in pairs(moves) do
+    local entry = buf_pl[old_key]
+    if entry then
+      snapshot[new_key] = entry
+      buf_pl[old_key] = nil
+    end
+  end
+  for new_key, entry in pairs(snapshot) do
+    buf_pl[new_key] = entry
+  end
+end
+
 -- Close and forget the placement(s) for a buffer. With `key`, only that cell's
 -- placement; without, every placement in the buffer.
 function M.clear_for_cell(bufnr, key)
@@ -176,10 +206,24 @@ function M.clear_for_cell(bufnr, key)
   if not buf_pl then return end
   if key ~= nil then
     local entry = buf_pl[key]
-    if entry then pcall(entry.close) end
+    if entry then
+      -- Log close *failures* too: a throwing backend close is swallowed by
+      -- the pcall (rendering must go on), but the terminal graphic it was
+      -- supposed to delete stays painted — the one leak the registry can't
+      -- see. Surfacing it in :MarimoWsDebug is the only trace it leaves.
+      local ok = pcall(entry.close)
+      if log.enabled() then
+        log.write("img:clear", { key = key, close_ok = ok })
+      end
+    end
     buf_pl[key] = nil
   else
-    for _, entry in pairs(buf_pl) do pcall(entry.close) end
+    for k, entry in pairs(buf_pl) do
+      local ok = pcall(entry.close)
+      if log.enabled() and not ok then
+        log.write("img:clear", { key = k, close_ok = false })
+      end
+    end
     _placements[bufnr] = nil
   end
 end
@@ -203,7 +247,10 @@ local function render_path(bufnr, row, mime, path, key)
 
   local backend = pick_backend()
   if log.enabled() then
-    log.write("img:render_path", { backend = backend, mime = mime, key = key })
+    -- row + path make placement leaks diagnosable from the log alone: two
+    -- live versions of one plot show up as renders under different keys (or
+    -- rows) whose earlier entry never got a matching img:clear (F2.6 repro).
+    log.write("img:render_path", { backend = backend, mime = mime, key = key, row = row, path = path })
   end
 
   if backend == "image.nvim" then
@@ -378,5 +425,14 @@ end
 
 -- Expose for callers that need it (e.g. tests).
 M._b64_decode = b64_decode
+
+-- Test seam: seed the placement registry directly, bypassing render_path's
+-- backend dispatch (image.nvim/snacks.image aren't available in the headless
+-- test env, so a real M.render_at would always fall through to the
+-- no-placement text fallback). Lets specs assert on migrate_keys /
+-- clear_for_cell behaviour with a plain close-spy closure.
+function M._register_for_test(bufnr, key, path, closer)
+  register_placement(bufnr, key, path, closer)
+end
 
 return M

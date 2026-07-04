@@ -76,13 +76,35 @@ local function rebuild_index(nb)
   for _, c in ipairs(nb.cells) do nb.cell_by_id[c.id] = c end
 end
 
+-- Migrate the image and widget registries after a re-key. Both key their
+-- per-cell state by cell.id; overwriting cell.id in place without telling
+-- them strands the old entry (permanently unreachable) while the new id
+-- finds nothing to close, so the next render draws a *second* backend image
+-- placement on top of the stale one — the orphan keeps painting until
+-- session end (docs/plan-refinement.md F2.6). `moves` only needs entries for
+-- ids that actually changed; callers build it before mutating cell.id so the
+-- old ids are still readable.
+local function migrate_registries(nb, moves)
+  if not nb.bufnr or next(moves) == nil then return end
+  require("neo-marimo.image").migrate_keys(nb.bufnr, moves)
+  widgets.migrate_keys(nb.bufnr, moves)
+end
+
 -- Positional re-key: assign the i-th server id to the i-th nvim cell, then
 -- rebuild the index in one pass. Caller guarantees counts line up.
 local function rekey_by_position(nb, cell_ids)
+  -- Collect old->new before any assignment mutates cell.id, so the migration
+  -- below sees each cell's *pre*-rekey id.
+  local moves = {}
+  for i, srv_id in ipairs(cell_ids) do
+    local cell = nb.cells[i]
+    if cell and cell.id ~= srv_id then moves[cell.id] = srv_id end
+  end
   for i, srv_id in ipairs(cell_ids) do
     if nb.cells[i] then nb.cells[i].id = srv_id end
   end
   rebuild_index(nb)
+  migrate_registries(nb, moves)
 end
 
 -- Content-based re-key: pair each server (id, code) with the nvim cell that
@@ -104,8 +126,14 @@ local function rekey_by_code(nb, cell_ids, codes)
     if not match then return false end
     assign[match] = srv_id
   end
+  -- Collect old->new before mutating cell.id, same reason as rekey_by_position.
+  local moves = {}
+  for cell, srv_id in pairs(assign) do
+    if cell.id ~= srv_id then moves[cell.id] = srv_id end
+  end
   for cell, srv_id in pairs(assign) do cell.id = srv_id end
   rebuild_index(nb)
+  migrate_registries(nb, moves)
   return true
 end
 

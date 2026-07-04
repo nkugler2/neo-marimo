@@ -59,6 +59,38 @@ function M.list_for_cell(bufnr, cell_id)
   return M._by_cell[registry_key(bufnr, cell_id)] or {}
 end
 
+-- Move registry entries to follow a cell re-key, without touching the
+-- widgets themselves. `moves` is `{ [old_cell_id] = new_cell_id }` for cells
+-- whose id actually changed (see ws_handlers.lua's rekey_by_position /
+-- rekey_by_code). Without this, overwriting cell.id in place leaves the
+-- widget list stranded under a key nothing looks up again — the same
+-- orphaned-registry defect as image.lua's placements (docs/plan-refinement.md
+-- F2.6), just invisible here because it paints no pixels. Note: this table
+-- is the only cell-id-keyed widget state — value overrides and pins are
+-- keyed by object_id, which marimo mints from its own (already-authoritative)
+-- cell id, so they never carry a stale local id to begin with.
+--
+-- Two passes (collect against the OLD table, then apply) so a chain/swap of
+-- ids can't drop or double an entry — mirrors image.migrate_keys.
+function M.migrate_keys(bufnr, moves)
+  -- bufnr guard: registry_key concatenates bufnr, so a nil would raise
+  -- instead of no-op'ing like image.migrate_keys does (headless notebooks
+  -- have no buffer; the ws_handlers caller gates, but don't rely on it).
+  if not bufnr or not moves or next(moves) == nil then return end
+  local snapshot = {}
+  for old_id, new_id in pairs(moves) do
+    local old_key = registry_key(bufnr, old_id)
+    local entry = M._by_cell[old_key]
+    if entry then
+      snapshot[registry_key(bufnr, new_id)] = entry
+      M._by_cell[old_key] = nil
+    end
+  end
+  for new_key, entry in pairs(snapshot) do
+    M._by_cell[new_key] = entry
+  end
+end
+
 -- Add a parsed widget to the cell's registry (called by tree_render during
 -- the render walk, in document order). Stamps the widget with its 1-based
 -- position so focus can fall back to "same slot" when an object-id vanishes

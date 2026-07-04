@@ -237,6 +237,47 @@ keyed by object_id at module level and leak until session end. Note in
 the code why undo-restore of the same cell benefits from lazy clearing if
 that motivated the current shape — if so, clear on trash-expiry instead.
 
+### F2.6 Orphaned image placements after cell re-key / disk reload **[confirmed — duplicate stale graph]**
+
+> Found 2026-07-03 from a live repro (two versions of a plot in one
+> notebook: stale values above, fresh below, revealed at different
+> scroll positions). Same defect class as F2.5: module-level registries
+> keyed by `cell.id` that nobody reconciles when ids change.
+
+`image.lua:164` `_placements[bufnr]` is keyed by `cell.id`, and
+`render_path` tears down the previous placement under that same key
+before drawing — correct only while ids are stable. But
+`rekey_by_position` / `rekey_by_code` (`ws_handlers.lua:81-110`)
+overwrite `cell.id` in place, and `sync.reload_from_file` rebuilds
+`nb.cells` as brand-new objects with fresh local ids; nothing migrates
+or clears the placement registry (`image.clear_for_cell` is only called
+from `output.lua`'s render path and `clear_all`, which only the
+kernel-restart action and clear-outputs keymap reach). After an id
+flip, the next render looks up the new id, finds nothing to clear, and
+draws a **second** backend placement; the orphan keeps painting at its
+old row (image.nvim/snacks own extmark) until session end.
+`widgets._by_cell` has the identical exposure — invisible only because
+it paints no pixels.
+
+- [x] Migrate keyed registries on re-key: build the old→new id mapping
+      in both rekey fns and remap `image` placements (via a public
+      accessor, not by reaching into `_placements`) and the widget
+      registry in one shared helper. (`migrate_registries` in
+      ws_handlers; two-pass collect-then-apply remap in both modules so
+      id swaps/chains can't drop or double an entry. Widget value
+      overrides/pins confirmed keyed by server-minted object_id — no
+      migration needed.)
+- [x] `reload_from_file`: tear down the buffer's image placements and
+      widget registry entries — the rebuilt cells are new objects, so
+      the old keys are permanently unreachable. This also covers the
+      `reload` (0.23+) ws handler, which goes through it. (Verified:
+      the rekey count-mismatch fallback clears under old ids then
+      no-ops the migration for the never-registered fresh ids.)
+- [x] Tests: `ws_dispatch_spec.lua` — placement registered under the
+      old id is still owned (and cleanly replaceable) after an
+      `update-cell-ids` re-key flips ids; reload path closes
+      placements (close-spy called). (189 passing.)
+
 ---
 
 ## Phase F3 — Cell-boundary anchor redesign (phase-sized, architectural)
@@ -470,7 +511,7 @@ currently ships blind.
 | Phase | Items | Size | Agent routing |
 | --- | --- | --- | --- |
 | F1 | 1.1–1.5 | ~1 session | implementer per item; 1.4 touches Lua+Python |
-| F2 | 2.1–2.5 | ~1 session | implementer; 2.1 first, 2.5 is inline-trivial |
+| F2 | 2.1–2.6 | ~1 session | implementer; 2.1 first, 2.5 is inline-trivial, 2.6 found post-F3 |
 | F3 | 3.1 | 1–2 sessions | Plan agent design pass first, then implementer |
 | F4 | 4.1–4.4 | ~1 session | implementer; 4.4 partly docs-writer |
 | F5 | 5.1–5.4 | ~half session | implementer (5.1 is mechanical) |
