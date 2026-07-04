@@ -278,6 +278,39 @@ it paints no pixels.
       `update-cell-ids` re-key flips ids; reload path closes
       placements (close-spy called). (189 passing.)
 
+### F2.7 tmux kitty-graphics fossils: no cleanup at exit, no sweep at attach **[confirmed mechanism]**
+
+> Follow-up to F2.6 and the Deferred tmux-ghost note. Inside tmux
+> (`allow-passthrough on`), kitty-graphics images outlive nvim: the
+> terminal keeps the pixels, tmux doesn't know they exist, and nothing
+> deletes them — `init.lua`'s BufWipeout cleanup closes watcher/LSP/
+> server but not image placements, and there is no VimLeavePre hook.
+> A session that exits (or crashes) with a plot onscreen leaves a
+> fossil that the next session shows as a "stale graph." Timeline
+> evidence: ghosts became routine when F1.2 (2026-07-02) made id-flip
+> re-keys common (orphaning placements pre-F2.6); post-F2.6 the log
+> shows clean single placements, and outside tmux there are no ghosts.
+
+- [x] Close all image placements at exit (`VimLeavePre`) and in the
+      BufWipeout cleanup (`image.clear_for_cell(bufnr)`), so normal
+      session ends stop minting fossils. (`image.clear_all()`; the
+      VimLeavePre hook is module-level, once per session, pcall'd.)
+- [x] Attach-time ghost sweep: when `$TMUX` is set and an image backend
+      exists, emit the kitty delete-all-images escape (tmux
+      passthrough-wrapped) once before the first render — clears
+      fossils inherited from crashed/pre-fix sessions at the one moment
+      it cannot hit our own placements. Config escape hatch to disable.
+      (`image.sweep_terminal`; flag `images.tmux_sweep_on_attach`,
+      default on. Escape sequences verified byte-for-byte in review.)
+- [x] `:MarimoImageRepaint` command: delete-all escape + close registry
+      placements + re-render outputs — one-keystroke recovery when a
+      passthrough delete gets eaten mid-session. (Warns instead of
+      claiming success when no image backend is installed.)
+- [x] Tests for the pure parts (escape-sequence construction tmux vs
+      bare, sweep gating, wipeout closes placements); terminal pixels
+      can't be asserted headless — say so in the spec comments.
+      (`image_sweep_spec.lua`, 7 cases; 196 passing.)
+
 ---
 
 ## Phase F3 — Cell-boundary anchor redesign (phase-sized, architectural)
@@ -498,6 +531,18 @@ currently ships blind.
   wins; wrong width with two splits of the same buffer.
 - **nvim→browser widget glyph** — upstream marimo limitation, already
   documented in TOCHANGE; no action.
+- **Stale plot "ghosts" under tmux (2026-07-03)** — NOT a plugin
+  registry bug: after F2.6, the debug log shows a single placement per
+  cell with clean closes, yet a fossilized first render can stay
+  onscreen when nvim runs inside tmux (`allow-passthrough on`) —
+  kitty-graphics images are painted by the terminal at absolute screen
+  pixels, tmux redraws text only, and deletes/repositions for scrolled
+  placements don't reliably land. Reproduces with snacks.image +
+  Ghostty + tmux; **confirmed clean outside tmux (2026-07-04): the
+  same notebook/widget flow shows no ghosts when nvim runs directly in
+  Ghostty** — the bug is strictly tmux-passthrough-related, **and F2.7
+  (below) fixes it for the tmux case too**: exit/wipeout cleanup plus a
+  once-per-session attach sweep clear inherited fossils automatically.
 - **Image placement drift (rendering B4)** — depends on image.nvim /
   snacks internals; re-test after F2.1 lands, likely resolved by it.
 - **`server.lua` split** (process/http/ws) — stays deferred per

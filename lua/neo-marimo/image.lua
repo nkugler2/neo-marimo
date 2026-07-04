@@ -228,6 +228,78 @@ function M.clear_for_cell(bufnr, key)
   end
 end
 
+-- Close every placement in every buffer. Used by the VimLeavePre sweep and
+-- BufWipeout cleanup: kitty graphics painted through tmux passthrough
+-- outlive the nvim process (the terminal keeps the pixels; tmux never
+-- tracks or repaints them), so an exit that doesn't explicitly delete
+-- placements strands them as fossils the next session shows as a stale
+-- duplicate graph (docs/plan-refinement.md F2.7). Snapshot the buffer keys
+-- before closing — clear_for_cell(bufnr) (no key) nils out
+-- _placements[bufnr], which would corrupt a live `pairs` iteration.
+function M.clear_all()
+  local bufnrs = {}
+  for bufnr in pairs(_placements) do
+    table.insert(bufnrs, bufnr)
+  end
+  for _, bufnr in ipairs(bufnrs) do
+    M.clear_for_cell(bufnr)
+  end
+end
+
+-- ── terminal sweep (F2.7) ────────────────────────────────────────────────
+--
+-- Everything above manages placements *this session* created. It can't see
+-- placements a previous (crashed, force-quit, or pre-F2.7) session left
+-- behind: inside tmux those live entirely in the terminal's kitty-graphics
+-- state, which tmux passthrough never mirrors back to us. The only way to
+-- clear that inherited state is to ask the terminal to delete everything.
+
+-- Bare kitty "delete all images" escape. `a=d` selects the delete action;
+-- `d=A` (as opposed to plain `d`, which only hides placements) also frees
+-- the terminal's stored image data, so it can't reappear on a later resize
+-- or repaint.
+local KITTY_DELETE_ALL = "\27_Ga=d,d=A\27\\"
+
+-- Build the escape sequence to emit, without emitting it — kept separate
+-- from sweep_terminal so tests can assert on both the bare and
+-- tmux-wrapped forms without a real terminal attached. tmux passthrough
+-- requires wrapping the whole sequence in `\27Ptmux;...\27\\` with every
+-- literal ESC inside doubled, or tmux parses (and swallows) the inner
+-- escape itself instead of forwarding it to the terminal.
+function M._sweep_sequence(in_tmux)
+  if not in_tmux then return KITTY_DELETE_ALL end
+  local doubled = KITTY_DELETE_ALL:gsub("\27", "\27\27")
+  return "\27Ptmux;" .. doubled .. "\27\\"
+end
+
+-- Overridable emit seam. Production writes straight to the terminal via
+-- the stderr channel — the way inline-image plugins send control
+-- sequences without the TUI swallowing them as keystrokes; io.stdout would
+-- fight nvim's own screen writes. pcall'd as defense against embed/remote
+-- configurations where the stderr channel may reject writes (plain
+-- --headless accepts them — verified — so this is belt-and-braces, not a
+-- headless requirement). Tests replace this with a capturing stub so the
+-- gating logic can be asserted without a terminal.
+function M._emit(seq)
+  pcall(vim.api.nvim_chan_send, vim.v.stderr, seq)
+end
+
+-- Emit a kitty delete-all-images escape to the terminal. Two callers:
+--   * the once-per-session attach sweep (force = false), gated to tmux
+--     (outside tmux the terminal clears its own state on exit fine, and
+--     nuking other apps' images would be an unwelcome surprise) — see
+--     init.lua's attach-time call for the "first attach only" guard;
+--   * :MarimoImageRepaint (force = true), which also runs bare so it works
+--     as a recovery command even without tmux in the picture.
+-- Skipped either way when no image backend is detected: if nothing could
+-- have drawn a kitty placement, there's nothing to clear.
+function M.sweep_terminal(force)
+  if not pick_backend() then return end
+  local in_tmux = vim.env.TMUX ~= nil and vim.env.TMUX ~= ""
+  if not in_tmux and not force then return end
+  M._emit(M._sweep_sequence(in_tmux))
+end
+
 -- ── public API ────────────────────────────────────────────────────────────
 
 -- Draw an image that already lives on disk at `path`, using whatever backend

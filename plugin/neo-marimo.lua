@@ -483,6 +483,25 @@ vim.api.nvim_create_user_command("MarimoResetWidgets", function()
   vim.notify("[neo-marimo] Widget overrides cleared.", vim.log.levels.INFO)
 end, { desc = "Clear all widget value overrides and re-render" })
 
+-- Recovery for tmux passthrough eating a delete-images escape mid-session
+-- (plan-refinement.md F2.7): force a terminal-side delete-all, drop this
+-- notebook's placement registry, and re-render outputs so plots redraw.
+vim.api.nvim_create_user_command("MarimoImageRepaint", function()
+  local marimo = require("neo-marimo")
+  local nb = marimo.current_notebook()
+  if not nb then
+    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    return
+  end
+  if not require("neo-marimo.image").backend() then
+    vim.notify("[neo-marimo] No image backend detected (install image.nvim or snacks.image)",
+      vim.log.levels.WARN)
+    return
+  end
+  require("neo-marimo.actions").repaint_images(nb.bufnr, nb)
+  vim.notify("[neo-marimo] Repainted inline images.", vim.log.levels.INFO)
+end, { desc = "Force-clear and redraw inline images (tmux passthrough recovery)" })
+
 -- Phase 8.3: open the widget picker for the cell under the cursor. Lists
 -- every UI element marimo emitted in the cell's last output and lets the
 -- user adjust its value, which POSTs to /api/kernel/set_ui_element_value

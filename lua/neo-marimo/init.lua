@@ -16,6 +16,29 @@ local M = {}
 -- Track active notebooks by source filepath to avoid double-attaching
 local _attached = {}
 
+-- Whether the attach-time tmux image sweep (F2.7) has already run this
+-- session. A second/third notebook attaching later must NOT re-sweep — the
+-- first notebook's placements are live by then, and a delete-all would
+-- strand it exactly the way this feature is meant to prevent.
+local _swept_images = false
+
+-- Kitty-graphics placements painted through tmux passthrough outlive the
+-- nvim process — the terminal keeps the pixels and tmux never tracks or
+-- repaints them, so nothing short of an explicit delete clears them on
+-- exit. Sweep on every exit (not just BufWipeout) so plain :qa / crashes
+-- don't strand fossils for the next session (docs/plan-refinement.md F2.7).
+-- Module-level, created once at load time (this file is `require`d exactly
+-- once per session), mirroring the single-instance state above.
+vim.api.nvim_create_autocmd("VimLeavePre", {
+  callback = function()
+    -- pcall the whole body: an exit-time throw would surface as a shutdown
+    -- error message and can abort remaining VimLeavePre handlers. The
+    -- individual closes inside clear_all are already pcall'd, but this
+    -- guards whatever the callback grows to include later.
+    pcall(function() require("neo-marimo.image").clear_all() end)
+  end,
+})
+
 -- Set to true around code paths that intentionally load the underlying .py
 -- buffer (e.g. :MarimoToggle off). The BufReadPost autocmd in
 -- plugin/neo-marimo.lua checks this flag and skips its auto-attach so we
@@ -57,6 +80,19 @@ end
 -- This reads the file, creates the notebook buffer, and swaps the window.
 function M.attach(source_bufnr)
   local filepath = vim.api.nvim_buf_get_name(source_bufnr)
+
+  -- One-time, first-attach-only sweep of terminal-side kitty-graphics
+  -- state inherited from a crashed or pre-F2.7 session. This is the only
+  -- point in the session guaranteed safe: nothing has rendered an image
+  -- yet, so a delete-all can't hit one of our own live placements. Must
+  -- run before any output render (below, and on every subsequent cell-op),
+  -- and only once — a later attach (second notebook) would otherwise sweep
+  -- while the first notebook's placements are live.
+  local img_cfg = config.options.images or {}
+  if not _swept_images and img_cfg.tmux_sweep_on_attach ~= false then
+    _swept_images = true
+    require("neo-marimo.image").sweep_terminal(false)
+  end
 
   -- Avoid double-attaching. The buffer must be both valid (not wiped) and
   -- loaded — a :bd leaves the buffer "valid" but unloaded, in which case
@@ -163,6 +199,10 @@ function M.attach(source_bufnr)
     once = true,
     callback = function()
       _attached[filepath] = nil
+      -- Close this buffer's placements explicitly rather than waiting for
+      -- VimLeavePre — a :bw mid-session should not leave a fossil behind
+      -- either (docs/plan-refinement.md F2.7).
+      require("neo-marimo.image").clear_for_cell(nb_bufnr)
       watcher.stop(filepath)
       lsp.cleanup(filepath)
       if resize_autocmd_id then

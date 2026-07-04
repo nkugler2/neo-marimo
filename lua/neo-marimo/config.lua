@@ -45,6 +45,22 @@ M.defaults = {
     watch_file = true,
   },
 
+  -- Inline-image handling (plan-refinement F2.7).
+  images = {
+    -- Sweep the terminal's kitty-graphics state once, on the first
+    -- notebook attach of the session, but only inside tmux. Kitty
+    -- placements drawn through tmux passthrough outlive nvim — the
+    -- terminal keeps the pixels and tmux never tracks or repaints them —
+    -- so a crashed or force-quit session leaves fossils that the next
+    -- session's placements land on top of. Attach time, before the first
+    -- attach's own render, is the only moment a delete-all is guaranteed
+    -- not to hit one of our own live placements. Trade-off: it also
+    -- clears images drawn by any other program sharing the same tmux
+    -- pane/window surface; set to false if that matters to you (recover a
+    -- stuck fossil later with :MarimoImageRepaint instead).
+    tmux_sweep_on_attach = true,
+  },
+
   -- Visual settings
   ui = {
     -- "rounded" uses box-drawing chars, "simple" uses dashes, "none" hides borders

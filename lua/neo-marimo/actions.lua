@@ -432,4 +432,16 @@ function M.restart_kernel(bufnr, nb)
   end)
 end
 
+-- Recovery for tmux passthrough eating a delete mid-session (F2.7):
+-- force a terminal-side delete-all (works with or without tmux), drop
+-- every registry placement for this notebook so render_path's
+-- same-path dedup can't short-circuit, and re-render outputs so the
+-- images redraw fresh.
+function M.repaint_images(bufnr, nb)
+  local image = require("neo-marimo.image")
+  image.sweep_terminal(true)
+  image.clear_for_cell(bufnr)
+  output.render_all(bufnr, nb, nb.filepath)
+end
+
 return M
