@@ -54,6 +54,37 @@ t.case("api: register_widget_renderer routes a custom widget name", function()
   t.eq(focused[1][1][1], "▸ ", "focus marker replaces the indent chunk")
 end)
 
+t.case("api: a throwing widget renderer gets a placeholder, not an abort (F4.1)", function()
+  -- F4.1: widgets.M.render_widget used to call the registered renderer
+  -- directly with no pcall — a throw here propagated out through
+  -- tree_render's node walk and aborted the whole cell's output build,
+  -- taking every sibling widget in the same layout down with it.
+  marimo.register_widget_renderer("spec_throws", function()
+    error("boom")
+  end)
+
+  local lines = widgets.render_widget({ name = "spec_throws", value = 1, options = {} })
+  t.ok(lines[1] ~= nil, "a placeholder line is returned instead of raising")
+  t.match(lines[1][1][1], "widget error", "placeholder names the failure")
+
+  -- Deregister so other specs see the stock unknown-renderer fallback.
+  -- register_renderer(name, nil) is the deregister path (plan-refinement
+  -- F4.4) now that widgets' RENDERERS table isn't reachable to splice
+  -- directly.
+  widgets.register_renderer("spec_throws", nil)
+
+  -- A normal, unrelated widget still renders fine afterwards.
+  local ok_lines = widgets.render_widget({ name = "slider", value = 3, options = { start = 0, stop = 10 } })
+  t.ok(ok_lines[1] ~= nil, "unrelated widget renders normally after the throw")
+  t.no_match(ok_lines[1][1][1] or "", "error", "no error leaked into an unrelated widget")
+
+  -- The deregister actually took effect: spec_throws now falls back to the
+  -- unknown-renderer placeholder instead of either the custom handler or the
+  -- error placeholder.
+  local after = widgets.render_widget({ name = "spec_throws", value = 1, options = {} })
+  t.match(after[1][2][1], "%[spec_throws%]", "unknown renderer placeholder after deregister")
+end)
+
 t.case("api: register_ws_handler dispatches the op", function()
   local got = nil
   marimo.register_ws_handler("x-spec-op", function(payload, ctx)
@@ -63,17 +94,54 @@ t.case("api: register_ws_handler dispatches the op", function()
   t.ok(handled, "dispatch returns true for a registered op")
   t.eq(got.payload.a, 1)
   t.eq(got.ctx.nb, "NB")
-  ws_handlers.handlers["x-spec-op"] = nil
+
+  -- register(op, nil) is the deregister path (plan-refinement F4.4) now that
+  -- ws_handlers' handlers table isn't reachable to splice directly.
+  ws_handlers.register("x-spec-op", nil)
+  t.eq(ws_handlers.dispatch("x-spec-op", { a = 1 }, { nb = "NB" }), false,
+    "dispatch returns false once the op is deregistered")
 end)
 
 t.case("api: register_cell_detector participates in detect_type", function()
-  marimo.register_cell_detector(function(code)
+  marimo.register_cell_detector("spectype", function(code)
     return code:find("SPECMARKER", 1, true) ~= nil
-  end, "spectype", 5)
+  end, 5)
   t.eq(cell_mod.detect_type("x = 1  # SPECMARKER"), "spectype")
   t.eq(cell_mod.detect_type("x = 1"), "python")
-  -- Remove the detector so other specs see the stock chain.
-  for i, d in ipairs(cell_mod.detectors) do
-    if d.type == "spectype" then table.remove(cell_mod.detectors, i) break end
-  end
+  -- Remove the detector so other specs see the stock chain. A nil predicate
+  -- is the deregister path (plan-refinement F4.4) now that the detector
+  -- chain isn't reachable to splice directly.
+  cell_mod.register_detector("spectype", nil)
+  t.eq(cell_mod.detect_type("x = 1  # SPECMARKER"), "python",
+    "deregistered detector no longer matches")
+end)
+
+t.case("api: a throwing detector is skipped, not fatal — cell.new still succeeds (F4.1)", function()
+  -- F4.1: M.detect_type used to call each predicate with no pcall, so a
+  -- throwing detector raised straight out of cell.new during parse and
+  -- broke attach entirely. It should now be skipped (falling through to
+  -- the remaining detectors / the python default) instead of aborting.
+  marimo.register_cell_detector("spec_throws", function()
+    error("boom")
+  end, 1)
+
+  local ok, detected = pcall(cell_mod.detect_type, "x = 1")
+  t.ok(ok, "detect_type does not raise when a detector throws")
+  t.eq(detected, "python", "falls through to the default")
+
+  local ok_new, cell = pcall(cell_mod.new, { code = "x = 1" }, 1)
+  t.ok(ok_new, "cell.new does not raise when a detector throws")
+  t.eq(cell.type, "python", "cell still constructed with the fallback type")
+
+  -- Our throwing detector sits at priority 1, ahead of the built-in
+  -- markdown detector (priority 10) — so a markdown-matching cell still
+  -- reaches and matches it, proving detection falls through past the
+  -- throw to the rest of the chain rather than stopping there.
+  t.eq(cell_mod.detect_type("mo.md('hi')"), "markdown",
+    "later detectors in the chain still run after an earlier one throws")
+
+  cell_mod.register_detector("spec_throws", nil)
+  local ok_after, detected_after = pcall(cell_mod.detect_type, "x = 1")
+  t.ok(ok_after, "detect_type no longer touches the throwing detector")
+  t.eq(detected_after, "python", "falls through to the default after deregister")
 end)

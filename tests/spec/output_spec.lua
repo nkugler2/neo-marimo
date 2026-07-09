@@ -6,6 +6,7 @@ local output = require("neo-marimo.output")
 local widgets = require("neo-marimo.widgets")
 local hl = require("neo-marimo.highlights")
 local markdown = require("neo-marimo.markdown")
+local image = require("neo-marimo.image")
 
 local _next = 0
 
@@ -216,6 +217,118 @@ t.case("output: full notebook.py cell-4 payload renders every tab", function()
   t.eq(names.refresh, 1)
 end)
 
+t.case("output: registered renderers receive a populated opts (F4.3)", function()
+  -- F4.3: the documented (data, opts) contract used to hand every renderer
+  -- an empty {} — a third-party renderer registered via register_renderer
+  -- had no way to draw an image or register a widget, since only the
+  -- built-ins could reach bufnr/cell_id/row through the private
+  -- _render_ctx upvalue. Assert opts is now actually populated.
+  local seen_opts
+  output.register_renderer("application/vnd.neo-marimo-test+json", function(_data, opts)
+    seen_opts = opts
+    return { { { "  [test]", "MarimoOutputText" } } }
+  end)
+
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  local cell = make_cell(bufnr, {
+    mimetype = "application/vnd.neo-marimo-test+json",
+    data = { hello = "world" },
+  })
+  output.render(bufnr, cell, "/tmp/notebook.py")
+
+  -- Clean up the registry entry immediately so a failure below can't leak
+  -- this renderer into other specs. register_renderer(mime, nil) is the
+  -- deregister path (plan-refinement F4.4) now that output's renderers
+  -- table isn't reachable to splice directly.
+  output.register_renderer("application/vnd.neo-marimo-test+json", nil)
+
+  t.ok(seen_opts ~= nil, "renderer was invoked")
+  t.eq(seen_opts.bufnr, bufnr, "opts.bufnr matches the rendering buffer")
+  t.eq(seen_opts.cell_id, cell.id, "opts.cell_id matches the cell")
+  t.eq(seen_opts.row, cell.end_row, "opts.row matches the cell's end_row")
+  t.eq(seen_opts.filepath, "/tmp/notebook.py", "opts.filepath is forwarded")
+
+  -- The deregister actually took effect: re-rendering the same mimetype now
+  -- falls back to the generic "unknown mimetype" placeholder instead of
+  -- reaching the (deregistered) custom renderer.
+  output.render(bufnr, cell, "/tmp/notebook.py")
+  t.match(table.concat(virt_lines_at(bufnr), "\n"),
+    vim.pesc("[application/vnd.neo-marimo-test+json]"),
+    "unknown-mimetype placeholder after deregister")
+end)
+
+t.case("output: a throwing renderer gets a placeholder, doesn't blank the cell or break other cells (F4.1)", function()
+  -- F4.1: before the pcall wrap, a throwing renderer propagated into the
+  -- cell-op WS handler's own pcall, which suppressed ALL further rendering
+  -- with a misattributed "WS handler failed" warning — and because
+  -- M.render clears ns_output before building new virt_lines, the throw
+  -- left the cell silently blank. Assert the failure is contained to a
+  -- visible placeholder and the rest of rendering still works.
+  local mime = "application/vnd.neo-marimo-throws+json"
+  output.register_renderer(mime, function()
+    error("boom")
+  end)
+
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  local cell = make_cell(bufnr, { mimetype = mime, data = { x = 1 } })
+  output.render(bufnr, cell)
+
+  -- Deregister immediately so a failure below can't leak into other specs.
+  -- register_renderer(mime, nil) is the deregister path (plan-refinement
+  -- F4.4) now that output's renderers table isn't reachable to splice
+  -- directly.
+  output.register_renderer(mime, nil)
+
+  local joined = table.concat(virt_lines_at(bufnr), "\n")
+  t.match(joined, "renderer error", "placeholder line shown instead of a blank cell")
+  -- vim.pesc: mime contains "+", a Lua pattern magic char.
+  t.match(joined, vim.pesc(mime), "placeholder names the offending mimetype")
+
+  -- A second, unrelated cell in the same buffer still renders fine.
+  local other = make_cell(bufnr, { mimetype = "text/plain", data = "still fine" })
+  output.render(bufnr, other)
+  t.match(table.concat(virt_lines_at(bufnr), "\n"), "still fine",
+    "an unrelated cell renders normally after the throwing renderer")
+
+  -- The deregister actually took effect: re-rendering the same cell no
+  -- longer reaches the (now-gone) throwing renderer, so the error
+  -- placeholder is gone and the fallback "unknown mimetype" line shows
+  -- instead.
+  output.render(bufnr, cell)
+  local rejoined = table.concat(virt_lines_at(bufnr), "\n")
+  t.no_match(rejoined, "renderer error", "no longer routes to the deregistered renderer")
+  t.match(rejoined, vim.pesc("[" .. mime .. "]"), "falls back to the unknown-mimetype placeholder")
+end)
+
+t.case("output: image_drawn is only set after a successful draw, so a throwing image render still cleans up the orphan (F4.1 review)", function()
+  -- F4.1 follow-up: render_image (the built-in "image/*" renderer) used to
+  -- set _render_ctx.image_drawn = true *before* calling image.render_base64.
+  -- safe_render's pcall catches a throw there and shows the placeholder, but
+  -- image_drawn was already true by then, so M.render's orphan-image cleanup
+  -- (image.clear_for_cell, gated on image_drawn == false) never fired — a
+  -- placement from a *previous* successful render would silently survive
+  -- next to the new error placeholder. Stub image.render_base64 to throw and
+  -- assert the cleanup still runs.
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  -- Non-empty data: an empty string is treated as "no output" and never
+  -- reaches the renderer at all (see the early-return in output_to_virt_lines).
+  local cell = make_cell(bufnr, { mimetype = "image/png", data = "AAAA" })
+
+  -- Stand in for a prior render's live placement.
+  local closed = false
+  image._register_for_test(bufnr, cell.id, "/tmp/fake.png", function() closed = true end)
+
+  local orig_render_base64 = image.render_base64
+  image.render_base64 = function() error("boom") end
+  local ok = pcall(output.render, bufnr, cell)
+  image.render_base64 = orig_render_base64
+
+  t.ok(ok, "M.render itself doesn't raise even though the image renderer threw")
+  t.ok(closed, "the orphaned placement was cleaned up despite the throw")
+  t.match(table.concat(virt_lines_at(bufnr), "\n"), "renderer error",
+    "the throw still surfaces as a placeholder")
+end)
+
 t.case("highlights: MarimoOutputText is readable, not a dim/italic Comment link (F2.4)", function()
   -- F2.4: MarimoOutputText used to `link = "Comment"`, which is dim + italic
   -- in most colorschemes and made all plain repr() output unreadable.
@@ -259,4 +372,83 @@ t.case("highlights: plain repr() output still uses MarimoOutputText (F2.4)", fun
     end
   end
   t.ok(groups["MarimoOutputText"], "plain output still uses MarimoOutputText")
+end)
+
+-- ── viewport freeze across a render pass ────────────────────────────────────
+--
+-- A cell re-renders several times per run (queued → running → idle w/
+-- output), each pass swapping the cell's virt_lines for a different line
+-- count. With the cursor below the cell, that transient height change used
+-- to be able to leave the window's topline nudged even once the final
+-- output settled back to its original size. render() now snapshots each
+-- window's topline before touching the extmark and restores it after.
+
+t.case("output: topline is unchanged across a queued/running/idle sequence that ends at the same size", function()
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  local lines = { "x = 1", "y = 2", "z = 3" }
+  for i = 1, 30 do table.insert(lines, "below " .. i) end
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+  vim.api.nvim_set_current_buf(bufnr)
+  local win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_height(win, 10)
+  -- Cursor well below the cell (rows 0-2), so the cell's output height
+  -- factors into how many screen rows separate topline and the cursor.
+  vim.api.nvim_win_set_cursor(win, { 10, 0 })
+  vim.fn.winrestview({ topline = 1 })
+
+  local cell = {
+    id = "topline-cell", index = 1, name = "_",
+    start_row = 0, end_row = 2, status = "idle", _has_run = true,
+  }
+  local big = {}
+  for i = 1, 8 do big[i] = "plot row " .. i end
+
+  cell.output = { mimetype = "text/plain", data = table.concat(big, "\n") }
+  output.render(bufnr, cell)
+  vim.cmd("redraw")
+  local stable_topline = vim.fn.winsaveview().topline
+
+  -- Widget value change: queued/running shrinks the cell to its 1-line
+  -- status placeholder…
+  cell.status = "running"
+  cell.output = nil
+  output.render(bufnr, cell)
+  vim.cmd("redraw")
+  t.eq(vim.fn.winsaveview().topline, stable_topline,
+    "topline unchanged during the running placeholder")
+
+  -- …then idle restores the same-size output.
+  cell.status = "idle"
+  cell.output = { mimetype = "text/plain", data = table.concat(big, "\n") }
+  output.render(bufnr, cell)
+  vim.cmd("redraw")
+  t.eq(vim.fn.winsaveview().topline, stable_topline,
+    "topline unchanged once the final output resettles")
+end)
+
+t.case("output: a cell's first large render still scrolls the window to keep the cursor visible", function()
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  local lines = { "x = 1", "y = 2", "z = 3" }
+  for i = 1, 30 do table.insert(lines, "below " .. i) end
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+  vim.api.nvim_set_current_buf(bufnr)
+  local win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_height(win, 10)
+  vim.api.nvim_win_set_cursor(win, { 5, 0 })
+  vim.fn.winrestview({ topline = 1 })
+
+  local cell = {
+    id = "topline-cell-2", index = 1, name = "_",
+    start_row = 0, end_row = 2, status = "idle", _has_run = true,
+  }
+  local big = {}
+  for i = 1, 20 do big[i] = "plot row " .. i end
+  cell.output = { mimetype = "text/plain", data = table.concat(big, "\n") }
+  output.render(bufnr, cell)
+  vim.cmd("redraw")
+
+  local view = vim.fn.winsaveview()
+  local info = vim.fn.getwininfo(win)[1]
+  t.ok(view.lnum >= info.topline and view.lnum <= info.botline,
+    "cursor still visible — the freeze doesn't block a genuinely required scroll")
 end)

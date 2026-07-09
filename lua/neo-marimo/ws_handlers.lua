@@ -22,11 +22,20 @@ local widgets = require("neo-marimo.widgets")
 
 local M = {}
 
-M.handlers = {}
+-- Local, not `M.handlers` (plan-refinement F4.4): the registry storage isn't
+-- part of the frozen public surface — M.register is the only supported write
+-- path (mirrors widgets.lua's local RENDERERS).
+local handlers = {}
 
--- Register a handler for an op name. Overwrites any previous registration.
+-- Register a handler for an op name, or deregister it when `fn` is nil (a
+-- plain table assignment already treats nil as "remove the key"; documented
+-- here since the table itself is no longer reachable to splice directly).
+-- Overwrites any previous registration. The nil-to-remove path (F4.4)
+-- mirrors output.register_renderer / widgets.register_renderer — needed by
+-- tests that register a throwing handler (F4.1) and must clean it up so
+-- later specs dispatch against the stock table.
 function M.register(op, fn)
-  M.handlers[op] = fn
+  handlers[op] = fn
 end
 
 -- Per-op error counts for the containment below. Exposed for tests and
@@ -43,7 +52,7 @@ M._handler_errors = {}
 -- and stay silent after that; the count is kept so the problem is still
 -- diagnosable.
 function M.dispatch(op, payload, ctx)
-  local fn = M.handlers[op]
+  local fn = handlers[op]
   if not fn then return false end
   local ok, err = pcall(fn, payload, ctx)
   if not ok then

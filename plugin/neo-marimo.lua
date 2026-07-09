@@ -24,7 +24,7 @@ vim.api.nvim_create_autocmd("BufReadPost", {
 
       -- :MarimoToggle off explicitly loads the underlying .py buffer; skip
       -- auto-attach so we don't immediately bounce back into notebook view.
-      if marimo._suppress_attach then return end
+      if marimo.suppress_attach then return end
 
       if marimo.is_marimo_notebook(ev.buf) then
         -- Auto-setup with defaults if user hasn't called setup()

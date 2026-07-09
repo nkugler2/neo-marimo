@@ -38,9 +38,9 @@ design, regression test in the matching `*_spec.lua`
 
 ---
 
-## Phase F1 — Data loss & silent-corruption fixes (do first)
+## Phase F1 — Data loss & silent-corruption fixes (do first) **DONE**
 
-### F1.1 Undo of a multi-cell delete merges cells into the preceding cell **[confirmed — data loss]**
+### F1.1 Undo of a multi-cell delete merges cells into the preceding cell **[confirmed — data loss]** **DONE**
 
 `notebook.lua:218-282` (`try_undo_restore`), `notebook.lua:189-207`
 (`push_undo_trash`).
@@ -55,21 +55,21 @@ through to the generic sync path, and the restored rows glue onto the
 preceding anchor. `assert_consistent` can't catch it: the result is
 row-contiguous and self-consistent; the corruption is semantic.
 
-- [ ] Extend `try_undo_restore` to also match a **contiguous run** of
+- [x] DONE Extend `try_undo_restore` to also match a **contiguous run** of
       trash entries (sorted by original `start_row`) whose summed
       `line_count` equals the delta and whose first `start_row` equals the
       insertion row; splice all matched cells back in order.
-- [ ] Regression test in `editing_spec.lua`: capture IDs for a 3-cell
+- [x] DONE Regression test in `editing_spec.lua`: capture IDs for a 3-cell
       `V2jd` span, undo, assert `#nb.cells` **and every id + code**
       (the existing multi-line-delete case at `editing_spec.lua:133-143`
       never undoes, and the offset validator passes on the merged state —
       assert IDs explicitly).
-- [ ] Document the known limitation (B2 from review): an intervening edit
+- [x] DONE Document the known limitation (B2 from review): an intervening edit
       between delete and undo shifts rows so the trash entry no longer
       matches; the cell returns with a fresh ID. One rationale comment at
       the match site; not fixable cheaply.
 
-### F1.2 "Queued forever" — run gate stamped even when re-key bailed **[confirmed]**
+### F1.2 "Queued forever" — run gate stamped even when re-key bailed **[confirmed]** **DONE**
 
 `ws_handlers.lua:177-185`. The `update-cell-ids` handler stamps
 `nb._last_cell_ids_at` **unconditionally**, but `rekey_cells_from_server`
@@ -83,18 +83,18 @@ re-key rebuilds `cell_by_id` and drops the old mapping, and the terminal
 optimistic `queued` status never clears. This is the open TOCHANGE
 "Queued cell but still can use" bug.
 
-- [ ] `rekey_cells_from_server` returns `true`/`false` for "actually
+- [x] DONE `rekey_cells_from_server` returns `true`/`false` for "actually
       reconciled"; stamp `_last_cell_ids_at` only on `true`. Leave the
       `reload` (0.23+) handler's unconditional stamp alone — correct by
       design and already covered by `ws_dispatch_spec.lua:47-79`.
-- [ ] Test in `ws_dispatch_spec.lua`: `update-cell-ids` with count
+- [x] DONE Test in `ws_dispatch_spec.lua`: `update-cell-ids` with count
       mismatch + `sync.is_writing` true → `_last_cell_ids_at` must NOT
       advance (the exact gap that let this ship).
 - [ ] Optional confirm on a live repro: add two cells in quick
       succession, run each immediately, check `:MarimoWsDebug` log for a
       `cell-op:DROP` whose ID isn't in `known_ids`.
 
-### F1.3 `ws_client.py` dies silently on abnormal WS close (exit 0) **[confirmed]**
+### F1.3 `ws_client.py` dies silently on abnormal WS close (exit 0) **[confirmed]** **DONE**
 
 `python/ws_client.py:63-72, 118-123`. The receive pump guards only
 `json.loads`; the `async for raw in ws:` iteration is unguarded, so a
@@ -105,17 +105,17 @@ calls `task.exception()` — the exception is discarded, the process exits
 clean shutdown: no warning, and any in-flight run is stuck at "queued"
 with nothing left to trigger the resync self-heal.
 
-- [ ] After `asyncio.wait`, check `task.exception()` on the done set; on
+- [x] DONE After `asyncio.wait`, check `task.exception()` on the done set; on
       error, emit `{"op": "neo_marimo_error", ...}` and `sys.exit(1)` so
       `on_exit` warns. Wrap the `async for` to distinguish clean vs
       abnormal `ConnectionClosed`.
-- [ ] Minimal python test (first in the repo): feed a mock WS iterator
+- [x] DONE Minimal python test (first in the repo): feed a mock WS iterator
       that raises into the pump; assert nonzero exit + `neo_marimo_error`
       emitted. If a python harness is too much scaffolding for one test,
       an inline `python3 -c` smoke check driven from `server_spec.lua` is
       acceptable — but say so in the commit message.
 
-### F1.4 `# id:` comment matching disagrees between Lua and Python **[confirmed mechanism]**
+### F1.4 `# id:` comment matching disagrees between Lua and Python **[confirmed mechanism]** **DONE**
 
 Two halves, fix together with one shared, stricter rule
 ("an id comment counts only when immediately preceding `@app.cell`"):
@@ -128,12 +128,12 @@ Two halves, fix together with one shared, stricter rule
   the pattern as the *last* line of cell N's body is misattributed as the
   id-comment of cell N+1 when N+1 has no id yet; a collision with a real
   ID would silently overwrite a `cell_by_id` entry.
-- [ ] Bridge round-trip test: cell whose body ends with `# id: user123`,
+- [x] DONE Bridge round-trip test: cell whose body ends with `# id: user123`,
       followed by a fresh id-less cell → the fresh cell must NOT inherit
       `user123`. Add an `async def` cell round-trip case while there
       (currently uncovered).
 
-### F1.5 `prune_phantoms` can empty the notebook **[plausible]**
+### F1.5 `prune_phantoms` can empty the notebook **[plausible]** **DONE**
 
 `notebook.lua:136-176` has no last-cell guard, unlike `delete_cell`
 (`notebook.lua:77-91`, refuses when `#nb.cells <= 1`). A compound delete
@@ -141,18 +141,18 @@ that collapses every remaining cell's range in one pass leaves
 `nb.cells == {}`; nothing re-seeds, and `sync.write_to_file` / marimo
 assume ≥1 cell.
 
-- [ ] Mirror the guard: never prune the last survivor; keep the
+- [x] DONE Mirror the guard: never prune the last survivor; keep the
       least-broken candidate. Direct unit test on `prune_phantoms` with a
       synthetic all-collapsed `nb.cells`, assert non-empty result.
 
 ---
 
-## Phase F2 — Output positioning & daily-drive UX bugs
+## Phase F2 — Output positioning & daily-drive UX bugs **DONE**
 
 > F2.1 is the keystone: three independently-reported TOCHANGE bugs
 > (run-icon placement, Enter-under-icon, `gcc` shifting output) share it.
 
-### F2.1 Output/status extmark: wrong gravity + never repositioned **[confirmed, reproduced twice independently]**
+### F2.1 Output/status extmark: wrong gravity + never repositioned **[confirmed, reproduced twice independently]** **DONE**
 
 Two compounding causes, one fix site:
 
@@ -175,22 +175,22 @@ Two compounding causes, one fix site:
    the next cell's top line. Both reproduced with isolated probes;
    `right_gravity = false` empirically pins the `gcc` case.
 
-- [ ] `output.lua:564`: pass `right_gravity = false`.
-- [ ] Re-render/reposition outputs after border redraws: stash the
+- [x] DONE `output.lua:564`: pass `right_gravity = false`.
+- [x] DONE Re-render/reposition outputs after border redraws: stash the
       debounced `redraw_outputs` that `init.lua:278-288` already built
       for WinResized onto the notebook (e.g. `nb._redraw_outputs`) and
       call it from `refresh_after_mutation` after `render_all_borders`,
       for cells with `cell.output or cell.console` set. This makes output
       marks always younger than border marks (fixes stacking order
       deterministically) and re-anchors them to the live `end_row`.
-- [ ] Regression tests: (a) in `output_spec.lua` — render output, replace
+- [x] DONE Regression tests: (a) in `output_spec.lua` — render output, replace
       the cell's last line (gcc-style delete+insert), assert the
       `ns_output` mark row still equals the cell's current `end_row`;
       (b) in `editing_spec.lua` — border + output extmark order via
       `nvim_buf_get_extmarks(..., {details=true})` after an unrelated
       edit elsewhere in the buffer.
 
-### F2.2 New cell below the viewport is unreachable (`j` / `]m` dead until `zz`) **[confirmed]**
+### F2.2 New cell below the viewport is unreachable (`j` / `]m` dead until `zz`) **[confirmed]** **DONE**
 
 `init.lua:14-22` and `actions.lua:51-57` are two duplicate copies of
 `jump_to_cell`, both a bare `nvim_win_set_cursor` with no scroll/redraw.
@@ -199,11 +199,11 @@ moves; `keymaps.lua:309-335` (`focus_cycle`) already discovered this and
 follows the move with `normal! zz` + `redraw` — the two `jump_to_cell`
 copies never got the treatment.
 
-- [ ] Consolidate into one shared helper (in `buffer.lua` or a small
+- [x] DONE Consolidate into one shared helper (in `buffer.lua` or a small
       `cell_nav.lua`) with the `zz` + `redraw` handling; point `init`,
       `actions`, and (if reasonable) `focus_cycle` at it.
 
-### F2.3 `cell.console` grows without bound **[confirmed]**
+### F2.3 `cell.console` grows without bound **[confirmed]** **DONE**
 
 `output.lua:527-537, 675-686`. `cell.output` is capped (`MAX_LINES = 30`)
 but console entries accumulate across cell-ops untrimmed and every line
@@ -211,25 +211,25 @@ of every historical entry re-renders on each pass — a print-heavy loop
 re-opens exactly the freeze scenario `MAX_OUTPUT_BYTES` was written to
 prevent.
 
-- [ ] Cap `cell.console` on append (drop oldest) and/or apply
+- [x] DONE Cap `cell.console` on append (drop oldest) and/or apply
       `MAX_LINES`-style truncation to the console block in `M.render`.
       Test alongside the existing output-truncation case
       (`output_spec.lua:77`).
 
-### F2.4 Plain output/markdown body text is unreadable grey italic **[confirmed]**
+### F2.4 Plain output/markdown body text is unreadable grey italic **[confirmed]** **DONE**
 
 `highlights.lua:31` links `MarimoOutputText` to `Comment` — dim + italic
 by design in most colorschemes, and it's used both for all plain
 `repr()` output (`output.lua:95`) and as the base for unmarked markdown
 prose (`markdown.lua:139`). This is the open TOCHANGE readability item.
 
-- [ ] Give `MarimoOutputText` its own normal-brightness, non-italic
+- [x] DONE Give `MarimoOutputText` its own normal-brightness, non-italic
       definition (e.g. the Kanagawa fg `#DCD7BA` already used by
       `MarimoMarkdownBold`), and split the two semantic uses into
       `MarimoOutputText` vs `MarimoMarkdownText` so they can be tuned
       independently.
 
-### F2.5 Stale widget value overrides after cell delete (one-liner)
+### F2.5 Stale widget value overrides after cell delete (one-liner) **DONE**
 
 `actions.lua:106-159` calls `widgets.clear_for_cell` but not
 `widgets.clear_overrides_for_cell` (`widgets.lua:72-78`); overrides are
@@ -237,7 +237,7 @@ keyed by object_id at module level and leak until session end. Note in
 the code why undo-restore of the same cell benefits from lazy clearing if
 that motivated the current shape — if so, clear on trash-expiry instead.
 
-### F2.6 Orphaned image placements after cell re-key / disk reload **[confirmed — duplicate stale graph]**
+### F2.6 Orphaned image placements after cell re-key / disk reload **[confirmed — duplicate stale graph]** **DONE**
 
 > Found 2026-07-03 from a live repro (two versions of a plot in one
 > notebook: stale values above, fresh below, revealed at different
@@ -278,7 +278,7 @@ it paints no pixels.
       `update-cell-ids` re-key flips ids; reload path closes
       placements (close-spy called). (189 passing.)
 
-### F2.7 tmux kitty-graphics fossils: no cleanup at exit, no sweep at attach **[confirmed mechanism]**
+### F2.7 tmux kitty-graphics fossils: no cleanup at exit, no sweep at attach **[confirmed mechanism]** **DONE**
 
 > Follow-up to F2.6 and the Deferred tmux-ghost note. Inside tmux
 > (`allow-passthrough on`), kitty-graphics images outlive nvim: the
@@ -313,9 +313,9 @@ it paints no pixels.
 
 ---
 
-## Phase F3 — Cell-boundary anchor redesign (phase-sized, architectural)
+## Phase F3 — Cell-boundary anchor redesign (phase-sized, architectural) **DONE**
 
-### F3.1 Single start-only anchor cannot disambiguate boundary inserts **[confirmed — root cause of Enter + Shift-O bugs]**
+### F3.1 Single start-only anchor cannot disambiguate boundary inserts **[confirmed — root cause of Enter + Shift-O bugs]** **DONE**
 
 `buffer.lua:9-21`. Verified with isolated probes, both gravity settings:
 
@@ -374,9 +374,9 @@ editing features**.
 
 ---
 
-## Phase F4 — Extension-API hardening (before v0.1.0 freezes it)
+## Phase F4 — Extension-API hardening (before v0.1.0 freezes it) **DONE**
 
-### F4.1 Error containment for renderers and detectors **[confirmed]**
+### F4.1 Error containment for renderers and detectors **[confirmed]** **DONE**
 
 Only `register_ws_handler` contains errors (`ws_handlers.lua:45-60`,
 pcall + once-per-op warn — the gold standard). Elsewhere:
@@ -390,51 +390,76 @@ pcall + once-per-op warn — the gold standard). Elsewhere:
 - A throwing widget renderer: raw call at `widgets.lua:505`.
 - A throwing detector predicate: raw call at `cell.lua:29` → breaks
   `cell.new` during parse → **attach fails entirely**.
-- [ ] pcall-wrap all three with the ws_handlers once-per-key warn
+- [x] pcall-wrap all three with the ws_handlers once-per-key warn
       pattern; failed output renderers emit a visible placeholder line
       (e.g. `✖ renderer error: <mime>`) + `log.write`, never a blank.
-      Wrap `tree_render.render_node` dispatch too.
-- [ ] Tests: register a throwing renderer for a fake mime → render pass
-      survives, placeholder appears, next cell renders fine.
+      Wrap `tree_render.render_node` dispatch too. (`safe_render` in
+      output.lua; widgets/detectors/tree_render mirror it with
+      `_*_errors` introspection tables like `ws_handlers._handler_errors`.
+      Review follow-up: `_render_ctx.image_drawn` is now set only AFTER
+      a successful `image.render_*` — set-before-call meant a thrown
+      image renderer skipped the stale-placement cleanup; same fix in
+      tree_render's img/svg helpers, plus `object_id`/`tab` reset
+      per-render.)
+- [x] Tests: register a throwing renderer for a fake mime → render pass
+      survives, placeholder appears, next cell renders fine. (Plus
+      throwing detector falls through to later-priority detectors, and
+      a stubbed throwing `image.render_base64` proves the cleanup
+      ordering. 205 passing.)
 
-### F4.2 `register_cell_detector` signature + missing example
+### F4.2 `register_cell_detector` signature + missing example **DONE**
 
 Only registry that's fn-first (`(predicate, type_name, priority)` vs
 key-first everywhere else); `priority` is undocumented in
 `architecture.md:145` and `README.md:300`; no worked example (the other
 three have one). `init.lua:459` says "These three registries" above four.
 
-- [ ] Normalize to key-first `(type_name, predicate, priority)` (now is
+- [x] Normalize to key-first `(type_name, predicate, priority)` (now is
       the only cheap time) or explicitly document fn-first + priority;
-      add the worked example; fix the "three" comment.
+      add the worked example; fix the "three" comment. (Key-first,
+      priority optional/default 50; worked example + append-not-replace
+      caveat in architecture.md; README/vimdoc snippets updated.)
 
-### F4.3 Public renderers can't reach the render context **[confirmed]**
+### F4.3 Public renderers can't reach the render context **[confirmed]** **DONE**
 
 `output.lua:44-51` documents `fn(data, opts)` but every call site passes
 `opts = {}`; built-ins reach bufnr/cell_id/row via the private
 `_render_ctx` upvalue. A third-party renderer cannot draw an image or
 register a widget — the two things a Phase 9/10 extension would want.
 
-- [ ] Populate `opts` with `{ bufnr, cell_id, row, filepath }` before the
+- [x] Populate `opts` with `{ bufnr, cell_id, row, filepath }` before the
       contract freezes. Document the `tree_render` ctx fields
       (`tree_render.lua:16-26`) as the internal contract they already are.
+      (`current_opts()` built from `_render_ctx`, passed at both dispatch
+      sites; `image_drawn`/`skip_cap` explicitly excluded from the public
+      contract.)
 
-### F4.4 Declare the rest of the public surface
+### F4.4 Declare the rest of the public surface **DONE**
 
-- [ ] Registry storage consistency: `output.M.renderers`,
+- [x] Registry storage consistency: `output.M.renderers`,
       `ws_handlers.M.handlers`, `cell.M.detectors` are public mutable
       tables; `widgets` keeps `RENDERERS` local. Pick one (local +
-      accessor is safest to freeze).
-- [ ] Mark `init.current_notebook` / `attached_for` as public (statusline
+      accessor is safest to freeze). (All four now local; the one write
+      path is `register_*(key, fn)`, and `register_*(key, nil)`
+      deregisters — consistent across registries, no separate
+      unregister fns.)
+- [x] Mark `init.current_notebook` / `attached_for` as public (statusline
       + blink integrations already depend on them); triage the 23 user
       commands into stable vs debug-unstable (`MarimoKillAll`,
       `MarimoWsPing`, `MarimoInspectOutput`, `MarimoWsDebug`) in
-      README/vimdoc.
-- [ ] `plugin/neo-marimo.lua:27` reads `marimo._suppress_attach` —
+      README/vimdoc. (Actual count is 24; triaged 19 daily-drive vs 5
+      debug-unstable — the four named plus `MarimoCheck`. README +
+      vimdoc gained a Public Lua API section. Found while triaging:
+      vimdoc falsely called `MarimoOpen` an alias of `MarimoEdit` — it
+      actually spawns a raw untracked `marimo edit`; description fixed,
+      but whether the command should exist at all is a maintainer
+      decision, see Deferred.)
+- [x] `plugin/neo-marimo.lua:27` reads `marimo._suppress_attach` —
       rename to a non-underscore name or document the exception to the
-      `_`-private rule.
-- [ ] Decide `html.lua`'s status: bless a minimal helper subset for
-      custom renderers or state it's internal-only.
+      `_`-private rule. (Renamed to `suppress_attach`, documented.)
+- [x] Decide `html.lua`'s status: bless a minimal helper subset for
+      custom renderers or state it's internal-only. (Internal-only;
+      header comment states no compatibility promise.)
 
 ---
 
@@ -521,6 +546,14 @@ currently ships blind.
 
 ## Deferred / decisions for the maintainer
 
+- **`:MarimoOpen` (found during F4.4 docs triage, 2026-07-09)** — spawns
+  a raw detached `jobstart({marimo_cmd, "edit", filepath})` that
+  bypasses the managed-server registry and WS handoff entirely; it can
+  mint an untracked second `marimo edit` process for a notebook that
+  already has a managed server. The vimdoc used to (falsely) call it an
+  alias of `MarimoEdit` — now documented accurately, but consider
+  removing or reimplementing it on top of `server.start_and_open`
+  before v0.1.0.
 - **Numpy/DataFrame width (TOCHANGE "not as wide as could be")** — NOT a
   plugin bug: the kernel's `repr` embeds line breaks at numpy's default
   `linewidth=75`; nvim can wrap further but never rejoin. Options:
@@ -553,14 +586,14 @@ currently ships blind.
 
 ## Suggested execution order & sizing
 
-| Phase | Items | Size | Agent routing |
-| --- | --- | --- | --- |
-| F1 | 1.1–1.5 | ~1 session | implementer per item; 1.4 touches Lua+Python |
-| F2 | 2.1–2.6 | ~1 session | implementer; 2.1 first, 2.5 is inline-trivial, 2.6 found post-F3 |
-| F3 | 3.1 | 1–2 sessions | Plan agent design pass first, then implementer |
-| F4 | 4.1–4.4 | ~1 session | implementer; 4.4 partly docs-writer |
-| F5 | 5.1–5.4 | ~half session | implementer (5.1 is mechanical) |
-| F6 | 6.1–6.3 | ~1 session | docs-writer (6.1), implementer (6.2–6.3) |
+| Phase | Items | Size | Agent routing | Status |
+| --- | --- | --- | --- | --- |
+| F1 | 1.1–1.5 | ~1 session | implementer per item; 1.4 touches Lua+Python | DONE |
+| F2 | 2.1–2.7 | ~1 session | implementer; 2.1 first, 2.5 is inline-trivial, 2.6/2.7 found post-F3 | DONE |
+| F3 | 3.1 | 1–2 sessions | Plan agent design pass first, then implementer | DONE |
+| F4 | 4.1–4.4 | ~1 session | implementer; 4.4 partly docs-writer | DONE |
+| F5 | 5.1–5.4 | ~half session | implementer (5.1 is mechanical) | |
+| F6 | 6.1–6.3 | ~1 session | docs-writer (6.1), implementer (6.2–6.3) | |
 
 After F6, resume `plan-release.md` at R0 with a much stronger "what
 exists works flawlessly" baseline — F1/F2 close every reproducible

@@ -43,7 +43,13 @@ vim.api.nvim_create_autocmd("VimLeavePre", {
 -- buffer (e.g. :MarimoToggle off). The BufReadPost autocmd in
 -- plugin/neo-marimo.lua checks this flag and skips its auto-attach so we
 -- don't immediately bounce back into the notebook view.
-M._suppress_attach = false
+--
+-- Deliberately not `_suppress_attach` (plan-refinement F4.4): plugin/
+-- neo-marimo.lua reads this across the module boundary, which the `_`-private
+-- convention doesn't actually cover — it only promises stability within a
+-- single module's own callers, and this flag is read by the exact autocmd it
+-- was written for. Naming it as private was a lie about that coupling.
+M.suppress_attach = false
 
 -- Initialize the plugin with user options.
 -- Call this from your Neovim config:
@@ -394,6 +400,9 @@ function M.check()
   end
 end
 
+-- Public API (plan-refinement F4.4): statusline and blink integrations
+-- already depend on both of these — keep the signatures stable.
+
 -- Get the notebook state for the current buffer, or nil.
 function M.current_notebook()
   local bufname = vim.api.nvim_buf_get_name(0)
@@ -461,9 +470,9 @@ function M.toggle(bufnr)
     -- read by the scheduled callback in plugin/neo-marimo.lua; we clear it
     -- via vim.schedule so the callback (which is also scheduled) sees it
     -- and bails out, then it's cleared before any future buffer load.
-    M._suppress_attach = true
+    M.suppress_attach = true
     pcall(vim.fn.bufload, pbuf)
-    vim.schedule(function() M._suppress_attach = false end)
+    vim.schedule(function() M.suppress_attach = false end)
 
     bind_plain_toggle(pbuf)
     vim.api.nvim_win_set_buf(0, pbuf)
@@ -496,7 +505,7 @@ end
 
 -- ── Extension points ──────────────────────────────────────────────────────
 --
--- These three registries are the supported way to extend neo-marimo without
+-- These four registries are the supported way to extend neo-marimo without
 -- patching it. Everything else — module functions not re-exported here or
 -- documented in docs/architecture.md, and anything prefixed with `_` — is
 -- internal and may change between commits.
@@ -528,10 +537,11 @@ function M.register_ws_handler(op, fn)
 end
 
 -- Register a cell-type detector. `predicate(code)` is tried against each
--- cell's source (lower `priority` first; built-ins use 10–30) and the first
--- match sets the cell's type — which drives its border colour and label.
-function M.register_cell_detector(predicate, type_name, priority)
-  require("neo-marimo.cell").register_detector(predicate, type_name, priority)
+-- cell's source (lower `priority` first; built-ins use 10–30, default 50)
+-- and the first match sets the cell's type — which drives its border
+-- colour and label.
+function M.register_cell_detector(type_name, predicate, priority)
+  require("neo-marimo.cell").register_detector(type_name, predicate, priority)
 end
 
 return M

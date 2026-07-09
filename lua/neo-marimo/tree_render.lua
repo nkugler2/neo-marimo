@@ -13,7 +13,11 @@
 -- which reconstructs the exact original substring (round-trip-tested over
 -- the fixture corpus), so those renderers didn't have to change.
 --
--- ctx fields (shared with output.lua's _render_ctx):
+-- ctx fields (shared with output.lua's _render_ctx). This is an *internal*
+-- contract between output.lua and tree_render.lua, not the public
+-- register_output_renderer opts (see output.lua's opts docstring, F4.3) —
+-- ctx carries out-params (image_drawn, skip_cap) and transient walk state
+-- (object_id, tab) that third-party renderers have no business touching:
 --   bufnr, cell_id   widget registry key + image placement key
 --   row              0-indexed row images anchor at
 --   filepath         notebook path, for server-hosted virtual files
@@ -29,6 +33,8 @@ local widgets = require("neo-marimo.widgets")
 local dataframe = require("neo-marimo.dataframe")
 local markdown = require("neo-marimo.markdown")
 local image = require("neo-marimo.image")
+local utils = require("neo-marimo.utils")
+local log = require("neo-marimo.log")
 
 local M = {}
 
@@ -147,7 +153,12 @@ end
 
 -- ── node renderers ────────────────────────────────────────────────────────
 
-local render_node  -- forward declaration (layout renderers recurse)
+local render_node  -- forward declaration (layout renderers recurse); this
+-- name is bound below to a pcall-wrapped dispatcher (plan-refinement F4.1),
+-- not directly to the per-tag walk (render_node_dispatch) — every recursive
+-- call in this file goes through the `render_node` upvalue, so wrapping just
+-- this one binding covers the entire tree walk without touching each of the
+-- render_children/render_vstack/render_hstack/... call sites individually.
 
 local function render_children(node, ctx)
   local out = {}
@@ -370,28 +381,40 @@ local function render_img(node, ctx)
   local src = node.attrs.src or ""
   local mime, b64 = image.extract_data_uri(src)
   if mime and b64 then
+    -- Set image_drawn only AFTER render succeeds (plan-refinement F4.1
+    -- review, same rationale as output.lua's render_html): render_node's
+    -- pcall wrapper catches a throw here and shows a placeholder, but if
+    -- image_drawn had already flipped true beforehand, M.render's orphan-
+    -- image cleanup (gated on image_drawn == false) would never fire and a
+    -- previous successful placement would linger next to the error.
+    local lines = image.render_base64(ctx.bufnr, ctx.row or 0, mime, b64, ctx.cell_id)
     ctx.image_drawn = true
-    return image.render_base64(ctx.bufnr, ctx.row or 0, mime, b64, ctx.cell_id)
+    return lines
   end
   if src:find("@file", 1, true) and ctx.filepath then
-    ctx.image_drawn = true
     local filepath = ctx.filepath
     local server = require("neo-marimo.server")
-    return image.render_url(ctx.bufnr, ctx.row or 0, src, ctx.cell_id,
+    local lines = image.render_url(ctx.bufnr, ctx.row or 0, src, ctx.cell_id,
       function(dest) return server.fetch_virtual_file(filepath, src, dest) end)
+    ctx.image_drawn = true  -- set after success — see above
+    return lines
   end
   return { { { "  [image — install image.nvim or open in browser]", "Comment" } } }
 end
 
 local function render_svg(node, ctx)
-  ctx.image_drawn = true
-  return image.render_at(ctx.bufnr, ctx.row or 0,
+  local lines = image.render_at(ctx.bufnr, ctx.row or 0,
     "image/svg+xml", html.serialize(node), ctx.cell_id)
+  ctx.image_drawn = true  -- set after success — see render_img above
+  return lines
 end
 
 -- ── dispatch ──────────────────────────────────────────────────────────────
 
-render_node = function(node, ctx)
+-- The actual per-tag dispatch. Called only through the render_node upvalue
+-- below (never directly), so its own recursive `render_node(child, ctx)`
+-- calls always resolve to the pcall-wrapped version.
+local function render_node_dispatch(node, ctx)
   if html.is_text(node) then
     local text = html.decode_entities(node.text)
     if text:match("^%s*$") then return {} end
@@ -475,6 +498,35 @@ render_node = function(node, ctx)
     return render_stripped(fragment)
   end
   return render_children(node, ctx)
+end
+
+-- Per-tag error counts for the containment below (plan-refinement F4.1),
+-- mirroring ws_handlers' once-per-op pattern. Exposed for tests.
+M._render_errors = {}
+
+-- pcall-wrap the per-node dispatch. A throwing node — a widget/output
+-- renderer bug reached through widgets.render_widget, a future third-party
+-- node hook, or a payload shape we didn't anticipate — used to raise all
+-- the way out of the recursive walk, aborting the *entire* tree (every
+-- sibling in the same vstack/tabs/hstack lost, not just the offending
+-- node) and, one level further up, tripping output.lua's own dispatch
+-- pcall with a misattributed error. Since every recursive call in this
+-- file goes through the `render_node` upvalue (never render_node_dispatch
+-- directly), this single wrapper covers the whole walk: one bad element
+-- becomes a placeholder line, siblings keep rendering.
+render_node = function(node, ctx)
+  local ok, result = pcall(render_node_dispatch, node, ctx)
+  if ok then return result end
+  local tag = (html.is_element(node) and node.tag) or "text"
+  M._render_errors[tag] = (M._render_errors[tag] or 0) + 1
+  if M._render_errors[tag] == 1 then
+    utils.warn(
+      "Tree renderer for '" .. tostring(tag) .. "' failed: " .. tostring(result)
+        .. "\nFurther failures for this element will be suppressed."
+    )
+  end
+  log.write("tree_render:node_error", { tag = tag, err = tostring(result) })
+  return { { { "  ✖ renderer error: " .. tostring(tag), "MarimoOutputError" } } }
 end
 
 -- ── entry point ───────────────────────────────────────────────────────────

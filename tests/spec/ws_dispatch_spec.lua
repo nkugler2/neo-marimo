@@ -17,23 +17,29 @@ t.case("ws: throwing handler is contained and warned once", function()
   local ok3 = ws.dispatch("test-explode", {}, {})
 
   vim.notify = orig_notify
-  ws.handlers["test-explode"] = nil
+  -- register(op, nil) is the deregister path (plan-refinement F4.4) now that
+  -- ws_handlers' handlers table isn't reachable to splice directly.
+  ws.register("test-explode", nil)
   ws._handler_errors["test-explode"] = nil
 
   t.eq(ok1, false)
   t.eq(ok2, false)
   t.eq(ok3, false)
   t.eq(notify_count, 1, "exactly one warning for repeated handler failures")
+  t.eq(ws.dispatch("test-explode", {}, {}), false,
+    "dispatch returns false once the op is deregistered")
 end)
 
 t.case("ws: healthy handlers still dispatch normally", function()
   local seen = nil
   ws.register("test-ok", function(payload) seen = payload.value end)
   local ok = ws.dispatch("test-ok", { value = 42 }, {})
-  ws.handlers["test-ok"] = nil
+  ws.register("test-ok", nil)
 
   t.eq(ok, true)
   t.eq(seen, 42)
+  t.eq(ws.dispatch("test-ok", { value = 1 }, {}), false,
+    "dispatch returns false once the op is deregistered")
 end)
 
 t.case("ws: unknown op returns false without error", function()

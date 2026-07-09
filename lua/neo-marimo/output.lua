@@ -10,6 +10,7 @@ local dataframe = require("neo-marimo.dataframe")
 local server = require("neo-marimo.server")
 local tree_render = require("neo-marimo.tree_render")
 local log = require("neo-marimo.log")
+local utils = require("neo-marimo.utils")
 
 local M = {}
 
@@ -52,45 +53,116 @@ local MAX_DATAFRAME_INLINE_ROWS = 5
 -- the widget registry can be keyed properly. Stored as a module-level
 -- variable since render is called from a hot path and threading it through
 -- every renderer signature would be a lot of plumbing for one optional
--- side-effect. tree_render writes `image_drawn` and `skip_cap` back into it.
+-- side-effect. tree_render writes `image_drawn` and `skip_cap` back into it,
+-- and saves/restores `object_id`/`tab` as it recurses (all reset per-cell at
+-- the top of M.render).
 local _render_ctx = {
   bufnr = nil, cell_id = nil, row = nil, filepath = nil,
-  image_drawn = false, skip_cap = false,
+  image_drawn = false, skip_cap = false, object_id = nil, tab = nil,
 }
 
 -- ── Renderer registry ──────────────────────────────────────────────────────
 --
 -- Each renderer takes (data, opts) and returns a list of virt_line chunk lists
 -- (i.e. a list where each element is itself a list of {text, hl_group} pairs).
--- `data` is the payload from the CellOutput; `opts` is reserved for future
--- per-call options (e.g. window width). Phase 8 plugs image/widget renderers
--- in via M.register_renderer at setup time.
+-- `data` is the payload from the CellOutput. `opts` (plan-refinement F4.3) is
+-- the render context for this call, so a third-party renderer registered via
+-- M.register_renderer can draw an image or register a widget without reaching
+-- into any private module state:
+--   opts.bufnr     buffer the cell lives in
+--   opts.cell_id   the cell's id (widget registry key, image placement key)
+--   opts.row       0-indexed row output/images anchor at (cell.end_row)
+--   opts.filepath  notebook path, for fetching server-hosted virtual files
+-- Built-in renderers still read these off the private _render_ctx upvalue
+-- (image_drawn/skip_cap out-params live there too, and aren't part of this
+-- public opts contract); the fields above are just the same values handed to
+-- every renderer, built-in or third-party, at every dispatch site.
 
-M.renderers = {}
+-- Local, not `M.renderers` / `M.renderer_patterns` (plan-refinement F4.4):
+-- the registry storage isn't part of the frozen public surface —
+-- M.register_renderer is the only supported write path (mirrors widgets.lua's
+-- local RENDERERS).
+local renderers = {}
 
 -- Lookup order for prefix matches like `image/png` → `image/*`. We try the
 -- exact mimetype first, then any registered prefix patterns in order.
-M.renderer_patterns = {}
+local renderer_patterns = {}
 
 -- Register a renderer for an exact mimetype (e.g. "text/plain") or a pattern
--- ending in `/*` (e.g. "image/*"). Patterns are matched after exact mimetypes.
+-- ending in `/*` (e.g. "image/*"). Patterns are matched after exact
+-- mimetypes. Passing `fn = nil` deregisters: an exact mimetype's entry is
+-- dropped, or every pattern sharing that prefix is removed. This is the only
+-- deregister path now that the tables above are local (plan-refinement
+-- F4.4) — needed by tests that register a throwing renderer (F4.1) and must
+-- clean it up so later specs render against the stock table. Mirrors
+-- ws_handlers.register / widgets.register_renderer's nil-to-remove contract.
 function M.register_renderer(mime, fn)
   if mime:sub(-2) == "/*" then
     -- strip the trailing "*", keep the "/" so "image/*" stores prefix "image/"
-    table.insert(M.renderer_patterns, { prefix = mime:sub(1, -2), fn = fn })
+    local prefix = mime:sub(1, -2)
+    if fn == nil then
+      for i = #renderer_patterns, 1, -1 do
+        if renderer_patterns[i].prefix == prefix then table.remove(renderer_patterns, i) end
+      end
+      return
+    end
+    table.insert(renderer_patterns, { prefix = prefix, fn = fn })
   else
-    M.renderers[mime] = fn
+    renderers[mime] = fn
   end
 end
 
 local function lookup_renderer(mime)
-  if M.renderers[mime] then return M.renderers[mime] end
-  for _, p in ipairs(M.renderer_patterns) do
+  if renderers[mime] then return renderers[mime] end
+  for _, p in ipairs(renderer_patterns) do
     if mime:sub(1, #p.prefix) == p.prefix then
       return p.fn
     end
   end
   return nil
+end
+
+-- The opts table handed to every renderer at dispatch (plan-refinement
+-- F4.3) — a snapshot of the current cell's render context so third-party
+-- renderers get the same bufnr/cell_id/row/filepath the built-ins read off
+-- _render_ctx directly.
+local function current_opts()
+  return {
+    bufnr = _render_ctx.bufnr,
+    cell_id = _render_ctx.cell_id,
+    row = _render_ctx.row,
+    filepath = _render_ctx.filepath,
+  }
+end
+
+-- Per-mime error counts for the containment below (plan-refinement F4.1),
+-- mirroring ws_handlers' once-per-op pattern. Exposed for tests.
+M._renderer_errors = {}
+
+-- pcall-wrap a renderer call so a throwing renderer (built-in or
+-- third-party, registered via M.register_renderer) can't take the rest of
+-- rendering down with it. Before this wrapper, a throw here propagated all
+-- the way up into the cell-op WS handler, where ws_handlers.dispatch's own
+-- pcall caught it — but that pcall then suppressed *every other* op with a
+-- misattributed "WS handler for 'cell-op' failed" warning, since it had no
+-- way to know the failure actually came from a renderer several calls
+-- deeper. Worse, M.render clears ns_output before building new virt_lines
+-- (see M.render below), so a throw mid-build left the cell silently blank
+-- with no on-screen sign anything had gone wrong. Returning a placeholder
+-- line here instead keeps the failure visible and scoped to just this one
+-- mime/cell, and lets every other cell keep rendering normally.
+local function safe_render(mime, fn, ...)
+  local ok, result = pcall(fn, ...)
+  if ok then return result end
+  M._renderer_errors[mime] = (M._renderer_errors[mime] or 0) + 1
+  if M._renderer_errors[mime] == 1 then
+    utils.warn(
+      "Output renderer for '" .. tostring(mime) .. "' failed: " .. tostring(result)
+        .. "\nFurther failures for this mimetype will be suppressed."
+    )
+  end
+  log.write("output:renderer_error", { mime = mime, err = tostring(result) })
+  return { { { "  ✖ renderer error: " .. tostring(mime), "MarimoOutputError" } } }
 end
 
 -- ── Built-in renderers ─────────────────────────────────────────────────────
@@ -158,8 +230,18 @@ local function render_html(data)
   if image.has_embedded_image(data) then
     local mime, b64 = image.extract_data_uri(data)
     if mime and b64 then
+      local lines = image.render_base64(_render_ctx.bufnr, _render_ctx.row or 0, mime, b64, _render_ctx.cell_id)
+      -- Set image_drawn only AFTER render succeeds (plan-refinement F4.1
+      -- review). render_html is dispatched through safe_render's pcall, so a
+      -- throwing image.render_* here is caught and shown as the "✖ renderer
+      -- error" placeholder — but if image_drawn had already flipped true
+      -- *before* the call, M.render's orphan-image cleanup (image.clear_for_
+      -- cell, gated on image_drawn == false) would never fire, and the
+      -- previous successful render's placement would silently linger next to
+      -- the error placeholder. Setting it after a successful return lets a
+      -- throw fall through to that cleanup like any other image-less render.
       _render_ctx.image_drawn = true
-      return image.render_base64(_render_ctx.bufnr, _render_ctx.row or 0, mime, b64, _render_ctx.cell_id)
+      return lines
     end
   end
 
@@ -167,19 +249,21 @@ local function render_html(data)
   -- through the image path rather than stripping the tags to nothing.
   local svg = image.extract_inline_svg(data)
   if svg then
-    _render_ctx.image_drawn = true
-    return image.render_at(_render_ctx.bufnr, _render_ctx.row or 0,
+    local lines = image.render_at(_render_ctx.bufnr, _render_ctx.row or 0,
       "image/svg+xml", svg, _render_ctx.cell_id)
+    _render_ctx.image_drawn = true  -- set after success — see the embedded-image branch above
+    return lines
   end
 
   -- Server-hosted virtual-file image (mo.image, etc.): the <img src> points at
   -- "./@file/…" and the bytes live on the marimo server. Fetch and render them.
   local vf = image.extract_virtual_file(data)
   if vf and _render_ctx.filepath then
-    _render_ctx.image_drawn = true
     local filepath = _render_ctx.filepath
-    return image.render_url(_render_ctx.bufnr, _render_ctx.row or 0, vf, _render_ctx.cell_id,
+    local lines = image.render_url(_render_ctx.bufnr, _render_ctx.row or 0, vf, _render_ctx.cell_id,
       function(dest) return server.fetch_virtual_file(filepath, vf, dest) end)
+    _render_ctx.image_drawn = true  -- set after success — see the embedded-image branch above
+    return lines
   end
 
   -- Fallback: strip remaining tags. Surface SVG/<img> as a placeholder so
@@ -209,9 +293,10 @@ end
 
 local function render_image(data, _opts, mime)
   -- Marimo encodes image/* payloads as base64 strings.
-  _render_ctx.image_drawn = true
-  return image.render_base64(_render_ctx.bufnr, _render_ctx.row or 0,
+  local lines = image.render_base64(_render_ctx.bufnr, _render_ctx.row or 0,
     mime or "image/png", tostring(data or ""), _render_ctx.cell_id)
+  _render_ctx.image_drawn = true  -- set after success — see render_html's embedded-image branch above
+  return lines
 end
 
 local function render_svg(data)
@@ -221,9 +306,10 @@ local function render_svg(data)
   -- the SVG to a file — backends that can rasterize it will, the rest will
   -- show the file-path placeholder.
   if type(data) ~= "string" then return {} end
-  _render_ctx.image_drawn = true
-  return image.render_at(_render_ctx.bufnr, _render_ctx.row or 0,
+  local lines = image.render_at(_render_ctx.bufnr, _render_ctx.row or 0,
     "image/svg+xml", data, _render_ctx.cell_id)
+  _render_ctx.image_drawn = true  -- set after success — see render_html's embedded-image branch above
+  return lines
 end
 
 local function render_markdown_mime(data)
@@ -240,7 +326,7 @@ local function render_marimo_mime(data)
   -- wrapped in a mime envelope reaches the widget renderer.
   if type(data) == "table" and data.mimetype then
     local renderer = M._lookup_renderer(data.mimetype)
-    if renderer then return renderer(data.data, {}) end
+    if renderer then return safe_render(data.mimetype, renderer, data.data, current_opts()) end
   end
   -- Marimo also uses this mimetype as a fallback for things it can't
   -- otherwise type — show the inner mime/data hint so the user knows what
@@ -315,15 +401,16 @@ local function output_to_virt_lines(output)
   if renderer and renderer ~= render_text_plain then
     -- Pass the matched mimetype as the third arg so pattern renderers
     -- (image/*) can branch on the specific subtype.
-    return renderer(data, {}, mimetype)
+    return safe_render(mimetype, renderer, data, current_opts(), mimetype)
   end
 
   -- text/plain or unknown mime: unwrap an embedded image if present, else
   -- fall back to dumping as text.
   local img_mime, img_data = extract_embedded_image(data)
   if img_mime and img_data then
-    _render_ctx.image_drawn = true
-    return image.render_base64(_render_ctx.bufnr, _render_ctx.row or 0, img_mime, img_data, _render_ctx.cell_id)
+    local lines = image.render_base64(_render_ctx.bufnr, _render_ctx.row or 0, img_mime, img_data, _render_ctx.cell_id)
+    _render_ctx.image_drawn = true  -- set after success — see render_html's embedded-image branch above
+    return lines
   end
 
   if type(data) == "string" then
@@ -470,6 +557,41 @@ local function status_virt_line(status, has_run)
   return nil
 end
 
+-- ── viewport freeze across a render pass ────────────────────────────────────
+--
+-- A cell's output re-renders several times per run (queued → running → idle
+-- w/ output), each pass replacing the cell's virt_lines with a different line
+-- count (a 1-line "⟳ running" placeholder vs. the final N-line image). When
+-- the cursor sits *below* the cell, that transient height change shifts how
+-- many screen rows separate `topline` and the cursor, and Neovim's own
+-- keep-cursor-visible logic reacts by nudging `topline` — the image and
+-- everything below it visibly scrolls up, then back down once the final
+-- output resettles. Cursor *above* the cell is unaffected (the virt_lines
+-- sit below the cursor, so they never factor into the topline↔cursor span),
+-- which is exactly the asymmetry this was reported with. Snapshotting each
+-- window's topline before the mutation and restoring it right after — inside
+-- the same synchronous call, before Neovim's next redraw — keeps the
+-- viewport pinned through the whole queued/running/idle sequence instead of
+-- fighting the user's chosen scroll position on every intermediate frame.
+local function capture_toplines(bufnr)
+  local saved = {}
+  for _, win in ipairs(vim.fn.win_findbuf(bufnr)) do
+    local ok, view = pcall(vim.api.nvim_win_call, win, vim.fn.winsaveview)
+    if ok then saved[win] = view.topline end
+  end
+  return saved
+end
+
+local function restore_toplines(saved)
+  for win, topline in pairs(saved) do
+    if vim.api.nvim_win_is_valid(win) then
+      pcall(vim.api.nvim_win_call, win, function()
+        vim.fn.winrestview({ topline = topline })
+      end)
+    end
+  end
+end
+
 -- ── Public API ──────────────────────────────────────────────────────────────
 
 -- Render (or clear) the output for a cell.
@@ -477,6 +599,8 @@ end
 -- notebook path, used to fetch server-hosted virtual-file images.
 function M.render(bufnr, cell, filepath)
   if not vim.api.nvim_buf_is_valid(bufnr) then return end
+
+  local saved_toplines = capture_toplines(bufnr)
 
   -- Clear previous output marks for this cell's row range
   vim.api.nvim_buf_clear_namespace(
@@ -500,6 +624,15 @@ function M.render(bufnr, cell, filepath)
   -- Set by tree_render when the payload renders widgets/layouts (which
   -- expand to many virt_lines and must not be chopped by the line cap).
   _render_ctx.skip_cap = false
+  -- object_id/tab are transient walk state tree_render saves/restores as it
+  -- recurses (marimo-ui-element scoping, tabs body identity — see
+  -- tree_render.lua's ctx docstring). A throw mid-walk (now contained by
+  -- render_node's own pcall, plan-refinement F4.1) can skip that restore,
+  -- so reset both here too — otherwise a leftover object_id/tab from a
+  -- failed pass could get misattributed to an unrelated widget on the very
+  -- next render.
+  _render_ctx.object_id = nil
+  _render_ctx.tab = nil
   -- The render walk re-registers every widget it encounters, so the cell's
   -- previous set is dropped up front — a cell whose output stops containing
   -- widgets also stops listing them in :MarimoWidget.
@@ -570,7 +703,10 @@ function M.render(bufnr, cell, filepath)
     image.clear_for_cell(bufnr, cell.id)
   end
 
-  if #virt_lines == 0 then return end
+  if #virt_lines == 0 then
+    restore_toplines(saved_toplines)
+    return
+  end
 
   -- Wrap every line at the window's text width so nothing disappears off
   -- the right edge (virt_lines can't scroll horizontally). Runs after the
@@ -612,6 +748,8 @@ function M.render(bufnr, cell, filepath)
     right_gravity = false,
     priority = 90,
   })
+
+  restore_toplines(saved_toplines)
 end
 
 -- Render every cell that's actually showing something (skips hidden-output

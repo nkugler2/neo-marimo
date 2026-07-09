@@ -135,14 +135,16 @@ keeps a per-object-id value override that re-renders consult.
 There are four supported registries, all reachable from the top-level
 module. Register at `setup()` time (or any time before the payload you
 care about arrives). Registering an existing name **replaces** the
-built-in, so you can also override default behavior.
+built-in, so you can also override default behavior — except
+`register_cell_detector`, which appends to the chain instead (see its
+worked example below).
 
 ```lua
 local marimo = require("neo-marimo")
 marimo.register_output_renderer(mime, fn)   -- output.lua registry
 marimo.register_widget_renderer(name, fn)   -- widgets.lua registry
 marimo.register_ws_handler(op, fn)          -- ws_handlers.lua dispatch
-marimo.register_cell_detector(pred, type)   -- cell.lua detector chain
+marimo.register_cell_detector(type, pred, priority)  -- cell.lua detector chain
 ```
 
 Anything not exported from `require("neo-marimo")` or documented here
@@ -247,6 +249,26 @@ end)
 `ctx` is `{ nb = <notebook state>, bufnr = <notebook buffer>, raw = <full message> }`.
 Enable `:MarimoWsDebug` to log every op marimo sends and discover what's
 available on your version.
+
+### Worked example: a custom cell-type detector
+
+Detectors classify a cell from its source; the type drives the cell's
+border colour and label. The chain is walked in `priority` order (lower
+first — built-ins use 10–30) and the first predicate that returns true
+wins, so pick a priority that runs before or after the built-ins as
+needed:
+
+```lua
+require("neo-marimo").register_cell_detector("pytest", function(code)
+  return code:match("^%s*def%s+test_") ~= nil
+end, 15)
+```
+
+`fn(code)` receives the cell's full source and returns a boolean.
+`priority` is optional (default 50). Unlike the other three registries,
+this one **appends** rather than replacing — registering the same `type`
+twice adds a second chain entry rather than overwriting the first, so
+give overlapping detectors distinct priorities if order matters.
 
 ## Testing
 
