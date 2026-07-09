@@ -27,11 +27,43 @@ local ns_picker = vim.api.nvim_create_namespace("neo_marimo_widget_picker")
 
 -- ── per-type interactions ────────────────────────────────────────────────
 
-local function prompt_number(label, current, on_set)
+-- vim.ui.input/select enter the command line to prompt. With 'cmdheight=0'
+-- (a common default), Neovim borrows a screen row from the current window
+-- for the prompt's duration and does not reliably give the scroll position
+-- back once the row is returned — confirmed in a headless repro: shrinking
+-- a window's height by 1 bumps `topline`, and growing the height back
+-- leaves `topline` at the bumped value instead of reverting it. Only
+-- visible when the cursor sits low enough that the one row matters (e.g.
+-- below a cell tall enough to show a plotted image) — exactly the reported
+-- "screen jumps when I edit a pinned widget, but only if my cursor is
+-- below the graph" symptom. Snapshot every window showing `bufnr` before
+-- opening the prompt and restore afterward, whether the prompt was
+-- committed or cancelled — `fn` wraps the vim.ui.input/select callback so
+-- both paths go through here.
+local function freeze_view(bufnr, fn)
+  local saved = {}
+  for _, win in ipairs(vim.fn.win_findbuf(bufnr)) do
+    local ok, view = pcall(vim.api.nvim_win_call, win, vim.fn.winsaveview)
+    if ok then saved[win] = view.topline end
+  end
+  return function(...)
+    local ok, err = pcall(fn, ...)
+    for win, topline in pairs(saved) do
+      if vim.api.nvim_win_is_valid(win) then
+        pcall(vim.api.nvim_win_call, win, function()
+          vim.fn.winrestview({ topline = topline })
+        end)
+      end
+    end
+    if not ok then error(err, 0) end
+  end
+end
+
+local function prompt_number(bufnr, label, current, on_set)
   vim.ui.input({
     prompt = label .. " = ",
     default = tostring(current or ""),
-  }, function(input)
+  }, freeze_view(bufnr, function(input)
     if input == nil then return end
     local n = tonumber(input)
     if not n then
@@ -39,24 +71,24 @@ local function prompt_number(label, current, on_set)
       return
     end
     on_set(n)
-  end)
+  end))
 end
 
-local function prompt_text(label, current, on_set)
+local function prompt_text(bufnr, label, current, on_set)
   vim.ui.input({
     prompt = label .. " = ",
     default = tostring(current or ""),
-  }, function(input)
+  }, freeze_view(bufnr, function(input)
     if input == nil then return end
     on_set(input)
-  end)
+  end))
 end
 
-local function prompt_select(label, options, on_set)
-  vim.ui.select(options, { prompt = label .. ":" }, function(choice)
+local function prompt_select(bufnr, label, options, on_set)
+  vim.ui.select(options, { prompt = label .. ":" }, freeze_view(bufnr, function(choice)
     if choice == nil then return end
     on_set(choice)
-  end)
+  end))
 end
 
 -- After a value change, both the override registry and the cell need to be
@@ -106,7 +138,7 @@ local function interact(nb, cell, w)
   end
 
   if w.name == "slider" or w.name == "number" or w.name == "range_slider" then
-    prompt_number(w.label, w.value, function(v)
+    prompt_number(nb.bufnr, w.label, w.value, function(v)
       commit(nb, cell, w, v)
     end)
 
@@ -125,7 +157,7 @@ local function interact(nb, cell, w)
     vim.notify("[neo-marimo] pressed " .. w.label, vim.log.levels.INFO)
 
   elseif w.name == "text" or w.name == "text_area" then
-    prompt_text(w.label, w.value, function(v) commit(nb, cell, w, v) end)
+    prompt_text(nb.bufnr, w.label, w.value, function(v) commit(nb, cell, w, v) end)
 
   elseif w.name == "dropdown" then
     -- Marimo's dropdown decoder expects the selected key wrapped in a list
@@ -140,14 +172,14 @@ local function interact(nb, cell, w)
     if opts_raw then
       local ok, opts = pcall(vim.json.decode, opts_raw)
       if ok and type(opts) == "table" then
-        prompt_select(w.label, opts, function(v) commit(nb, cell, w, { v }) end)
+        prompt_select(nb.bufnr, w.label, opts, function(v) commit(nb, cell, w, { v }) end)
         return
       end
     end
-    prompt_text(w.label, w.value, function(v) commit(nb, cell, w, { v }) end)
+    prompt_text(nb.bufnr, w.label, w.value, function(v) commit(nb, cell, w, { v }) end)
 
   elseif w.name == "multiselect" then
-    prompt_text(w.label .. " (comma-separated)",
+    prompt_text(nb.bufnr, w.label .. " (comma-separated)",
       type(w.value) == "table" and table.concat(w.value, ", ") or "",
       function(input)
         local list = {}
@@ -159,7 +191,7 @@ local function interact(nb, cell, w)
       end)
 
   else
-    prompt_text(w.label, w.value, function(v) commit(nb, cell, w, v) end)
+    prompt_text(nb.bufnr, w.label, w.value, function(v) commit(nb, cell, w, v) end)
   end
 end
 
@@ -532,5 +564,9 @@ function M.open_pins(nb)
     end, "Unpin selected widget")
   end)
 end
+
+-- Test seam: prompt floats aren't driven in specs, but the cmdheight=0
+-- viewport-freeze wrapper around them is pure enough to exercise directly.
+M._freeze_view = freeze_view
 
 return M
