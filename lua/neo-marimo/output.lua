@@ -338,6 +338,69 @@ local function render_marimo_mime(data)
   } }
 end
 
+local function render_application_json(data)
+  -- application/json is marimo's format for tuple/sequence cell outputs.
+  -- The data is a JSON-encoded array where each element is a string of the
+  -- form "mimetype:content" (e.g. "text/html:<marimo-table ...>").
+  -- Decode the array and dispatch each item through the standard renderer
+  -- lookup so e.g. two DataFrames returned as a tuple both render as inline
+  -- tables instead of being dumped as a raw JSON blob.
+  local decoded
+  if type(data) == "string" then
+    local ok, result = pcall(vim.json.decode, data,
+      { luanil = { object = true, array = true } })
+    if ok then
+      decoded = result
+    else
+      return render_text_plain(data)
+    end
+  elseif type(data) == "table" then
+    decoded = data
+  else
+    return render_text_plain(tostring(data))
+  end
+
+  -- Check for the "mimetype:content" list format. Valid MIME types look like
+  -- "type/subtype" (with optional dots/plusses), so require at least one "/"
+  -- before the first ":" to avoid false-positives on other JSON arrays.
+  if type(decoded) == "table" and decoded[1] ~= nil then
+    local is_mime_list = true
+    for _, item in ipairs(decoded) do
+      if type(item) ~= "string" or not item:find("^[%w%-]+/[%w%-%.%+]+:") then
+        is_mime_list = false
+        break
+      end
+    end
+
+    if is_mime_list then
+      _render_ctx.skip_cap = true
+      local out = {}
+      for i, item in ipairs(decoded) do
+        local colon = item:find(":")
+        local mime = item:sub(1, colon - 1)
+        local content = item:sub(colon + 1)
+        local renderer = lookup_renderer(mime)
+        if renderer then
+          local lines = safe_render(mime, renderer, content, current_opts(), mime)
+          for _, line in ipairs(lines) do table.insert(out, line) end
+        else
+          for _, line in ipairs(render_text_plain(content)) do
+            table.insert(out, line)
+          end
+        end
+        if i < #decoded then
+          table.insert(out, { { "  ", "MarimoOutputText" } })
+        end
+      end
+      return out
+    end
+  end
+
+  -- Fallback for other JSON shapes: render as plain text.
+  if type(data) == "string" then return render_text_plain(data) end
+  return {}
+end
+
 -- Register built-ins. mo.md() emits text/html with a `<span class="markdown
 -- prose ...">` wrapper; render_html detects that shape and forwards to the
 -- markdown renderer (Phase 8.1). Raw text/markdown payloads (rare but
@@ -345,6 +408,7 @@ end
 M.register_renderer("text/plain", render_text_plain)
 M.register_renderer("text/html", render_html)
 M.register_renderer("text/markdown", render_markdown_mime)
+M.register_renderer("application/json", render_application_json)
 M.register_renderer("application/vnd.dataresource+json", render_dataresource)
 M.register_renderer("application/vnd.marimo+error", render_error)
 M.register_renderer("application/vnd.marimo+mime", render_marimo_mime)
