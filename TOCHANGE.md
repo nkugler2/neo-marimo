@@ -75,17 +75,17 @@ Fresh `kernel-ready` re-keys every cell by position and they match again.
 Proper fix (two parts) — both DONE 2026-06-16:
 
 1. [x] `output.lua:handle_cell_op` — no longer drops cell-ops for unknown ids;
-   warns once and triggers a debounced `server.resync_ws` (kiosk reconnect →
-   marimo replays kernel-ready, which re-keys by code, and re-emits outputs).
+       warns once and triggers a debounced `server.resync_ws` (kiosk reconnect →
+       marimo replays kernel-ready, which re-keys by code, and re-emits outputs).
 2. [x] `rekey_cells_from_server` — no longer hard-bails on a count mismatch;
-   re-keys by code content when codes are available (kernel-ready /
-   update-cell-codes) and, for ids-only with a count mismatch, rebuilds
-   nb.cells from disk then re-keys positionally.
-   Repro+diagnosis chat: Claude Code session `fc7c2961-2fc8-4909-83b2-6d95b761b2f7`
-   (2026-06-15), transcript at
-   `~/.claude/projects/-Users-noahkugler-Documents-code-learning-ml-marimo/fc7c2961-2fc8-4909-83b2-6d95b761b2f7.jsonl`
-   — resume with `claude --resume fc7c2961-2fc8-4909-83b2-6d95b761b2f7`. To confirm
-   on a fresh repro: enable WS logging and `grep "unknown cell" /tmp/neo-marimo-ws.log`.
+       re-keys by code content when codes are available (kernel-ready /
+       update-cell-codes) and, for ids-only with a count mismatch, rebuilds
+       nb.cells from disk then re-keys positionally.
+       Repro+diagnosis chat: Claude Code session `fc7c2961-2fc8-4909-83b2-6d95b761b2f7`
+       (2026-06-15), transcript at
+       `~/.claude/projects/-Users-noahkugler-Documents-code-learning-ml-marimo/fc7c2961-2fc8-4909-83b2-6d95b761b2f7.jsonl`
+       — resume with `claude --resume fc7c2961-2fc8-4909-83b2-6d95b761b2f7`. To confirm
+       on a fresh repro: enable WS logging and `grep "unknown cell" /tmp/neo-marimo-ws.log`.
 
 ### Live sync / browser sharing
 
@@ -215,6 +215,11 @@ remote change.
 
 <!-- Add new items here. Keep them short — one or two sentences is enough. -->
 <!-- When something gets promoted into the formal plan, move it to "Integrated" below. -->
+
+1. Be able to collapse cells, especially markdown cells, so that you can just
+   see the output. Ideally, it can look as clean in Neovim as it looks in the
+   Marimo editor, with only the things opened that matter
+2.
 
 ---
 
