@@ -33,6 +33,8 @@
 -- in their cell) are left untouched, so nested function return types
 -- are still inferred correctly.
 
+local utils = require("neo-marimo.utils")
+
 local M = {}
 
 -- Hidden shadow buffer state, keyed by source filepath.
@@ -420,7 +422,10 @@ local notebook_to_shadow_pos = M.notebook_to_shadow_pos
 -- Inverse mapping: shadow (row, col) → notebook (row, col). Used to
 -- translate goto-definition results so the jump lands inside the
 -- notebook buffer rather than the shadow.
-local function shadow_to_notebook_pos(nb, entry, shadow_row, shadow_col)
+-- Exposed on M (mirroring notebook_to_shadow_pos above) purely as a test
+-- seam — lsp_spec.lua exercises the mapping pair directly without a live
+-- LSP server.
+function M.shadow_to_notebook_pos(nb, entry, shadow_row, shadow_col)
   if not entry.cell_offsets then return nil end
   for i, cell in ipairs(nb.cells) do
     local off = entry.cell_offsets[i]
@@ -437,6 +442,7 @@ local function shadow_to_notebook_pos(nb, entry, shadow_row, shadow_col)
   end
   return nil
 end
+local shadow_to_notebook_pos = M.shadow_to_notebook_pos
 
 -- Send an LSP request from the notebook buffer by routing it through the
 -- shadow buffer. `method` is a textDocument/* request name. `extra_params`
@@ -446,8 +452,7 @@ end
 local function request_via_shadow(nb, method, extra_params, handler, fallback_msg)
   local entry = M.refresh_shadow(nb)
   if not entry then
-    vim.notify("[neo-marimo] " .. (fallback_msg or "shadow buffer unavailable"),
-      vim.log.levels.WARN)
+    utils.warn(fallback_msg or "shadow buffer unavailable")
     return
   end
 
@@ -457,11 +462,10 @@ local function request_via_shadow(nb, method, extra_params, handler, fallback_ms
   -- fired. Verify and complain if nothing is attached.
   local clients = vim.lsp.get_clients({ bufnr = entry.bufnr })
   if #clients == 0 then
-    vim.notify(
-      "[neo-marimo] No LSP attached to shadow buffer. Install a Python LSP " ..
+    utils.warn(
+      "No LSP attached to shadow buffer. Install a Python LSP " ..
       "(e.g. pyright, basedpyright, pylsp) and ensure it autostarts on " ..
-      "filetype=python.",
-      vim.log.levels.WARN
+      "filetype=python."
     )
     return
   end

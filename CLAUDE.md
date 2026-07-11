@@ -16,12 +16,13 @@ Requires nvim 0.11+ and `curl` on PATH. Single-developer, pre-release.
   `output.lua`, `widgets.lua`, `dataframe.lua`, `config.lua` (defaults),
   `health.lua` (`:checkhealth`).
 - `python/` — `bridge.py` (parse/generate, spawned per-parse), `ws_client.py`.
-- `tests/spec/*.lua` — 12 spec files. `tests/fixtures/<series>/` — golden
+- `tests/spec/*.lua` — the spec suite. `tests/fixtures/<series>/` — golden
   `_repr_html_()` captures for marimo 0.19 and 0.23.
-- `docs/architecture.md` — the 8-layer architecture and the **four extension
-  registries** (`register_output_renderer`, `register_widget_renderer`,
-  `register_ws_handler`, `register_cell_detector`) — the main contribution
-  surface.
+- `docs/architecture.md` — the module map (grouped into entry/lifecycle,
+  notebook model, kernel connection, output rendering, LSP, and support)
+  and the **four extension registries** (`register_output_renderer`,
+  `register_widget_renderer`, `register_ws_handler`,
+  `register_cell_detector`) — the main contribution surface.
 - `docs/plan-release.md` — the current plan (phases **R0–R7**). Pre-release rule:
   **no new features** — correctness, packaging, and contributor on-ramps only.
 

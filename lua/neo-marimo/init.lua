@@ -16,11 +16,40 @@ local M = {}
 -- Track active notebooks by source filepath to avoid double-attaching
 local _attached = {}
 
+-- Whether the attach-time tmux image sweep (F2.7) has already run this
+-- session. A second/third notebook attaching later must NOT re-sweep — the
+-- first notebook's placements are live by then, and a delete-all would
+-- strand it exactly the way this feature is meant to prevent.
+local _swept_images = false
+
+-- Kitty-graphics placements painted through tmux passthrough outlive the
+-- nvim process — the terminal keeps the pixels and tmux never tracks or
+-- repaints them, so nothing short of an explicit delete clears them on
+-- exit. Sweep on every exit (not just BufWipeout) so plain :qa / crashes
+-- don't strand fossils for the next session (docs/plan-refinement.md F2.7).
+-- Module-level, created once at load time (this file is `require`d exactly
+-- once per session), mirroring the single-instance state above.
+vim.api.nvim_create_autocmd("VimLeavePre", {
+  callback = function()
+    -- pcall the whole body: an exit-time throw would surface as a shutdown
+    -- error message and can abort remaining VimLeavePre handlers. The
+    -- individual closes inside clear_all are already pcall'd, but this
+    -- guards whatever the callback grows to include later.
+    pcall(function() require("neo-marimo.image").clear_all() end)
+  end,
+})
+
 -- Set to true around code paths that intentionally load the underlying .py
 -- buffer (e.g. :MarimoToggle off). The BufReadPost autocmd in
 -- plugin/neo-marimo.lua checks this flag and skips its auto-attach so we
 -- don't immediately bounce back into the notebook view.
-M._suppress_attach = false
+--
+-- Deliberately not `_suppress_attach` (plan-refinement F4.4): plugin/
+-- neo-marimo.lua reads this across the module boundary, which the `_`-private
+-- convention doesn't actually cover — it only promises stability within a
+-- single module's own callers, and this flag is read by the exact autocmd it
+-- was written for. Naming it as private was a lie about that coupling.
+M.suppress_attach = false
 
 -- Initialize the plugin with user options.
 -- Call this from your Neovim config:
@@ -58,6 +87,19 @@ end
 function M.attach(source_bufnr)
   local filepath = vim.api.nvim_buf_get_name(source_bufnr)
 
+  -- One-time, first-attach-only sweep of terminal-side kitty-graphics
+  -- state inherited from a crashed or pre-F2.7 session. This is the only
+  -- point in the session guaranteed safe: nothing has rendered an image
+  -- yet, so a delete-all can't hit one of our own live placements. Must
+  -- run before any output render (below, and on every subsequent cell-op),
+  -- and only once — a later attach (second notebook) would otherwise sweep
+  -- while the first notebook's placements are live.
+  local img_cfg = config.options.images or {}
+  if not _swept_images and img_cfg.tmux_sweep_on_attach ~= false then
+    _swept_images = true
+    require("neo-marimo.image").sweep_terminal(false)
+  end
+
   -- Avoid double-attaching. The buffer must be both valid (not wiped) and
   -- loaded — a :bd leaves the buffer "valid" but unloaded, in which case
   -- switching to it would show an empty buffer and lose all state.
@@ -74,7 +116,7 @@ function M.attach(source_bufnr)
   end
 
   -- Parse the notebook file
-  local python_path = config.options.python_path or "python3"
+  local python_path = config.get("python_path")
   local ok, data = pcall(parser.parse_file, filepath, python_path)
   if not ok then
     utils.warn("Failed to parse " .. filepath .. ": " .. tostring(data))
@@ -163,6 +205,10 @@ function M.attach(source_bufnr)
     once = true,
     callback = function()
       _attached[filepath] = nil
+      -- Close this buffer's placements explicitly rather than waiting for
+      -- VimLeavePre — a :bw mid-session should not leave a fossil behind
+      -- either (docs/plan-refinement.md F2.7).
+      require("neo-marimo.image").clear_for_cell(nb_bufnr)
       watcher.stop(filepath)
       lsp.cleanup(filepath)
       if resize_autocmd_id then
@@ -242,7 +288,7 @@ function M.attach(source_bufnr)
       end
 
       -- Re-parse from disk, then patch the buffer with the delta.
-      local ok, data = pcall(parser.parse_file, filepath, config.options.python_path)
+      local ok, data = pcall(parser.parse_file, filepath, config.get("python_path"))
       if not ok or not data or not data.cells then return end
 
       -- Don't fight the user: if they have unsaved edits, ask before
@@ -278,14 +324,14 @@ function M.attach(source_bufnr)
   local redraw_outputs = utils.debounce(function()
     if not vim.api.nvim_buf_is_valid(nb_bufnr) then return end
     if #vim.fn.win_findbuf(nb_bufnr) == 0 then return end
-    local output = require("neo-marimo.output")
-    for _, cell in ipairs(nb.cells) do
-      if not cell._output_hidden
-          and (cell.output or cell.console or cell._has_run) then
-        output.render(nb_bufnr, cell, filepath)
-      end
-    end
+    require("neo-marimo.output").render_all(nb_bufnr, nb, filepath)
   end, 200)
+
+  -- Stashed on the notebook so buffer.refresh_after_mutation (which runs on
+  -- every buffer mutation, not just resize) can reuse this same debounced
+  -- redraw to re-anchor output marks after render_all_borders recreates the
+  -- border marks — see the comment there for why ordering matters.
+  nb._redraw_outputs = redraw_outputs
 
   -- Re-apply window settings whenever the buffer enters a new window
   -- (e.g. user runs :split). Also re-render borders and outputs so they
@@ -334,15 +380,12 @@ function M.attach(source_bufnr)
   keymaps.setup(nb_bufnr, nb)
 
   local cell_count = #nb.cells
-  vim.notify(
-    string.format("[neo-marimo] Opened %s (%d cells)", vim.fn.fnamemodify(filepath, ":t"), cell_count),
-    vim.log.levels.INFO
-  )
+  utils.info(string.format("Opened %s (%d cells)", vim.fn.fnamemodify(filepath, ":t"), cell_count))
 end
 
 -- Run :checkhealth for this plugin
 function M.check()
-  local python_path = config.options.python_path or "python3"
+  local python_path = config.get("python_path")
   local result = parser.check(python_path)
 
   if result.ok then
@@ -353,6 +396,9 @@ function M.check()
     vim.health.info("Example: require('neo-marimo').setup({ python_path = '/path/to/venv/bin/python' })")
   end
 end
+
+-- Public API (plan-refinement F4.4): statusline and blink integrations
+-- already depend on both of these — keep the signatures stable.
 
 -- Get the notebook state for the current buffer, or nil.
 function M.current_notebook()
@@ -421,9 +467,9 @@ function M.toggle(bufnr)
     -- read by the scheduled callback in plugin/neo-marimo.lua; we clear it
     -- via vim.schedule so the callback (which is also scheduled) sees it
     -- and bails out, then it's cleared before any future buffer load.
-    M._suppress_attach = true
+    M.suppress_attach = true
     pcall(vim.fn.bufload, pbuf)
-    vim.schedule(function() M._suppress_attach = false end)
+    vim.schedule(function() M.suppress_attach = false end)
 
     bind_plain_toggle(pbuf)
     vim.api.nvim_win_set_buf(0, pbuf)
@@ -456,7 +502,7 @@ end
 
 -- ── Extension points ──────────────────────────────────────────────────────
 --
--- These three registries are the supported way to extend neo-marimo without
+-- These four registries are the supported way to extend neo-marimo without
 -- patching it. Everything else — module functions not re-exported here or
 -- documented in docs/architecture.md, and anything prefixed with `_` — is
 -- internal and may change between commits.
@@ -488,10 +534,11 @@ function M.register_ws_handler(op, fn)
 end
 
 -- Register a cell-type detector. `predicate(code)` is tried against each
--- cell's source (lower `priority` first; built-ins use 10–30) and the first
--- match sets the cell's type — which drives its border colour and label.
-function M.register_cell_detector(predicate, type_name, priority)
-  require("neo-marimo.cell").register_detector(predicate, type_name, priority)
+-- cell's source (lower `priority` first; built-ins use 10–30, default 50)
+-- and the first match sets the cell's type — which drives its border
+-- colour and label.
+function M.register_cell_detector(type_name, predicate, priority)
+  require("neo-marimo.cell").register_detector(type_name, predicate, priority)
 end
 
 return M

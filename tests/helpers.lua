@@ -86,8 +86,9 @@ local _nb_counter = 0
 -- normal-mode commands target it.
 --
 -- Tests drive edits exactly like a user (nvim_buf_set_lines, :normal!,
--- :undo) and call nb._flush_pending() where a keymap action would — the
--- synchronous stand-in for the 300ms debounce.
+-- :normal for buffer-local boundary keymaps, :undo) and call
+-- nb._flush_pending() where a keymap action would — the synchronous
+-- stand-in for the 300ms debounce.
 function H.make_notebook(codes)
   local config = require("neo-marimo.config")
   if not config.options.python_path then
@@ -96,6 +97,7 @@ function H.make_notebook(codes)
 
   local notebook = require("neo-marimo.notebook")
   local buffer = require("neo-marimo.buffer")
+  local keymaps = require("neo-marimo.keymaps")
 
   _nb_counter = _nb_counter + 1
   local filepath = "/tmp/neo-marimo-test-" .. _nb_counter .. ".py"
@@ -108,6 +110,11 @@ function H.make_notebook(codes)
   local nb = notebook.new(filepath, data)
   local bufnr = buffer.create(nb, nil)
   buffer.attach_change_tracking(bufnr, nb)
+  -- Wire the buffer-local boundary-aware keymaps (smart paste, `o`) the
+  -- same way production's keymaps.setup does — without this, a test
+  -- driving `normal o...` (mapped) would fall through to native `o` and
+  -- couldn't exercise the plan-refinement F3.1 boundary rewrite at all.
+  keymaps.setup_editing_keymaps(bufnr, nb)
   vim.api.nvim_set_current_buf(bufnr)
   return nb, bufnr
 end

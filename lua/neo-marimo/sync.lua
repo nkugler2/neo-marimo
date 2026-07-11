@@ -193,7 +193,7 @@ function M.write_to_file(nb)
   -- back through reload_from_file and clobber the cursor.
   suppress_watcher(nb)
   local ok, err = pcall(function()
-    local py_source = parser.generate_py(cells, nb.filepath, config.options.python_path)
+    local py_source = parser.generate_py(cells, nb.filepath, config.get("python_path"))
     local lines = vim.split(py_source, "\n", { plain = true })
     -- Remove trailing empty line if writefile would add one
     if lines[#lines] == "" then
@@ -240,7 +240,7 @@ function M.write_to_file(nb)
   -- watcher reloads, sees content differs from last save, and pushes
   -- to all consumers (browser + our kiosk).
 
-  vim.notify("[neo-marimo] Saved " .. vim.fn.fnamemodify(nb.filepath, ":t"), vim.log.levels.INFO)
+  utils.info("Saved " .. vim.fn.fnamemodify(nb.filepath, ":t"))
   return true
 end
 
@@ -252,7 +252,7 @@ function M.reload_from_file(nb)
     return false
   end
 
-  local ok, data = pcall(parser.parse_file, nb.filepath, config.options.python_path)
+  local ok, data = pcall(parser.parse_file, nb.filepath, config.get("python_path"))
   if not ok then
     utils.warn("Failed to reload notebook: " .. tostring(data))
     return false
@@ -263,7 +263,24 @@ function M.reload_from_file(nb)
   -- namespace and shadow the fresh ones we place below.
   local hl = require("neo-marimo.highlights")
   vim.api.nvim_buf_clear_namespace(bufnr, hl.ns_cell_anchor, 0, -1)
-  for _, c in ipairs(nb.cells) do c.start_mark_id = nil end
+  for _, c in ipairs(nb.cells) do c.anchor_mark_id = nil end
+
+  -- Tear down image placements and widget registry entries too: the cells
+  -- rebuilt below are brand-new objects with fresh parse-minted ids, so
+  -- every old registry key (keyed by the *old* cell.id) becomes permanently
+  -- unreachable — nothing will ever look it up again. An unmigrated image
+  -- placement doesn't just leak, it keeps painting its stale plot at its old
+  -- row for the rest of the session (docs/plan-refinement.md F2.6). Unlike
+  -- the re-key path (migrate_registries in ws_handlers.lua), there's no
+  -- old->new mapping to migrate by here — the cells are new objects, not
+  -- renamed ones — so clearing is the correct move, not just the simplest.
+  -- The next render of each cell (driven by the caller's subsequent cell-op
+  -- or a fresh run) redraws images from scratch under the new ids.
+  local widgets = require("neo-marimo.widgets")
+  require("neo-marimo.image").clear_for_cell(bufnr)
+  for _, c in ipairs(nb.cells) do
+    widgets.clear_for_cell(bufnr, c.id)
+  end
 
   -- Rebuild cells
   local cell_mod = require("neo-marimo.cell")
@@ -295,7 +312,7 @@ function M.reload_from_file(nb)
     vim.api.nvim_set_option_value("modified", false, { buf = bufnr })
 
     for _, cell in ipairs(nb.cells) do
-      buffer.place_cell_anchor(bufnr, cell, cell.start_row)
+      buffer.place_cell_anchors(bufnr, cell, cell.start_row, cell.end_row)
     end
 
     buffer.render_all_borders(bufnr, nb)
@@ -397,7 +414,7 @@ function M.apply_remote_changes(nb, new_cells_data)
         vim.api.nvim_buf_set_lines(
           bufnr, cell.start_row, cell.end_row + 1, false, new_lines
         )
-        buffer.place_cell_anchor(bufnr, cell, at)
+        buffer.place_cell_anchors(bufnr, cell, at, at + #new_lines - 1)
 
         cell.code = new_code
         if new.name then cell.name = new.name end

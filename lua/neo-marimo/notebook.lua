@@ -219,6 +219,12 @@ end
 -- whichever cell now occupies that position.
 local UNDO_TRASH_CAP = 5
 
+-- How long a trash entry stays restorable (try_undo_restore ignores older
+-- entries). Exposed so other modules can key their own cleanup to the same
+-- window: actions.delete_cell_at_cursor defers its widget-override clear
+-- until restore is no longer possible (plan-refinement F2.5).
+M.UNDO_TRASH_TTL_MS = 60000
+
 -- Monotonic counter identifying which single buffer edit ("batch") a trash
 -- entry came from. try_undo_restore's contiguous-run matcher (below) only
 -- grows a run within one batch — two entries from unrelated deletes must
@@ -312,7 +318,7 @@ function M.try_undo_restore(nb, changes)
   if #changes == 0 then return changes end
 
   local now = vim.uv.hrtime() / 1e6
-  local TTL = 60000
+  local TTL = M.UNDO_TRASH_TTL_MS
   local cell_mod = require("neo-marimo.cell")
   local buffer = require("neo-marimo.buffer")
   local filtered = {}
@@ -405,7 +411,7 @@ function M.try_undo_restore(nb, changes)
             -- Place a fresh anchor at the row vim just restored. Other
             -- cells' anchors already moved themselves via gravity, so a
             -- post-anchor sync picks up the new contiguous layout.
-            buffer.place_cell_anchor(nb.bufnr, restored, t.start_row)
+            buffer.place_cell_anchors(nb.bufnr, restored, t.start_row, t.start_row + t.line_count - 1)
           end
         end
         for k, c in ipairs(nb.cells) do c.index = k end

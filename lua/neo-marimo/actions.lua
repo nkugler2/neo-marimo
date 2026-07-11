@@ -48,14 +48,6 @@ local function flush_pending_edits(bufnr, nb, opts)
   end, 25)
 end
 
-local function jump_to_cell(cell)
-  if not cell then return end
-  local row = cell.start_row + 1
-  local line_count = vim.api.nvim_buf_line_count(0)
-  if row > line_count then row = line_count end
-  vim.api.nvim_win_set_cursor(0, { row, 0 })
-end
-
 -- Insert a blank cell after the cell containing the cursor (or at end of
 -- notebook if the cursor isn't over any cell). Renders borders and jumps to
 -- the new cell.
@@ -71,13 +63,30 @@ function M.new_cell_below(bufnr, nb)
     vim.api.nvim_buf_set_lines(bufnr, insert_row, insert_row, false, { "" })
 
     new_cell = notebook.insert_cell_after(nb, idx)
-    -- Anchor the new cell at insert_row. The existing cells at and below
-    -- have already been pushed down by extmark gravity from the set_lines
-    -- call above, so insert_row is now the empty row we just created.
-    buffer.place_cell_anchor(bufnr, new_cell, insert_row)
+    -- Anchor the new cell at insert_row — the blank line the set_lines
+    -- call above just inserted.
+    buffer.place_cell_anchors(bufnr, new_cell, insert_row, insert_row)
+
+    -- With gravity-false starts (plan-refinement F3.1), a pure insertion
+    -- exactly at a cell's start endpoint does NOT push that endpoint down —
+    -- verified by probe: typing at col 0 of a fresh line leaves the
+    -- gravity-false mark pinned there, which is exactly what we want for a
+    -- user typing into a new cell, but means the *next* cell (whose start
+    -- byte is exactly insert_row, the old right_gravity = true comment's
+    -- premise) does not get carried down by the splice either. Every cell
+    -- after that one is strictly past insert_row and does move itself via
+    -- gravity, so only the immediate follower needs an explicit re-place.
+    -- Without this, the follower's start would still claim insert_row,
+    -- contend with the new cell's anchor for the same row, and the
+    -- resolver would collapse the new cell as a zero-width phantom.
+    local follower = nb.cells[idx + 2]
+    if follower then
+      buffer.place_cell_anchors(bufnr, follower, follower.start_row + 1, follower.end_row + 1)
+    end
+
     buffer.refresh_after_mutation(bufnr, nb)
   end)
-  jump_to_cell(new_cell)
+  buffer.jump_to_cell(bufnr, new_cell)
 end
 
 -- Insert a blank cell before the cell containing the cursor (or at the top
@@ -89,15 +98,27 @@ function M.new_cell_above(bufnr, nb)
     local row = vim.api.nvim_win_get_cursor(0)[1] - 1
     local cell = notebook.get_cell_at_row(nb, row)
     local idx = cell and cell.index or 1
+    -- The cell being displaced downward by the insert — the cell under the
+    -- cursor, or (defensively) whatever currently occupies slot 1 if the
+    -- cursor wasn't over any cell.
+    local displaced = cell or nb.cells[1]
 
     local insert_row = cell and cell.start_row or 0
     vim.api.nvim_buf_set_lines(bufnr, insert_row, insert_row, false, { "" })
 
     new_cell = notebook.insert_cell_before(nb, idx)
-    buffer.place_cell_anchor(bufnr, new_cell, insert_row)
+    buffer.place_cell_anchors(bufnr, new_cell, insert_row, insert_row)
+
+    -- Symmetric with new_cell_below: the displaced cell's start byte is
+    -- exactly insert_row, so its gravity-false start endpoint doesn't move
+    -- itself under the splice above. Re-place it explicitly one row down.
+    if displaced then
+      buffer.place_cell_anchors(bufnr, displaced, displaced.start_row + 1, displaced.end_row + 1)
+    end
+
     buffer.refresh_after_mutation(bufnr, nb)
   end)
-  jump_to_cell(new_cell)
+  buffer.jump_to_cell(bufnr, new_cell)
 end
 
 -- Delete the cell containing the cursor. Snapshots the cell to undo trash
@@ -132,6 +153,29 @@ function M.delete_cell_at_cursor(bufnr, nb)
     vim.api.nvim_buf_clear_namespace(
       bufnr, highlights.ns_output, cell.start_row, cell.end_row + 1
     )
+    -- Widget value overrides are NOT cleared here but on undo-trash expiry:
+    -- if the user undoes this delete within notebook.UNDO_TRASH_TTL_MS, the
+    -- cell comes back with its cached output HTML, and only the lingering
+    -- override keeps the widget display in sync with the value the kernel
+    -- still holds (the HTML's data-initial-value is stale). Once the TTL
+    -- passes the trash entry can't be restored, so the overrides — keyed by
+    -- object_id at module level — would just leak; drop them then, unless
+    -- an undo already brought the cell back (plan-refinement F2.5). Capture
+    -- the ids now, before clear_for_cell wipes the registry they live in.
+    local override_ids = {}
+    for _, w in ipairs(widgets.list_for_cell(bufnr, cell.id)) do
+      if w.object_id then table.insert(override_ids, w.object_id) end
+    end
+    if #override_ids > 0 then
+      local cell_id = cell.id
+      vim.defer_fn(function()
+        if nb.cell_by_id[cell_id] then return end
+        for _, oid in ipairs(override_ids) do
+          widgets.clear_override(oid)
+        end
+      end, notebook.UNDO_TRASH_TTL_MS + 1000)
+    end
+
     widgets.clear_for_cell(bufnr, cell.id)
 
     -- Drop the cell anchor before set_lines so vim doesn't try to
@@ -154,7 +198,7 @@ function M.delete_cell_at_cursor(bufnr, nb)
   -- Move cursor to a valid position
   local target_idx = math.min(idx, #nb.cells)
   if target_idx >= 1 then
-    jump_to_cell(nb.cells[target_idx])
+    buffer.jump_to_cell(bufnr, nb.cells[target_idx])
   end
 end
 
@@ -178,6 +222,7 @@ function M.move_cell_down_at_cursor(bufnr, nb)
     -- anchor too far down and its content would flow into the cell
     -- after it.
     local next_count = #next_lines
+    local cell_count = #cell_lines
     local start_at = cell.start_row
 
     -- Drop both anchors before set_lines; we re-place them at the
@@ -196,11 +241,25 @@ function M.move_cell_down_at_cursor(bufnr, nb)
     local new_next = nb.cells[idx]      -- was next_cell, now at idx
     local new_cell = nb.cells[idx + 1]  -- was cell, now at idx+1
 
-    buffer.place_cell_anchor(bufnr, new_next, start_at)
-    buffer.place_cell_anchor(bufnr, new_cell, start_at + next_count)
+    buffer.place_cell_anchors(bufnr, new_next, start_at, start_at + next_count - 1)
+    buffer.place_cell_anchors(bufnr, new_cell, start_at + next_count,
+      start_at + next_count + cell_count - 1)
+
+    -- The whole-line replace above (probe 5, plan-refinement F3.1) pulls
+    -- the FOLLOWING cell's gravity-false start endpoint back onto the
+    -- replaced region's start, even though the total line count — and so
+    -- this cell's true row — hasn't changed. The next sync's clamp-forward
+    -- pass would heal it, but a deterministic action shouldn't depend on
+    -- that resolution; re-place it explicitly at its own (unchanged)
+    -- cached span.
+    local follower = nb.cells[idx + 2]
+    if follower then
+      buffer.place_cell_anchors(bufnr, follower, follower.start_row, follower.end_row)
+    end
+
     buffer.refresh_after_mutation(bufnr, nb)
   end)
-  jump_to_cell(nb.cells[idx + 1])
+  buffer.jump_to_cell(bufnr, nb.cells[idx + 1])
 end
 
 -- Swap the cell containing the cursor with the one above it.
@@ -219,6 +278,7 @@ function M.move_cell_up_at_cursor(bufnr, nb)
     -- Capture before list_extend mutates cell_lines (see
     -- move_cell_down_at_cursor for the same trap).
     local cell_count = #cell_lines
+    local prev_count = #prev_lines
     local start_at = prev_cell.start_row
 
     buffer.clear_cell_anchor(bufnr, cell)
@@ -232,11 +292,23 @@ function M.move_cell_up_at_cursor(bufnr, nb)
     local new_cell = nb.cells[idx - 1]
     local new_prev = nb.cells[idx]
 
-    buffer.place_cell_anchor(bufnr, new_cell, start_at)
-    buffer.place_cell_anchor(bufnr, new_prev, start_at + cell_count)
+    buffer.place_cell_anchors(bufnr, new_cell, start_at, start_at + cell_count - 1)
+    buffer.place_cell_anchors(bufnr, new_prev, start_at + cell_count,
+      start_at + cell_count + prev_count - 1)
+
+    -- Mirror of move_cell_down_at_cursor's follower fix: the cell after the
+    -- swapped pair (unchanged array position idx + 1) has its gravity-false
+    -- start endpoint pulled back onto the replaced region's start by the
+    -- whole-line replace above, even though its true row is unchanged.
+    -- Re-place it explicitly rather than rely on the next sync's clamp.
+    local follower = nb.cells[idx + 1]
+    if follower then
+      buffer.place_cell_anchors(bufnr, follower, follower.start_row, follower.end_row)
+    end
+
     buffer.refresh_after_mutation(bufnr, nb)
   end)
-  jump_to_cell(nb.cells[idx - 1])
+  buffer.jump_to_cell(bufnr, nb.cells[idx - 1])
 end
 
 -- Start the marimo server (if needed) and open the notebook in the browser.
@@ -253,7 +325,7 @@ end
 
 local function require_server(nb)
   if not server.is_running(nb.filepath) then
-    vim.notify("[neo-marimo] No server running. Press <leader>mo to start.", vim.log.levels.WARN)
+    utils.warn("No server running. Press <leader>mo to start.")
     return false
   end
   return true
@@ -270,10 +342,12 @@ function M.run_cell_at_cursor(bufnr, nb)
   local cell = notebook.get_cell_at_row(nb, row)
   if not cell then return end
 
-  -- User-driven re-execution is the *only* place we clear widget value
-  -- overrides for a cell. Auto-clearing on cell-op echoes was snapping
-  -- sliders back to their parsed data-initial-value milliseconds after
-  -- the user moved them via :MarimoWidget — see output.handle_cell_op.
+  -- User-driven re-execution is the only *immediate* place we clear widget
+  -- value overrides for a cell (delete clears them too, but deferred until
+  -- the cell's undo-trash entry expires — see delete_cell_at_cursor).
+  -- Auto-clearing on cell-op echoes was snapping sliders back to their
+  -- parsed data-initial-value milliseconds after the user moved them via
+  -- :MarimoWidget — see output.handle_cell_op.
   widgets.clear_overrides_for_cell(bufnr, cell.id)
 
   cell.status = "queued"
@@ -325,7 +399,7 @@ function M.interrupt_kernel(nb)
   if not require_server(nb) then return end
   server.interrupt(nb.filepath, function(ok)
     if ok then
-      vim.notify("[neo-marimo] Interrupt sent to kernel.", vim.log.levels.INFO)
+      utils.info("Interrupt sent to kernel.")
     end
   end)
 end
@@ -344,18 +418,29 @@ function M.restart_kernel(bufnr, nb)
   end
   output.clear_all(bufnr)
 
-  vim.notify("[neo-marimo] Restarting marimo kernel...", vim.log.levels.INFO)
+  utils.info("Restarting marimo kernel...")
   server.restart(nb, function(ok)
     if ok then
-      vim.notify(
-        "[neo-marimo] Kernel restarted; outputs cleared. Run-all re-executes from scratch. "
-          .. "Open browser tabs need re-opening (open_in_browser keymap).",
-        vim.log.levels.INFO
+      utils.info(
+        "Kernel restarted; outputs cleared. Run-all re-executes from scratch. "
+          .. "Open browser tabs need re-opening (open_in_browser keymap)."
       )
     else
       utils.error("Kernel restart failed — check :MarimoServerList for orphan processes.")
     end
   end)
+end
+
+-- Recovery for tmux passthrough eating a delete mid-session (F2.7):
+-- force a terminal-side delete-all (works with or without tmux), drop
+-- every registry placement for this notebook so render_path's
+-- same-path dedup can't short-circuit, and re-render outputs so the
+-- images redraw fresh.
+function M.repaint_images(bufnr, nb)
+  local image = require("neo-marimo.image")
+  image.sweep_terminal(true)
+  image.clear_for_cell(bufnr)
+  output.render_all(bufnr, nb, nb.filepath)
 end
 
 return M

@@ -39,10 +39,32 @@ M.defaults = {
     -- connection slot. Turn off if you'd rather lose the browser than
     -- give up the nvim live-update stream.
     share_with_browser = true,
+    -- Delay (ms) between releasing our WS slot and reconnecting as a kiosk
+    -- during the browser hand-off (server.lua hand_off_to_browser) — gives
+    -- the browser time to win the single EDIT-mode slot first. Timing-
+    -- dependent on machine speed: raise it if the browser loses the race
+    -- and shows "Network already connected".
+    browser_handoff_delay_ms = 1200,
     -- Watch the .py file for external edits (browser saves, other
     -- editors). When a change is detected, the notebook view is
     -- refreshed from disk.
     watch_file = true,
+  },
+
+  -- Inline-image handling (plan-refinement F2.7).
+  images = {
+    -- Sweep the terminal's kitty-graphics state once, on the first
+    -- notebook attach of the session, but only inside tmux. Kitty
+    -- placements drawn through tmux passthrough outlive nvim — the
+    -- terminal keeps the pixels and tmux never tracks or repaints them —
+    -- so a crashed or force-quit session leaves fossils that the next
+    -- session's placements land on top of. Attach time, before the first
+    -- attach's own render, is the only moment a delete-all is guaranteed
+    -- not to hit one of our own live placements. Trade-off: it also
+    -- clears images drawn by any other program sharing the same tmux
+    -- pane/window surface; set to false if that matters to you (recover a
+    -- stuck fossil later with :MarimoImageRepaint instead).
+    tmux_sweep_on_attach = true,
   },
 
   -- Visual settings
@@ -145,6 +167,35 @@ M.options = {}
 
 function M.setup(user_opts)
   M.options = vim.tbl_deep_extend("force", M.defaults, user_opts or {})
+end
+
+-- Look up a config value by dot-separated path (e.g. "server.port",
+-- "python_path"). M.setup() deep-merges M.defaults with the user's table
+-- with "force" (user wins), so M.options normally already carries every
+-- default key by the time setup() has run. This exists for two reasons
+-- (plan-refinement F5.3): call sites were re-encoding default literals
+-- (`or "python3"`, `or 2718`, ...) that silently drift from config.defaults
+-- the moment a default changes, and several sites indexed
+-- `config.options.server.port` unguarded — which errors if setup() hasn't
+-- run yet (M.options starts as `{}`, not M.defaults) e.g. code paths that
+-- read config before the auto-setup-on-first-attach in plugin/neo-marimo.lua
+-- has fired. get() walks M.options first and falls back to M.defaults at
+-- whatever depth is missing or nil, so it's safe pre-setup too.
+function M.get(path)
+  local keys = vim.split(path, ".", { plain = true })
+
+  local function walk(root)
+    local cur = root
+    for _, k in ipairs(keys) do
+      if type(cur) ~= "table" then return nil end
+      cur = cur[k]
+    end
+    return cur
+  end
+
+  local value = walk(M.options)
+  if value ~= nil then return value end
+  return walk(M.defaults)
 end
 
 return M

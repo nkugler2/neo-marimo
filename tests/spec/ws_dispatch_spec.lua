@@ -17,23 +17,29 @@ t.case("ws: throwing handler is contained and warned once", function()
   local ok3 = ws.dispatch("test-explode", {}, {})
 
   vim.notify = orig_notify
-  ws.handlers["test-explode"] = nil
+  -- register(op, nil) is the deregister path (plan-refinement F4.4) now that
+  -- ws_handlers' handlers table isn't reachable to splice directly.
+  ws.register("test-explode", nil)
   ws._handler_errors["test-explode"] = nil
 
   t.eq(ok1, false)
   t.eq(ok2, false)
   t.eq(ok3, false)
   t.eq(notify_count, 1, "exactly one warning for repeated handler failures")
+  t.eq(ws.dispatch("test-explode", {}, {}), false,
+    "dispatch returns false once the op is deregistered")
 end)
 
 t.case("ws: healthy handlers still dispatch normally", function()
   local seen = nil
   ws.register("test-ok", function(payload) seen = payload.value end)
   local ok = ws.dispatch("test-ok", { value = 42 }, {})
-  ws.handlers["test-ok"] = nil
+  ws.register("test-ok", nil)
 
   t.eq(ok, true)
   t.eq(seen, 42)
+  t.eq(ws.dispatch("test-ok", { value = 1 }, {}), false,
+    "dispatch returns false once the op is deregistered")
 end)
 
 t.case("ws: unknown op returns false without error", function()
@@ -160,6 +166,103 @@ t.case("ws: update-cell-ids does not stamp _last_cell_ids_at when the re-key bai
   t.eq(nb._last_cell_ids_at, 0, "stamp must not advance when the re-key bailed")
 end)
 
+-- F6.3: run-POST companion to F1.2 — end-to-end through
+-- actions.flush_pending_edits/run_cell_at_cursor, not just
+-- rekey_cells_from_server in isolation. Simulate the exact sequence F1.2
+-- fixed: a bailed re-key (count mismatch while sync.is_writing, leaves the
+-- stamp and cell.id untouched) followed by a later successful re-key (stamp
+-- advances, cell.id flips to the server id) — both landing while
+-- flush_pending_edits' vim.wait is still polling. Assert server.run_cells is
+-- eventually invoked with the SERVER id, never the stale pre-rekey local id.
+t.case("actions: run_cell_at_cursor POSTs the server cell id after a bail-then-rekey sequence (F1.2 companion)", function()
+  local server = require("neo-marimo.server")
+  local sync = require("neo-marimo.sync")
+  local actions = require("neo-marimo.actions")
+
+  local nb, bufnr = t.make_notebook({ "a = 1" })
+  local local_id = nb.cells[1].id
+  -- Force flush_pending_edits past its "nothing to save" early return without
+  -- touching the real filesystem — sync.write_to_file is stubbed below.
+  nb.dirty = true
+
+  local orig_write, orig_is_running, orig_run_cells, orig_is_writing =
+    sync.write_to_file, server.is_running, server.run_cells, sync.is_writing
+
+  -- Start inside our own write-suppression window, mirroring the real F1.2
+  -- repro: a re-key racing an in-flight save.
+  local writing = true
+  sync.write_to_file = function(n)
+    n._last_save_at = vim.uv.hrtime() / 1e6
+    return true
+  end
+  server.is_running = function() return true end
+  sync.is_writing = function() return writing end
+
+  -- Bail: server broadcasts a mismatched count (2 ids vs our 1 local cell)
+  -- while still writing — rekey_cells_from_server must bail without
+  -- reconciling (see the dedicated bail-case test above), leaving
+  -- nb._last_cell_ids_at and cell.id untouched.
+  vim.defer_fn(function()
+    ws.dispatch("update-cell-ids", { cell_ids = { "BOGUS1", "BOGUS2" } }, { nb = nb })
+  end, 10)
+
+  -- Successful rekey: the write-suppression window closes and the server
+  -- re-broadcasts with the correct count — reconciles positionally, flips
+  -- cell.id to the server id, and only now stamps _last_cell_ids_at past
+  -- flush_pending_edits' wait threshold.
+  vim.defer_fn(function()
+    writing = false
+    ws.dispatch("update-cell-ids", { cell_ids = { "SERVER1" } }, { nb = nb })
+  end, 50)
+
+  local posted_ids
+  server.run_cells = function(_filepath, cell_ids, _codes, cb)
+    posted_ids = cell_ids
+    cb(true)
+  end
+
+  actions.run_cell_at_cursor(bufnr, nb)
+
+  sync.write_to_file, server.is_running, server.run_cells, sync.is_writing =
+    orig_write, orig_is_running, orig_run_cells, orig_is_writing
+
+  t.ok(posted_ids ~= nil, "run_cells was called")
+  t.eq(posted_ids[1], "SERVER1", "posted cell_ids reflect the reconciled server id")
+  t.ok(posted_ids[1] ~= local_id, "not the stale pre-rekey local id")
+end)
+
+-- F5.4 regression: nb._unknown_cell_ids marks a cell-op's id as "already
+-- warned about" so a burst of ops for the same stale id only triggers one
+-- resync. But once a rekey actually reconciles, those marks describe a
+-- mapping that no longer exists — leaving them would permanently block a
+-- *future* genuinely-unknown id (of the same string) from ever resyncing
+-- again, and the table would grow unbounded over a long session.
+t.case("ws: update-cell-ids clears _unknown_cell_ids on a successful re-key", function()
+  local nb = t.make_notebook({ "a = 1", "b = 2" })
+  nb._unknown_cell_ids = { xyz = true }
+
+  -- Same count as nb.cells (2) with no codes takes the positional-rekey path,
+  -- which reconciles successfully.
+  ws.dispatch("update-cell-ids", { cell_ids = { "X1", "X2" } }, { nb = nb })
+
+  t.eq(nb._unknown_cell_ids, nil, "stale unknown-id marks are cleared on successful re-key")
+end)
+
+t.case("ws: update-cell-ids leaves _unknown_cell_ids alone when the re-key bails", function()
+  local sync = require("neo-marimo.sync")
+  local orig_is_writing, orig_reload = sync.is_writing, sync.reload_from_file
+  sync.is_writing = function() return true end
+  sync.reload_from_file = function() error("must not be called while writing") end
+
+  local nb = t.make_notebook({ "a = 1", "b = 2" })
+  nb._unknown_cell_ids = { xyz = true }
+  -- Count mismatch (3 server ids vs 2 local cells) + is_writing → bail (F1.2).
+  ws.dispatch("update-cell-ids", { cell_ids = { "X1", "X2", "X3" } }, { nb = nb })
+
+  sync.is_writing, sync.reload_from_file = orig_is_writing, orig_reload
+  t.eq(nb._unknown_cell_ids.xyz, true, "a bailed re-key must not clear marks — mapping is still stale")
+end)
+
 -- Widget value sync (browser/other consumer → nvim): marimo never re-broadcasts
 -- the widget's own cell when its value changes, only a "variable-values" op.
 -- We map the variable to its widget via the "variables" declaring-cell graph
@@ -200,6 +303,68 @@ t.case("ws: variable-values is ambiguous when a cell has >1 widget — skip", fu
   t.eq(widgets.get_override(cell .. "-0"), nil, "ambiguous declaring cell → no override")
   t.eq(widgets.get_override(cell .. "-1"), nil)
   widgets.clear_all_overrides()
+end)
+
+-- F2.6 regression: rekey_by_position/rekey_by_code overwrite cell.id in
+-- place; without migrating image.lua's and widgets.lua's cell-id-keyed
+-- registries, the old key is orphaned (never closed) and the new key finds
+-- nothing to clear, so the next render draws a second, stale-painting image
+-- placement on top of the fresh one. See docs/plan-refinement.md F2.6.
+t.case("ws: update-cell-ids migrates image and widget registries on re-key", function()
+  local image = require("neo-marimo.image")
+  local widgets = require("neo-marimo.widgets")
+  local nb, bufnr = t.make_notebook({ "a = 1" })
+  local old_id = nb.cells[1].id
+
+  local closed = 0
+  image._register_for_test(bufnr, old_id, "/tmp/neo-marimo-test.png", function()
+    closed = closed + 1
+  end)
+  widgets.register_widget(bufnr, old_id, { name = "slider", object_id = old_id .. "-0", value = 1 })
+
+  ws.dispatch("update-cell-ids", { cell_ids = { "NEW1" } }, { nb = nb })
+
+  t.eq(nb.cells[1].id, "NEW1", "cell re-keyed to the server id")
+  t.eq(closed, 0, "migrated placement was not closed")
+  t.eq(#widgets.list_for_cell(bufnr, old_id), 0, "old widget key is empty after migration")
+  t.eq(#widgets.list_for_cell(bufnr, "NEW1"), 1, "widget registry followed the id flip")
+
+  -- The old key is now a dead end (already migrated away, nothing to close);
+  -- the new key is where the live placement actually lives.
+  image.clear_for_cell(bufnr, old_id)
+  t.eq(closed, 0, "clearing the stale old key is a no-op")
+  image.clear_for_cell(bufnr, "NEW1")
+  t.eq(closed, 1, "clearing the new key closes the migrated placement")
+end)
+
+-- Reload rebuilds nb.cells as brand-new objects with fresh parse-minted ids
+-- (cell.new mints one whenever the parsed data has no id) — there's no
+-- old->new mapping to migrate by, so the registries must be torn down
+-- instead of leaked.
+t.case("sync: reload_from_file tears down image and widget registries", function()
+  local sync = require("neo-marimo.sync")
+  local parser = require("neo-marimo.parser")
+  local image = require("neo-marimo.image")
+  local widgets = require("neo-marimo.widgets")
+
+  local nb, bufnr = t.make_notebook({ "a = 1" })
+  local old_id = nb.cells[1].id
+
+  local closed = 0
+  image._register_for_test(bufnr, old_id, "/tmp/neo-marimo-test.png", function()
+    closed = closed + 1
+  end)
+  widgets.register_widget(bufnr, old_id, { name = "slider", object_id = old_id .. "-0", value = 1 })
+
+  local orig_parse_file = parser.parse_file
+  parser.parse_file = function() return { cells = { { name = "_", code = "a = 1" } } } end
+  local ok = sync.reload_from_file(nb)
+  parser.parse_file = orig_parse_file
+
+  t.eq(ok, true)
+  t.ok(nb.cells[1].id ~= old_id, "reload mints a fresh id, distinct from the old one")
+  t.eq(closed, 1, "reload closes the stale image placement")
+  t.eq(#widgets.list_for_cell(bufnr, old_id), 0, "reload clears the stale widget entry")
 end)
 
 t.case("ws: variable-values ignores null and non-scalar datatypes", function()

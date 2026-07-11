@@ -1,5 +1,12 @@
 -- Phase 9.1 — HTML element-tree parser.
 --
+-- Internal only (plan-refinement F4.4): not part of the frozen public API.
+-- The four supported extension points are register_output_renderer,
+-- register_widget_renderer, register_ws_handler, and register_cell_detector
+-- (see docs/architecture.md); a custom renderer that reaches into this
+-- module's node/serialize shapes directly gets no compatibility promise —
+-- they can and will change without a deprecation cycle.
+--
 -- Marimo serializes cell output as well-formed HTML built from custom
 -- elements (<marimo-slider>, <marimo-tabs>, …), flex-layout <div>s, and
 -- markdown wrapper <span>s. The regex-chain parsing this module replaces

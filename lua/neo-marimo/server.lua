@@ -23,6 +23,7 @@
 
 local config = require("neo-marimo.config")
 local utils = require("neo-marimo.utils")
+local log = require("neo-marimo.log")
 
 local M = {}
 
@@ -201,6 +202,7 @@ local function http_post(srv, path, body, cb)
   local function to_data(r)
     if not r then return nil end
     if r.status ~= "200" then
+      log.write("http:non200", { method = "POST", path = path, status = r.status })
       utils.warn("POST " .. path .. " → HTTP " .. r.status .. ": " .. r.body)
       return nil
     end
@@ -321,9 +323,9 @@ end
 -- Start a headless marimo server for the given notebook.
 -- Returns the server state table, or nil on failure.
 function M.start(filepath, port, on_message)
-  local start_port = port or config.options.server.port or 2718
-  local marimo_cmd = config.options.marimo_cmd or "marimo"
-  local host = (config.options.server and config.options.server.host) or "127.0.0.1"
+  local start_port = port or config.get("server.port")
+  local marimo_cmd = config.get("marimo_cmd")
+  local host = config.get("server.host")
 
   if M.is_running(filepath) then
     return M._servers[filepath]
@@ -340,11 +342,10 @@ function M.start(filepath, port, on_message)
       or h == "::ffff:127.0.0.1"
   end
   if not is_loopback(host) then
-    vim.notify(
-      "[neo-marimo] server.host = '" .. host .. "' is not loopback — the marimo "
+    utils.warn(
+      "server.host = '" .. host .. "' is not loopback — the marimo "
         .. "server runs WITHOUT authentication (--no-token), so this exposes "
-        .. "arbitrary Python execution to the network. See SECURITY.md.",
-      vim.log.levels.WARN
+        .. "arbitrary Python execution to the network. See SECURITY.md."
     )
   end
 
@@ -361,10 +362,7 @@ function M.start(filepath, port, on_message)
     return nil
   end
   if actual_port ~= start_port then
-    vim.notify(
-      "[neo-marimo] Port " .. start_port .. " in use; using " .. actual_port .. ".",
-      vim.log.levels.INFO
-    )
+    utils.info("Port " .. start_port .. " in use; using " .. actual_port .. ".")
   end
 
   local session_id = new_session_id()
@@ -455,7 +453,7 @@ end
 function M.stop(filepath)
   local srv = M._servers[filepath]
   if not srv then
-    vim.notify("[neo-marimo] No server running for this notebook.", vim.log.levels.WARN)
+    utils.warn("No server running for this notebook.")
     return
   end
 
@@ -483,7 +481,7 @@ function M.stop(filepath)
     pcall(function() vim.system({ "kill", "-9", tostring(pid) }, {}):wait(500) end)
   end
 
-  vim.notify("[neo-marimo] Server stopped.", vim.log.levels.INFO)
+  utils.info("Server stopped.")
 end
 
 -- Connect a WebSocket client to the running server.
@@ -502,7 +500,7 @@ function M.connect_ws(filepath, on_message, opts)
   opts = opts or {}
   local kiosk = opts.kiosk == true
 
-  local python_path = config.options.python_path or "python3"
+  local python_path = config.get("python_path")
 
   -- access_token arg is intentionally omitted: --no-token disables it.
   -- ws_client.py expects positional [port, session_id, filepath, access_token]
@@ -512,6 +510,8 @@ function M.connect_ws(filepath, on_message, opts)
     tostring(srv.port), srv.session_id, filepath, "",
   }
   if kiosk then table.insert(ws_args, "--kiosk") end
+
+  log.write("ws:connect", { filepath = filepath, port = srv.port, kiosk = kiosk, phase = "spawn" })
 
   -- Decode one complete JSON line from ws_client.py and dispatch it.
   local function dispatch_line(line)
@@ -526,6 +526,7 @@ function M.connect_ws(filepath, on_message, opts)
     if msg.op == "neo_marimo_connected" then
       local current_srv = M._servers[filepath]
       if current_srv then current_srv.ws_connected = true end
+      log.write("ws:connect", { filepath = filepath, port = srv.port, kiosk = kiosk, phase = "established" })
     end
     vim.schedule(function()
       local current_srv = M._servers[filepath]
@@ -566,6 +567,11 @@ function M.connect_ws(filepath, on_message, opts)
       -- delayed exit would clobber a fresh reconnect.
       vim.schedule(function()
         local current_srv = M._servers[filepath]
+        -- "expected" iff this job was already superseded/deregistered by an
+        -- explicit release_ws/resync_ws before it exited (both nil out
+        -- srv.ws_job_id before jobstop) — otherwise the job died on its own.
+        local expected = not (current_srv and current_srv.ws_job_id == job_id)
+        log.write("ws:exit", { filepath = filepath, code = code, expected = expected })
         if current_srv and current_srv.ws_job_id == job_id then
           current_srv.ws_connected = false
           current_srv.ws_job_id = nil
@@ -650,6 +656,7 @@ function M.resync_ws(filepath)
   -- kiosks) and never disturbs the browser's main connection; we force kiosk
   -- whenever the browser is active so a stray main reconnect can't kick it off.
   local kiosk = (srv.ws_kiosk == true) or (srv.browser_active == true)
+  log.write("resync:dispatch", { filepath = filepath, kiosk = kiosk, had_connection = srv.ws_job_id ~= nil })
   if srv.ws_job_id then
     pcall(vim.fn.jobstop, srv.ws_job_id)
     srv.ws_job_id = nil
@@ -675,7 +682,7 @@ function M.reclaim_ws(filepath, opts)
     return false
   end
   if srv.ws_connected then
-    vim.notify("[neo-marimo] WebSocket already connected.", vim.log.levels.INFO)
+    utils.info("WebSocket already connected.")
     return true
   end
   if not srv.on_message then
@@ -703,10 +710,7 @@ function M.reclaim_ws(filepath, opts)
     if not kiosk then
       M.instantiate(filepath)
     end
-    vim.notify(
-      "[neo-marimo] WebSocket reclaimed (" .. (kiosk and "kiosk" or "main") .. ").",
-      vim.log.levels.INFO
-    )
+    utils.info("WebSocket reclaimed (" .. (kiosk and "kiosk" or "main") .. ").")
   end)
   return true
 end
@@ -781,7 +785,7 @@ function M.open_browser(filepath)
 
   local url = "http://127.0.0.1:" .. tostring(srv.port) .. "/?file=" .. url_encode(filepath)
   vim.fn.jobstart({ "open", url }, { detach = true })
-  vim.notify("[neo-marimo] Opening " .. url, vim.log.levels.INFO)
+  utils.info("Opening " .. url)
 end
 
 -- Shared startup chain: start the server process (if needed), poll /health,
@@ -830,7 +834,7 @@ local function start_and_connect(filepath, port, on_message, cb)
       end
       srv.server_token = token
 
-      vim.notify("[neo-marimo] Server ready. Connecting...", vim.log.levels.INFO)
+      utils.info("Server ready. Connecting...")
 
       srv.ws_connected = false
       M.connect_ws(filepath, on_message)
@@ -857,7 +861,7 @@ end
 -- marimo web editor.
 function M.start_headless(nb, on_message)
   local filepath = nb.filepath
-  local port = config.options.server.port or 2718
+  local port = config.get("server.port")
 
   if M.is_running(filepath) then
     local srv = M._servers[filepath]
@@ -866,12 +870,12 @@ function M.start_headless(nb, on_message)
       -- Take the main slot back rather than spawning a second server.
       M.reclaim_ws(filepath, { as_main = true })
     else
-      vim.notify("[neo-marimo] Server already running for this notebook.", vim.log.levels.INFO)
+      utils.info("Server already running for this notebook.")
     end
     return
   end
 
-  vim.notify("[neo-marimo] Starting marimo server (nvim-only)...", vim.log.levels.INFO)
+  utils.info("Starting marimo server (nvim-only)...")
 
   start_and_connect(filepath, port, on_message, function(srv, connected)
     if not srv then return end
@@ -882,10 +886,7 @@ function M.start_headless(nb, on_message)
     -- back over our main WS and renders inline. We never release the slot, so
     -- no browser tab is ever opened.
     M.instantiate(filepath)
-    vim.notify(
-      "[neo-marimo] Connected (nvim-only). Run cells with the run keymaps.",
-      vim.log.levels.INFO
-    )
+    utils.info("Connected (nvim-only). Run cells with the run keymaps.")
   end)
 end
 
@@ -895,21 +896,37 @@ end
 -- slot the browser loads "Network already connected" and never becomes
 -- usable. Kiosks are unlimited and get the same cell-op/kernel-ready firehose,
 -- so after the hand-off output still lands in nvim and the browser at once.
--- The 1200ms delay lets the browser win the slot before our kiosk reconnect;
--- without it we beat it back to /ws, end up main again, and it still collides.
+-- The server.browser_handoff_delay_ms delay (default 1200ms) lets the
+-- browser win the slot before our kiosk reconnect; without it we beat it
+-- back to /ws, end up main again, and it still collides. This is a fixed
+-- wait, not a poll/backoff, so it's inherently timing-dependent on how fast
+-- the browser's tab spins up and hits /ws — a slow machine (or a heavy
+-- browser startup) can lose the race and see "Network already connected".
+-- Raise config.server.browser_handoff_delay_ms if that happens; not worth
+-- adaptive backoff for a one-shot hand-off (plan-refinement F5.4).
 -- Shared by the fresh-start flow and start_and_open's "already running, nvim
 -- holds main" branch so both behave identically.
 local function hand_off_to_browser(filepath)
-  local share = config.options.server.share_with_browser ~= false
-  if share then M.release_ws(filepath) end
+  local share = config.get("server.share_with_browser") ~= false
+  if share then
+    log.write("ws:handoff", { filepath = filepath, action = "release" })
+    M.release_ws(filepath)
+  end
   M.open_browser(filepath)
   if share then
     vim.defer_fn(function()
       local current_srv = M._servers[filepath]
-      if not current_srv then return end
-      if current_srv.ws_connected then return end  -- user reclaimed already
+      if not current_srv then
+        log.write("ws:handoff", { filepath = filepath, action = "skip", reason = "no_server" })
+        return
+      end
+      if current_srv.ws_connected then
+        log.write("ws:handoff", { filepath = filepath, action = "skip", reason = "already_reclaimed" })
+        return  -- user reclaimed already
+      end
+      log.write("ws:handoff", { filepath = filepath, action = "reconnect_kiosk" })
       M.connect_ws(filepath, current_srv.on_message, { kiosk = true })
-    end, 1200)
+    end, config.get("server.browser_handoff_delay_ms"))
   end
 end
 
@@ -917,7 +934,7 @@ end
 -- kernel, hand the main WS slot to the browser, and reconnect as kiosk.
 function M.start_and_open(nb, on_message)
   local filepath = nb.filepath
-  local port = config.options.server.port or 2718
+  local port = config.get("server.port")
 
   if M.is_running(filepath) then
     -- Already running. If neovim currently holds the main slot — i.e. the
@@ -935,7 +952,7 @@ function M.start_and_open(nb, on_message)
     return
   end
 
-  vim.notify("[neo-marimo] Starting marimo server...", vim.log.levels.INFO)
+  utils.info("Starting marimo server...")
 
   start_and_connect(filepath, port, on_message, function(srv, connected)
     if not srv then return end
@@ -968,7 +985,7 @@ function M.restart(nb, on_done)
   end
 
   local on_message = srv.on_message
-  local port = srv.requested_port or config.options.server.port or 2718
+  local port = srv.requested_port or config.get("server.port")
 
   M.stop(filepath)
 

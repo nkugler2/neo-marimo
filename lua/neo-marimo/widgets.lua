@@ -22,6 +22,7 @@
 -- as soon as a value changes.
 
 local utils = require("neo-marimo.utils")
+local log = require("neo-marimo.log")
 
 local M = {}
 
@@ -43,7 +44,10 @@ M._by_cell = {}
 -- cell re-render would parse the original `data-initial-value` from the
 -- cached output HTML and snap the displayed thumb back to where it started.
 -- Overrides persist for the lifetime of the cell; the user clears them by
--- re-running the cell or via :MarimoResetWidgets.
+-- re-running the cell or via :MarimoResetWidgets. Deleting a cell clears
+-- them too, but only after its undo-trash entry expires (see
+-- actions.delete_cell_at_cursor) so an undo-restore keeps the display in
+-- sync with the kernel-held value.
 M._value_overrides = {}
 
 local function registry_key(bufnr, cell_id) return bufnr .. ":" .. cell_id end
@@ -54,6 +58,38 @@ end
 
 function M.list_for_cell(bufnr, cell_id)
   return M._by_cell[registry_key(bufnr, cell_id)] or {}
+end
+
+-- Move registry entries to follow a cell re-key, without touching the
+-- widgets themselves. `moves` is `{ [old_cell_id] = new_cell_id }` for cells
+-- whose id actually changed (see ws_handlers.lua's rekey_by_position /
+-- rekey_by_code). Without this, overwriting cell.id in place leaves the
+-- widget list stranded under a key nothing looks up again — the same
+-- orphaned-registry defect as image.lua's placements (docs/plan-refinement.md
+-- F2.6), just invisible here because it paints no pixels. Note: this table
+-- is the only cell-id-keyed widget state — value overrides and pins are
+-- keyed by object_id, which marimo mints from its own (already-authoritative)
+-- cell id, so they never carry a stale local id to begin with.
+--
+-- Two passes (collect against the OLD table, then apply) so a chain/swap of
+-- ids can't drop or double an entry — mirrors image.migrate_keys.
+function M.migrate_keys(bufnr, moves)
+  -- bufnr guard: registry_key concatenates bufnr, so a nil would raise
+  -- instead of no-op'ing like image.migrate_keys does (headless notebooks
+  -- have no buffer; the ws_handlers caller gates, but don't rely on it).
+  if not bufnr or not moves or next(moves) == nil then return end
+  local snapshot = {}
+  for old_id, new_id in pairs(moves) do
+    local old_key = registry_key(bufnr, old_id)
+    local entry = M._by_cell[old_key]
+    if entry then
+      snapshot[registry_key(bufnr, new_id)] = entry
+      M._by_cell[old_key] = nil
+    end
+  end
+  for new_key, entry in pairs(snapshot) do
+    M._by_cell[new_key] = entry
+  end
 end
 
 -- Add a parsed widget to the cell's registry (called by tree_render during
@@ -80,6 +116,15 @@ end
 function M.set_override(object_id, value)
   if not object_id then return end
   M._value_overrides[object_id] = value
+end
+
+-- Drop a single override by object id. Used by the deferred trash-expiry
+-- clear in actions.delete_cell_at_cursor, which captures object ids at
+-- delete time (before clear_for_cell wipes the registry this module would
+-- need to resolve them from).
+function M.clear_override(object_id)
+  if not object_id then return end
+  M._value_overrides[object_id] = nil
 end
 
 -- Find registered widgets whose object_id begins with `prefix`. Marimo object
@@ -495,6 +540,10 @@ local RENDERERS = {
   refresh      = render_refresh,
 }
 
+-- Per-widget-name error counts for the containment below (plan-refinement
+-- F4.1), mirroring ws_handlers' once-per-op pattern. Exposed for tests.
+M._renderer_errors = {}
+
 -- Render one widget table into virt_line chunks. When the widget is the
 -- buffer's focused one (w.focused, set during the tree_render walk), the
 -- leading indent becomes a ▸ marker and the first labeled chunk flips to
@@ -502,7 +551,25 @@ local RENDERERS = {
 -- hstacks and vstack alignment don't shift.
 function M.render_widget(w)
   local renderer = RENDERERS[w.name] or render_unknown
-  local lines = renderer(w)
+  -- pcall the dispatch (plan-refinement F4.1): a throwing renderer here —
+  -- built-in or third-party via M.register_renderer — used to propagate
+  -- straight out of tree_render's node walk and abort the whole cell's
+  -- output build, dropping every sibling widget/layout element along with
+  -- it. A placeholder line for just this one widget keeps the rest of the
+  -- tree rendering.
+  local ok, lines = pcall(renderer, w)
+  if not ok then
+    local err = lines
+    M._renderer_errors[w.name] = (M._renderer_errors[w.name] or 0) + 1
+    if M._renderer_errors[w.name] == 1 then
+      utils.warn(
+        "Widget renderer for '" .. tostring(w.name) .. "' failed: " .. tostring(err)
+          .. "\nFurther failures for this widget type will be suppressed."
+      )
+    end
+    log.write("widgets:renderer_error", { name = w.name, err = tostring(err) })
+    lines = { { { "  ✖ widget error: " .. tostring(w.name), "MarimoOutputError" } } }
+  end
   if w.focused and lines[1] then
     local first = lines[1]
     if first[1] and first[1][1] == "  " then
@@ -519,7 +586,11 @@ end
 
 -- Public extension point: register (or replace) the renderer for a widget
 -- name. `fn(w) -> virt_lines` where w is the widget table described at the
--- top of this file.
+-- top of this file. Passing `fn = nil` deregisters the name, falling back
+-- to render_unknown — the only deregister path now that RENDERERS is local
+-- (plan-refinement F4.4; mirrors output.register_renderer /
+-- ws_handlers.register's nil-to-remove contract). Needed by tests that
+-- register a throwing renderer (F4.1) and must clean it up afterwards.
 function M.register_renderer(name, fn)
   RENDERERS[name] = fn
 end

@@ -146,6 +146,7 @@ require("neo-marimo").setup({
     move_cell_down     = "<leader>mJ",
     move_cell_up       = "<leader>mK",
     open_in_browser    = "<leader>mo",
+    start              = "<leader>ms", -- start server, nvim-only (no browser)
     stop_server        = "<leader>mx",
     run_cell           = "<leader>mr",
     run_all            = "<leader>mR",
@@ -195,6 +196,7 @@ All buffer-local to the notebook view.
 | Key          | Action                                                              |
 | ------------ | ------------------------------------------------------------------- |
 | `<leader>mo` | Start the server (if needed) and open in browser                    |
+| `<leader>ms` | Start the server in nvim-only mode (no browser)                     |
 | `<leader>mx` | Stop the server                                                     |
 | `<leader>mi` | Interrupt the kernel (stop a runaway cell)                          |
 | `<leader>mX` | Restart the kernel (outputs cleared; nothing re-runs until you ask) |
@@ -236,28 +238,45 @@ All buffer-local to the notebook view.
 
 ## Commands
 
-| Command                         | Action                                                                                      |
-| ------------------------------- | ------------------------------------------------------------------------------------------- |
-| `:MarimoEdit`                   | Start the managed server and open the notebook in the browser (same as `<leader>mo`)        |
-| `:MarimoRun [all]`              | Run the cell under the cursor, or every cell                                                |
-| `:MarimoInterrupt`              | Interrupt the kernel's current execution                                                    |
-| `:MarimoRestart`                | Restart the kernel (clears outputs; nothing re-runs)                                        |
-| `:MarimoNewCell [above\|below]` | Insert a blank cell                                                                         |
-| `:MarimoStop`                   | Stop the server for this notebook                                                           |
-| `:MarimoToggle`                 | Notebook view ↔ raw `.py`                                                                   |
-| `:MarimoReload`                 | Re-read the `.py` from disk and rebuild the view                                            |
-| `:MarimoNew [path]`             | Create and open a new notebook                                                              |
-| `:MarimoAttach`                 | Manually attach to the current buffer                                                       |
-| `:MarimoServerList`             | Interactive list of managed servers + system marimo processes (`<CR>` switch, `K` kill all) |
-| `:MarimoKillAll`                | Force-kill every marimo edit process on the system                                          |
-| `:MarimoWidget`                 | Widget picker for the cell under the cursor                                                 |
-| `:MarimoWidgetPins`             | Pinned-widgets panel                                                                        |
-| `:MarimoResetWidgets`           | Drop cached widget value overrides and re-render                                            |
-| `:MarimoDataFramePanel`         | Full DataFrame side panel                                                                   |
-| `:MarimoCheck`                  | Validate cell row bookkeeping against the buffer                                            |
-| `:MarimoInspectOutput`          | Dump the cell's output mimetype/payload/widgets (debugging)                                 |
-| `:MarimoWsDebug [path\|off]`    | Log every WebSocket message to a file                                                       |
-| `:MarimoWsPing`                 | Send a no-op WS ping (pipe health check)                                                    |
+Two tiers. **Daily-drive** commands are the supported surface — their names
+and behavior won't change without a changelog entry. **Debug/introspection**
+commands exist to diagnose the plugin itself (wire messages, cell-offset
+bookkeeping, raw payload dumps) or as blunt, unscoped recovery hammers; they
+carry no stability promise and may change or disappear.
+
+### Daily-drive
+
+| Command                         | Action                                                                                             |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `:MarimoEdit`                   | Start the managed server (if needed) and open the notebook in the browser (same as `<leader>mo`)  |
+| `:MarimoStart`                  | Start the managed server in nvim-only mode, no browser (same as `<leader>ms`)                     |
+| `:MarimoOpen`                   | Launch a standalone `marimo edit <file>` process directly — bypasses the managed-server registry and WS handoff that `:MarimoEdit` uses. Prefer `:MarimoEdit` unless you specifically want an untracked process. |
+| `:MarimoStop`                   | Stop the managed server for this notebook                                                          |
+| `:MarimoReclaim`                | Reclaim the WebSocket connection from the browser (same as `<leader>mc`)                           |
+| `:MarimoRun [all]`              | Run the cell under the cursor, or every cell                                                       |
+| `:MarimoInterrupt`              | Interrupt the kernel's current execution                                                           |
+| `:MarimoRestart`                | Restart the kernel (clears outputs; nothing re-runs)                                                |
+| `:MarimoNewCell [above\|below]` | Insert a blank cell                                                                                |
+| `:MarimoToggle`                 | Notebook view ↔ raw `.py`                                                                          |
+| `:MarimoReload`                 | Re-read the `.py` from disk and rebuild the view                                                   |
+| `:MarimoAttach`                 | Manually attach to the current buffer (in case auto-detection missed it)                           |
+| `:MarimoNew [path]`             | Create and open a new notebook                                                                     |
+| `:MarimoServerList`             | Interactive list of managed servers + system marimo processes (`<CR>` switch, `K` kill all)        |
+| `:MarimoWidget`                 | Widget picker for the cell under the cursor                                                        |
+| `:MarimoWidgetPins`             | Pinned-widgets panel                                                                                |
+| `:MarimoResetWidgets`           | Drop cached widget value overrides and re-render                                                   |
+| `:MarimoDataFramePanel`         | Full DataFrame side panel                                                                          |
+| `:MarimoImageRepaint`           | Force-clear and redraw inline images (tmux passthrough recovery)                                   |
+
+### Debug / introspection (unstable)
+
+| Command                      | Action                                                                                                                              |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `:MarimoCheck`               | Validate cell row bookkeeping against the buffer                                                                                    |
+| `:MarimoInspectOutput`       | Dump the cell's output mimetype/payload/widgets                                                                                     |
+| `:MarimoWsDebug [path\|off]` | Log every WebSocket message to a file                                                                                               |
+| `:MarimoWsPing`              | Send a no-op WS ping (pipe health check)                                                                                            |
+| `:MarimoKillAll`             | Force-kill every marimo edit process on the system (not just this notebook's) — use when an orphan is holding your configured port  |
 
 ## Completion
 
@@ -297,11 +316,46 @@ handlers, and cell-type detectors:
 require("neo-marimo").register_output_renderer("text/csv", function(data) … end)
 require("neo-marimo").register_widget_renderer("slider", function(w) … end)
 require("neo-marimo").register_ws_handler("completed-run", function(payload, ctx) … end)
-require("neo-marimo").register_cell_detector(function(code) … end, "mytype")
+require("neo-marimo").register_cell_detector("pytest", function(code) … end, 15)
 ```
+
+Each registry is keyed by name (mimetype, widget element, WS op, or
+cell-type name); registering an existing key replaces the built-in, except
+`register_cell_detector`, which appends to the detector chain instead (so
+you can layer a narrower detector in front of or behind the built-ins by
+`priority` — see docs/architecture.md for the worked example).
+`register_X(key, nil)` deregisters that key instead — the underlying
+registry tables aren't exposed on the module, so these four functions are
+the only supported write path.
 
 See [docs/architecture.md](docs/architecture.md) for the module map, the
 render pipeline, the virt_line chunk contract, and worked examples.
+
+## Public Lua API
+
+Two more functions are stable, frozen public API — the built-in statusline
+and blink source both depend on them:
+
+```lua
+local marimo = require("neo-marimo")
+
+marimo.current_notebook()       -- notebook state for the current buffer,
+                                 -- or nil (only non-nil on a marimo:// buffer)
+marimo.attached_for(filepath)   -- notebook state attached to `filepath`,
+                                 -- or nil — works for notebooks that aren't
+                                 -- the current buffer (used by :MarimoServerList)
+```
+
+The returned notebook table's shape (`bufnr`, `filepath`, `cells`, `dirty`,
+…) is internal and may grow; read the specific fields you need rather than
+assume a fixed shape.
+
+`marimo.suppress_attach` is a module-level flag `:MarimoToggle` sets while
+it loads the underlying `.py` buffer, so the `BufReadPost` auto-attach
+doesn't immediately bounce back into notebook view. It's exposed
+unprefixed (not `_suppress_attach`) only because the auto-attach autocmd in
+`plugin/neo-marimo.lua` reads it across the module boundary — it isn't
+meant to be driven directly from integration code.
 
 ## Health & supported versions
 

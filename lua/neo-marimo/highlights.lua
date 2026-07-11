@@ -2,10 +2,11 @@ local M = {}
 
 M.ns_border = vim.api.nvim_create_namespace("neo_marimo_border")
 M.ns_output = vim.api.nvim_create_namespace("neo_marimo_output")
--- Cell start-row anchors. Each cell owns one extmark in this namespace,
--- placed at its start_row with right_gravity so insertions at the
--- boundary extend the previous cell (paste-after-end-of-A intuition).
--- Never cleared by border re-renders.
+-- Cell-boundary anchors. Each cell owns exactly one RANGE extmark in this
+-- namespace spanning [start_row, end_row] (plan-refinement F3.1). The start
+-- endpoint uses right_gravity = false and the end endpoint uses
+-- end_right_gravity = true — see buffer.place_cell_anchors for the full
+-- rationale. Never cleared by border re-renders.
 M.ns_cell_anchor = vim.api.nvim_create_namespace("neo_marimo_cell_anchor")
 
 function M.setup()
@@ -28,7 +29,10 @@ function M.setup()
   vim.api.nvim_set_hl(0, "MarimoStatusIdle", { link = "Comment" })
 
   -- Output text
-  vim.api.nvim_set_hl(0, "MarimoOutputText", { link = "Comment" })
+  -- Not linked to Comment: Comment is dim + italic in most colorschemes,
+  -- which made plain repr() output unreadable (TOCHANGE readability item).
+  -- Use the same normal-brightness fg as MarimoMarkdownBold instead.
+  vim.api.nvim_set_hl(0, "MarimoOutputText", { fg = "#DCD7BA" })
   vim.api.nvim_set_hl(0, "MarimoOutputError", { fg = "#E82424" })
 
   -- Cell index / name label
@@ -47,6 +51,12 @@ function M.setup()
   vim.api.nvim_set_hl(0, "MarimoMarkdownH4", { fg = "#7E9CD8", bold = true })
   vim.api.nvim_set_hl(0, "MarimoMarkdownH5", { fg = "#957FB8", bold = true })
   vim.api.nvim_set_hl(0, "MarimoMarkdownH6", { fg = "#717C7C", bold = true })
+
+  -- Unmarked prose base (plain paragraph text, blank-line spacers, heading/
+  -- quote/rule indents). Split from MarimoOutputText so the two can be tuned
+  -- independently even though they currently share the same readable fg
+  -- (see the MarimoOutputText comment above for why neither links to Comment).
+  vim.api.nvim_set_hl(0, "MarimoMarkdownText", { fg = "#DCD7BA" })
 
   vim.api.nvim_set_hl(0, "MarimoMarkdownBullet", { fg = "#7E9CD8" })
   vim.api.nvim_set_hl(0, "MarimoMarkdownBold", { fg = "#DCD7BA", bold = true })

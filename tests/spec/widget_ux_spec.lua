@@ -289,3 +289,134 @@ t.case("last: set/get round-trips", function()
   t.eq(last.object_id, "obj9")
   widgets._last_widget = nil
 end)
+
+-- ── delete → override lifecycle (plan-refinement F2.5) ────────────────────
+--
+-- delete_cell_at_cursor must NOT clear value overrides eagerly: an undo
+-- inside the trash window re-renders the cell's cached output HTML, whose
+-- data-initial-value is stale, and only the lingering override keeps the
+-- display in sync with the kernel-held value. The clear is deferred to
+-- notebook.UNDO_TRASH_TTL_MS + 1s; both cases shrink the TTL so the
+-- deferred fn fires on the next event-loop yield instead of a minute out.
+
+t.case("overrides: cell delete drops overrides after the undo-trash window (plan-refinement F2.5)", function()
+  local notebook = require("neo-marimo.notebook")
+  local actions = require("neo-marimo.actions")
+  local nb, bufnr = t.make_notebook({ "a = 1", "s = mo.ui.slider(1, 10)" })
+  local cell = nb.cells[2]
+  local oid = cell.id .. "-0"
+  widgets.register_widget(bufnr, cell.id, { name = "slider", object_id = oid })
+  widgets.set_override(oid, 7)
+
+  local saved_ttl = notebook.UNDO_TRASH_TTL_MS
+  notebook.UNDO_TRASH_TTL_MS = -1000
+  vim.api.nvim_win_set_cursor(0, { 2, 0 })
+  actions.delete_cell_at_cursor(bufnr, nb)
+  notebook.UNDO_TRASH_TTL_MS = saved_ttl
+
+  -- Synchronously after the delete the override is still alive — the lazy
+  -- clear is the fix's whole point (see rationale in delete_cell_at_cursor).
+  t.eq(widgets.get_override(oid), 7, "override survives the delete itself")
+
+  vim.wait(500, function() return widgets.get_override(oid) == nil end, 10)
+  t.eq(widgets.get_override(oid), nil, "override dropped once the trash entry expired")
+end)
+
+t.case("overrides: undo-restore within the window keeps the override (plan-refinement F2.5)", function()
+  local notebook = require("neo-marimo.notebook")
+  local actions = require("neo-marimo.actions")
+  local nb, bufnr = t.make_notebook({ "a = 1", "s = mo.ui.slider(1, 10)" })
+  local cell_id = nb.cells[2].id
+  local oid = cell_id .. "-0"
+  widgets.register_widget(bufnr, cell_id, { name = "slider", object_id = oid })
+  widgets.set_override(oid, 7)
+
+  local saved_ttl = notebook.UNDO_TRASH_TTL_MS
+  notebook.UNDO_TRASH_TTL_MS = -1000
+  vim.api.nvim_win_set_cursor(0, { 2, 0 })
+  t.undo_break()
+  actions.delete_cell_at_cursor(bufnr, nb)
+  notebook.UNDO_TRASH_TTL_MS = saved_ttl
+
+  -- Undo before yielding to the event loop: defer_fn callbacks only run
+  -- once vim.wait below yields, so the restore always wins this race. The
+  -- restored cell reclaims its id in nb.cell_by_id — exactly the liveness
+  -- check the deferred clear consults before dropping anything.
+  vim.cmd("silent undo")
+  nb._flush_pending()
+  t.ok(nb.cell_by_id[cell_id] ~= nil, "undo restored the cell id")
+
+  vim.wait(300, function() return widgets.get_override(oid) == nil end, 10)
+  t.eq(widgets.get_override(oid), 7, "override kept for the undo-restored cell")
+end)
+
+-- ── viewport freeze around vim.ui.input/select (widget-edit scroll jump) ────
+
+t.case("freeze_view: restores topline after a callback that leaves the window scrolled", function()
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  local lines = {}
+  for i = 1, 40 do lines[i] = "line " .. i end
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+  vim.api.nvim_set_current_buf(bufnr)
+  local win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_height(win, 10)
+  vim.api.nvim_win_set_cursor(win, { 8, 0 })
+  vim.fn.winrestview({ topline = 1 })
+
+  -- A tall virt_lines block (stands in for a rendered plot) between
+  -- topline and the cursor, so the cursor's screen row is sensitive to a
+  -- one-row change in window height — the condition that makes the
+  -- cmdheight=0 prompt row-steal visible.
+  local ns = vim.api.nvim_create_namespace("freeze_view_test")
+  local big = {}
+  for i = 1, 20 do big[i] = { { "image row " .. i } } end
+  vim.api.nvim_buf_set_extmark(bufnr, ns, 2, 0, { virt_lines = big, virt_lines_above = false })
+  vim.cmd("redraw")
+  -- The tall virt_lines block already forces nvim to scroll past 1 to keep
+  -- the cursor visible — capture that settled value rather than assuming 1.
+  local stable_topline = vim.fn.winsaveview().topline
+
+  local wrapped = widget_picker._freeze_view(bufnr, function()
+    -- Simulate what vim.ui.input does under 'cmdheight=0': borrow a row
+    -- from the window (nvim bumps topline to keep the cursor visible),
+    -- then give the row back — confirmed via a headless repro that the
+    -- bump does not revert on its own.
+    vim.api.nvim_win_set_height(win, 9)
+    vim.cmd("redraw")
+    vim.api.nvim_win_set_height(win, 10)
+    vim.cmd("redraw")
+  end)
+  wrapped()
+
+  t.eq(vim.fn.winsaveview().topline, stable_topline, "topline restored after the wrapped callback")
+end)
+
+t.case("freeze_view: restores topline even when the wrapped callback errors", function()
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  local lines = {}
+  for i = 1, 40 do lines[i] = "line " .. i end
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+  vim.api.nvim_set_current_buf(bufnr)
+  local win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_height(win, 10)
+  vim.api.nvim_win_set_cursor(win, { 8, 0 })
+  vim.fn.winrestview({ topline = 1 })
+
+  local ns = vim.api.nvim_create_namespace("freeze_view_test_err")
+  local big = {}
+  for i = 1, 20 do big[i] = { { "image row " .. i } } end
+  vim.api.nvim_buf_set_extmark(bufnr, ns, 2, 0, { virt_lines = big, virt_lines_above = false })
+  vim.cmd("redraw")
+  local stable_topline = vim.fn.winsaveview().topline
+
+  local wrapped = widget_picker._freeze_view(bufnr, function()
+    vim.api.nvim_win_set_height(win, 9)
+    vim.cmd("redraw")
+    vim.api.nvim_win_set_height(win, 10)
+    error("boom")
+  end)
+  local ok = pcall(wrapped)
+  t.ok(not ok, "the wrapped error still propagates")
+  t.eq(vim.fn.winsaveview().topline, stable_topline,
+    "topline restored even though the callback errored")
+end)

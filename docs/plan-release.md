@@ -29,8 +29,8 @@ the release bar is "what exists works flawlessly," not "everything exists."
 ## Why two new goals this revision
 
 The original plan optimised for **strangers can install and use it**. The
-2026-06-22 analysis confirmed the code itself is strong (clean 8-layer
-architecture, four documented extension registries, defensive async I/O,
+2026-06-22 analysis confirmed the code itself is strong (a cleanly-grouped
+module map, four documented extension registries, defensive async I/O,
 golden-fixture tests across marimo 0.19 + 0.23) — so the risk is not the
 code, it's (a) a handful of **release blockers that make it broken on every
 machine but the author's**, and (b) the absence of **contributor on-ramps**.

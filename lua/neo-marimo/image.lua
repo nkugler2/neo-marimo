@@ -20,6 +20,7 @@
 local M = {}
 
 local log = require("neo-marimo.log")
+local utils = require("neo-marimo.utils")
 
 -- ── temp-file plumbing ────────────────────────────────────────────────────
 
@@ -104,8 +105,7 @@ local function write_temp(mime, bytes)
 
   local f, err = io.open(path, "wb")
   if not f then
-    vim.notify("[neo-marimo] image write failed: " .. tostring(err),
-      vim.log.levels.WARN)
+    utils.warn("image write failed: " .. tostring(err))
     return nil
   end
   f:write(bytes)
@@ -169,6 +169,36 @@ local function register_placement(bufnr, key, path, closer)
   _placements[bufnr][key] = { path = path, close = closer }
 end
 
+-- Move placement registry entries to follow a cell re-key, without closing
+-- or recreating them — the underlying image is still valid, only the key
+-- that finds it changed. `moves` is `{ [old_cell_id] = new_cell_id }` for
+-- cells whose id actually changed (see ws_handlers.lua's rekey_by_position /
+-- rekey_by_code). Without this, overwriting cell.id in place orphans the
+-- entry under its old key: the next render looks up the new id, finds
+-- nothing to close, and draws a *second* backend placement on top of the
+-- stale one, which keeps painting until session end
+-- (docs/plan-refinement.md F2.6).
+--
+-- Two passes, mirroring rebuild_index's own comment: collect every moved
+-- entry against the OLD table state first, then write them under their new
+-- keys, so a chain/swap of ids (one cell's new id equal to another cell's
+-- old id) can't drop or double an entry.
+function M.migrate_keys(bufnr, moves)
+  local buf_pl = _placements[bufnr]
+  if not buf_pl or not moves or next(moves) == nil then return end
+  local snapshot = {}
+  for old_key, new_key in pairs(moves) do
+    local entry = buf_pl[old_key]
+    if entry then
+      snapshot[new_key] = entry
+      buf_pl[old_key] = nil
+    end
+  end
+  for new_key, entry in pairs(snapshot) do
+    buf_pl[new_key] = entry
+  end
+end
+
 -- Close and forget the placement(s) for a buffer. With `key`, only that cell's
 -- placement; without, every placement in the buffer.
 function M.clear_for_cell(bufnr, key)
@@ -176,12 +206,98 @@ function M.clear_for_cell(bufnr, key)
   if not buf_pl then return end
   if key ~= nil then
     local entry = buf_pl[key]
-    if entry then pcall(entry.close) end
+    if entry then
+      -- Log close *failures* too: a throwing backend close is swallowed by
+      -- the pcall (rendering must go on), but the terminal graphic it was
+      -- supposed to delete stays painted — the one leak the registry can't
+      -- see. Surfacing it in :MarimoWsDebug is the only trace it leaves.
+      local ok = pcall(entry.close)
+      if log.enabled() then
+        log.write("img:clear", { key = key, close_ok = ok })
+      end
+    end
     buf_pl[key] = nil
   else
-    for _, entry in pairs(buf_pl) do pcall(entry.close) end
+    for k, entry in pairs(buf_pl) do
+      local ok = pcall(entry.close)
+      if log.enabled() and not ok then
+        log.write("img:clear", { key = k, close_ok = false })
+      end
+    end
     _placements[bufnr] = nil
   end
+end
+
+-- Close every placement in every buffer. Used by the VimLeavePre sweep and
+-- BufWipeout cleanup: kitty graphics painted through tmux passthrough
+-- outlive the nvim process (the terminal keeps the pixels; tmux never
+-- tracks or repaints them), so an exit that doesn't explicitly delete
+-- placements strands them as fossils the next session shows as a stale
+-- duplicate graph (docs/plan-refinement.md F2.7). Snapshot the buffer keys
+-- before closing — clear_for_cell(bufnr) (no key) nils out
+-- _placements[bufnr], which would corrupt a live `pairs` iteration.
+function M.clear_all()
+  local bufnrs = {}
+  for bufnr in pairs(_placements) do
+    table.insert(bufnrs, bufnr)
+  end
+  for _, bufnr in ipairs(bufnrs) do
+    M.clear_for_cell(bufnr)
+  end
+end
+
+-- ── terminal sweep (F2.7) ────────────────────────────────────────────────
+--
+-- Everything above manages placements *this session* created. It can't see
+-- placements a previous (crashed, force-quit, or pre-F2.7) session left
+-- behind: inside tmux those live entirely in the terminal's kitty-graphics
+-- state, which tmux passthrough never mirrors back to us. The only way to
+-- clear that inherited state is to ask the terminal to delete everything.
+
+-- Bare kitty "delete all images" escape. `a=d` selects the delete action;
+-- `d=A` (as opposed to plain `d`, which only hides placements) also frees
+-- the terminal's stored image data, so it can't reappear on a later resize
+-- or repaint.
+local KITTY_DELETE_ALL = "\27_Ga=d,d=A\27\\"
+
+-- Build the escape sequence to emit, without emitting it — kept separate
+-- from sweep_terminal so tests can assert on both the bare and
+-- tmux-wrapped forms without a real terminal attached. tmux passthrough
+-- requires wrapping the whole sequence in `\27Ptmux;...\27\\` with every
+-- literal ESC inside doubled, or tmux parses (and swallows) the inner
+-- escape itself instead of forwarding it to the terminal.
+function M._sweep_sequence(in_tmux)
+  if not in_tmux then return KITTY_DELETE_ALL end
+  local doubled = KITTY_DELETE_ALL:gsub("\27", "\27\27")
+  return "\27Ptmux;" .. doubled .. "\27\\"
+end
+
+-- Overridable emit seam. Production writes straight to the terminal via
+-- the stderr channel — the way inline-image plugins send control
+-- sequences without the TUI swallowing them as keystrokes; io.stdout would
+-- fight nvim's own screen writes. pcall'd as defense against embed/remote
+-- configurations where the stderr channel may reject writes (plain
+-- --headless accepts them — verified — so this is belt-and-braces, not a
+-- headless requirement). Tests replace this with a capturing stub so the
+-- gating logic can be asserted without a terminal.
+function M._emit(seq)
+  pcall(vim.api.nvim_chan_send, vim.v.stderr, seq)
+end
+
+-- Emit a kitty delete-all-images escape to the terminal. Two callers:
+--   * the once-per-session attach sweep (force = false), gated to tmux
+--     (outside tmux the terminal clears its own state on exit fine, and
+--     nuking other apps' images would be an unwelcome surprise) — see
+--     init.lua's attach-time call for the "first attach only" guard;
+--   * :MarimoImageRepaint (force = true), which also runs bare so it works
+--     as a recovery command even without tmux in the picture.
+-- Skipped either way when no image backend is detected: if nothing could
+-- have drawn a kitty placement, there's nothing to clear.
+function M.sweep_terminal(force)
+  if not pick_backend() then return end
+  local in_tmux = vim.env.TMUX ~= nil and vim.env.TMUX ~= ""
+  if not in_tmux and not force then return end
+  M._emit(M._sweep_sequence(in_tmux))
 end
 
 -- ── public API ────────────────────────────────────────────────────────────
@@ -203,7 +319,10 @@ local function render_path(bufnr, row, mime, path, key)
 
   local backend = pick_backend()
   if log.enabled() then
-    log.write("img:render_path", { backend = backend, mime = mime, key = key })
+    -- row + path make placement leaks diagnosable from the log alone: two
+    -- live versions of one plot show up as renders under different keys (or
+    -- rows) whose earlier entry never got a matching img:clear (F2.6 repro).
+    log.write("img:render_path", { backend = backend, mime = mime, key = key, row = row, path = path })
   end
 
   if backend == "image.nvim" then
@@ -254,8 +373,7 @@ local function render_path(bufnr, row, mime, path, key)
         return {}
       end
       if not ok_create then
-        vim.notify("[neo-marimo] snacks.image failed: " .. tostring(placement),
-          vim.log.levels.WARN)
+        utils.warn("snacks.image failed: " .. tostring(placement))
       end
     end
   end
@@ -378,5 +496,14 @@ end
 
 -- Expose for callers that need it (e.g. tests).
 M._b64_decode = b64_decode
+
+-- Test seam: seed the placement registry directly, bypassing render_path's
+-- backend dispatch (image.nvim/snacks.image aren't available in the headless
+-- test env, so a real M.render_at would always fall through to the
+-- no-placement text fallback). Lets specs assert on migrate_keys /
+-- clear_for_cell behaviour with a plain close-spy closure.
+function M._register_for_test(bufnr, key, path, closer)
+  register_placement(bufnr, key, path, closer)
+end
 
 return M

@@ -22,11 +22,20 @@ local widgets = require("neo-marimo.widgets")
 
 local M = {}
 
-M.handlers = {}
+-- Local, not `M.handlers` (plan-refinement F4.4): the registry storage isn't
+-- part of the frozen public surface — M.register is the only supported write
+-- path (mirrors widgets.lua's local RENDERERS).
+local handlers = {}
 
--- Register a handler for an op name. Overwrites any previous registration.
+-- Register a handler for an op name, or deregister it when `fn` is nil (a
+-- plain table assignment already treats nil as "remove the key"; documented
+-- here since the table itself is no longer reachable to splice directly).
+-- Overwrites any previous registration. The nil-to-remove path (F4.4)
+-- mirrors output.register_renderer / widgets.register_renderer — needed by
+-- tests that register a throwing handler (F4.1) and must clean it up so
+-- later specs dispatch against the stock table.
 function M.register(op, fn)
-  M.handlers[op] = fn
+  handlers[op] = fn
 end
 
 -- Per-op error counts for the containment below. Exposed for tests and
@@ -43,7 +52,7 @@ M._handler_errors = {}
 -- and stay silent after that; the count is kept so the problem is still
 -- diagnosable.
 function M.dispatch(op, payload, ctx)
-  local fn = M.handlers[op]
+  local fn = handlers[op]
   if not fn then return false end
   local ok, err = pcall(fn, payload, ctx)
   if not ok then
@@ -76,13 +85,35 @@ local function rebuild_index(nb)
   for _, c in ipairs(nb.cells) do nb.cell_by_id[c.id] = c end
 end
 
+-- Migrate the image and widget registries after a re-key. Both key their
+-- per-cell state by cell.id; overwriting cell.id in place without telling
+-- them strands the old entry (permanently unreachable) while the new id
+-- finds nothing to close, so the next render draws a *second* backend image
+-- placement on top of the stale one — the orphan keeps painting until
+-- session end (docs/plan-refinement.md F2.6). `moves` only needs entries for
+-- ids that actually changed; callers build it before mutating cell.id so the
+-- old ids are still readable.
+local function migrate_registries(nb, moves)
+  if not nb.bufnr or next(moves) == nil then return end
+  require("neo-marimo.image").migrate_keys(nb.bufnr, moves)
+  widgets.migrate_keys(nb.bufnr, moves)
+end
+
 -- Positional re-key: assign the i-th server id to the i-th nvim cell, then
 -- rebuild the index in one pass. Caller guarantees counts line up.
 local function rekey_by_position(nb, cell_ids)
+  -- Collect old->new before any assignment mutates cell.id, so the migration
+  -- below sees each cell's *pre*-rekey id.
+  local moves = {}
+  for i, srv_id in ipairs(cell_ids) do
+    local cell = nb.cells[i]
+    if cell and cell.id ~= srv_id then moves[cell.id] = srv_id end
+  end
   for i, srv_id in ipairs(cell_ids) do
     if nb.cells[i] then nb.cells[i].id = srv_id end
   end
   rebuild_index(nb)
+  migrate_registries(nb, moves)
 end
 
 -- Content-based re-key: pair each server (id, code) with the nvim cell that
@@ -104,8 +135,14 @@ local function rekey_by_code(nb, cell_ids, codes)
     if not match then return false end
     assign[match] = srv_id
   end
+  -- Collect old->new before mutating cell.id, same reason as rekey_by_position.
+  local moves = {}
+  for cell, srv_id in pairs(assign) do
+    if cell.id ~= srv_id then moves[cell.id] = srv_id end
+  end
   for cell, srv_id in pairs(assign) do cell.id = srv_id end
   rebuild_index(nb)
+  migrate_registries(nb, moves)
   return true
 end
 
@@ -140,11 +177,17 @@ local function rekey_cells_from_server(nb, cell_ids, codes)
   end
   if codes and rekey_by_code(nb, cell_ids, codes) then
     if log.enabled() then log.write("rekey:done", { via = "code", nb_ids = log.cell_ids(nb) }) end
+    -- A successful reconcile makes any earlier "unknown cell id" marks stale
+    -- by definition (output.lua F5.4): the ids we couldn't find a cell for
+    -- may now resolve, and old marks would otherwise block a future resync
+    -- forever. Clear so the next genuinely-unknown id can still self-heal.
+    nb._unknown_cell_ids = nil
     return true
   end
   if #cell_ids == #nb.cells then
     rekey_by_position(nb, cell_ids)
     if log.enabled() then log.write("rekey:done", { via = "position", nb_ids = log.cell_ids(nb) }) end
+    nb._unknown_cell_ids = nil -- see rationale above
     return true
   end
   -- Ids-only with a count mismatch. Don't clobber unsaved edits mid-write;
@@ -157,6 +200,7 @@ local function rekey_cells_from_server(nb, cell_ids, codes)
   if sync.reload_from_file(nb) and #cell_ids == #nb.cells then
     rekey_by_position(nb, cell_ids)
     if log.enabled() then log.write("rekey:done", { via = "reload+position", nb_ids = log.cell_ids(nb) }) end
+    nb._unknown_cell_ids = nil -- see rationale above
     return true
   elseif log.enabled() then
     log.write("rekey:fail", {
@@ -202,7 +246,7 @@ M.register("update-cell-ids", function(payload, ctx)
 end)
 
 M.register("neo_marimo_connected", function(_, _)
-  vim.notify("[neo-marimo] WebSocket connected.", vim.log.levels.INFO)
+  utils.info("WebSocket connected.")
 end)
 
 M.register("neo_marimo_error", function(_, ctx)

@@ -1,6 +1,12 @@
 -- neo-marimo plugin entry point
 -- This file is sourced automatically when the plugin is on the runtimepath.
 
+-- utils.lua is a dependency-free leaf module (no config/setup side effects),
+-- so it's safe to require eagerly here — unlike the other neo-marimo.*
+-- modules below, which stay behind lazy per-callback requires to avoid
+-- pulling in the whole plugin at startup just for command registration.
+local utils = require("neo-marimo.utils")
+
 -- Add the plugin root to rtp so TreeSitter can find our injection queries
 local plugin_root = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":h:h")
 if not vim.tbl_contains(vim.opt.rtp:get(), plugin_root) then
@@ -24,7 +30,7 @@ vim.api.nvim_create_autocmd("BufReadPost", {
 
       -- :MarimoToggle off explicitly loads the underlying .py buffer; skip
       -- auto-attach so we don't immediately bounce back into notebook view.
-      if marimo._suppress_attach then return end
+      if marimo.suppress_attach then return end
 
       if marimo.is_marimo_notebook(ev.buf) then
         -- Auto-setup with defaults if user hasn't called setup()
@@ -42,19 +48,19 @@ vim.api.nvim_create_user_command("MarimoOpen", function()
   local marimo = require("neo-marimo")
   local nb = marimo.current_notebook()
   if not nb then
-    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    utils.warn("Not in a marimo notebook buffer")
     return
   end
-  local marimo_cmd = require("neo-marimo.config").options.marimo_cmd or "marimo"
+  local marimo_cmd = require("neo-marimo.config").get("marimo_cmd")
   vim.fn.jobstart({ marimo_cmd, "edit", nb.filepath }, { detach = true })
-  vim.notify("[neo-marimo] Opening " .. vim.fn.fnamemodify(nb.filepath, ":t") .. " in browser...", vim.log.levels.INFO)
+  utils.info("Opening " .. vim.fn.fnamemodify(nb.filepath, ":t") .. " in browser...")
 end, { desc = "Open current marimo notebook in browser" })
 
 vim.api.nvim_create_user_command("MarimoStop", function()
   local marimo = require("neo-marimo")
   local nb = marimo.current_notebook()
   if not nb then
-    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    utils.warn("Not in a marimo notebook buffer")
     return
   end
   require("neo-marimo.server").stop(nb.filepath)
@@ -65,7 +71,7 @@ vim.api.nvim_create_user_command("MarimoReclaim", function()
   local marimo = require("neo-marimo")
   local nb = marimo.current_notebook()
   if not nb then
-    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    utils.warn("Not in a marimo notebook buffer")
     return
   end
   require("neo-marimo.server").reclaim_ws(nb.filepath)
@@ -75,11 +81,11 @@ vim.api.nvim_create_user_command("MarimoReload", function()
   local marimo = require("neo-marimo")
   local nb = marimo.current_notebook()
   if not nb then
-    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    utils.warn("Not in a marimo notebook buffer")
     return
   end
   require("neo-marimo.sync").reload_from_file(nb)
-  vim.notify("[neo-marimo] Reloaded from disk", vim.log.levels.INFO)
+  utils.info("Reloaded from disk")
 end, { desc = "Reload marimo notebook from disk" })
 
 vim.api.nvim_create_user_command("MarimoAttach", function()
@@ -225,7 +231,7 @@ local function open_server_list_window()
   open_kmap("K", function()
     close()
     local n = server.kill_all_system_marimo()
-    vim.notify("[neo-marimo] Killed " .. n .. " marimo process(es).", vim.log.levels.INFO)
+    utils.info("Killed " .. n .. " marimo process(es).")
   end, "Kill every marimo process on the system")
 end
 
@@ -241,18 +247,17 @@ vim.api.nvim_create_user_command("MarimoCheck", function()
   local marimo = require("neo-marimo")
   local nb = marimo.current_notebook()
   if not nb then
-    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    utils.warn("Not in a marimo notebook buffer")
     return
   end
   local ok, errors = require("neo-marimo.notebook").validate_offsets(nb, nb.bufnr)
   if ok then
-    vim.notify(string.format(
-      "[neo-marimo] cell offsets OK (%d cells, %d buffer lines)",
-      #nb.cells, vim.api.nvim_buf_line_count(nb.bufnr)),
-      vim.log.levels.INFO)
+    utils.info(string.format(
+      "cell offsets OK (%d cells, %d buffer lines)",
+      #nb.cells, vim.api.nvim_buf_line_count(nb.bufnr)))
     return
   end
-  local lines = { string.format("[neo-marimo] offset corruption (%d issue(s)):", #errors) }
+  local lines = { string.format("offset corruption (%d issue(s)):", #errors) }
   for _, e in ipairs(errors) do
     table.insert(lines, "  - " .. e)
   end
@@ -264,13 +269,13 @@ vim.api.nvim_create_user_command("MarimoCheck", function()
       i, tostring(c.id), c.start_row, c.end_row,
       require("neo-marimo.cell").line_count(c)))
   end
-  vim.notify(table.concat(lines, "\n"), vim.log.levels.WARN)
+  utils.warn(table.concat(lines, "\n"))
 end, { desc = "Validate notebook cell row offsets against buffer state" })
 
 vim.api.nvim_create_user_command("MarimoKillAll", function()
   local server = require("neo-marimo.server")
   local n = server.kill_all_system_marimo()
-  vim.notify("[neo-marimo] Killed " .. n .. " marimo process(es).", vim.log.levels.INFO)
+  utils.info("Killed " .. n .. " marimo process(es).")
 end, { desc = "Force-kill all marimo edit processes on the system" })
 
 -- Send a hand-crafted ping frame to the WS. The marimo server's WS
@@ -282,7 +287,7 @@ vim.api.nvim_create_user_command("MarimoWsPing", function()
   local marimo = require("neo-marimo")
   local nb = marimo.current_notebook()
   if not nb then
-    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    utils.warn("Not in a marimo notebook buffer")
     return
   end
   local server = require("neo-marimo.server")
@@ -291,9 +296,9 @@ vim.api.nvim_create_user_command("MarimoWsPing", function()
     ts = vim.uv.hrtime() / 1e6,
   })
   if ok then
-    vim.notify("[neo-marimo] Sent WS ping", vim.log.levels.INFO)
+    utils.info("Sent WS ping")
   else
-    vim.notify("[neo-marimo] WS not connected; can't send ping", vim.log.levels.WARN)
+    utils.warn("WS not connected; can't send ping")
   end
 end, { desc = "Send a no-op ping over the marimo WebSocket (for debugging)" })
 
@@ -302,7 +307,7 @@ vim.api.nvim_create_user_command("MarimoWsDebug", function(opts)
   -- path. With an arg: enables logging to that path. Use "off" to disable.
   if opts.args == "off" then
     _G.neo_marimo_ws_log = nil
-    vim.notify("[neo-marimo] WS debug logging disabled", vim.log.levels.INFO)
+    utils.info("WS debug logging disabled")
     return
   end
   local path = (opts.args ~= "" and opts.args) or "/tmp/neo-marimo-ws.log"
@@ -310,7 +315,7 @@ vim.api.nvim_create_user_command("MarimoWsDebug", function(opts)
   -- Truncate so each session starts fresh
   local f = io.open(path, "w")
   if f then f:close() end
-  vim.notify("[neo-marimo] WS debug logging → " .. path, vim.log.levels.INFO)
+  utils.info("WS debug logging → " .. path)
 end, { nargs = "?", desc = "Toggle WebSocket message logging (path or 'off')" })
 
 -- Start the marimo server (if needed) and connect nvim as the main consumer
@@ -319,7 +324,7 @@ vim.api.nvim_create_user_command("MarimoStart", function()
   local marimo = require("neo-marimo")
   local nb = marimo.current_notebook()
   if not nb then
-    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    utils.warn("Not in a marimo notebook buffer")
     return
   end
   require("neo-marimo.actions").start_server(nb)
@@ -331,7 +336,7 @@ vim.api.nvim_create_user_command("MarimoEdit", function()
   local marimo = require("neo-marimo")
   local nb = marimo.current_notebook()
   if not nb then
-    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    utils.warn("Not in a marimo notebook buffer")
     return
   end
   require("neo-marimo.actions").open_in_browser(nb)
@@ -343,7 +348,7 @@ vim.api.nvim_create_user_command("MarimoRun", function(opts)
   local marimo = require("neo-marimo")
   local nb = marimo.current_notebook()
   if not nb then
-    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    utils.warn("Not in a marimo notebook buffer")
     return
   end
   local actions = require("neo-marimo.actions")
@@ -352,7 +357,7 @@ vim.api.nvim_create_user_command("MarimoRun", function(opts)
   elseif opts.args == "" then
     actions.run_cell_at_cursor(nb.bufnr, nb)
   else
-    vim.notify("[neo-marimo] :MarimoRun expects no arg or 'all'", vim.log.levels.WARN)
+    utils.warn(":MarimoRun expects no arg or 'all'")
   end
 end, {
   nargs = "?",
@@ -366,7 +371,7 @@ vim.api.nvim_create_user_command("MarimoInterrupt", function()
   local marimo = require("neo-marimo")
   local nb = marimo.current_notebook()
   if not nb then
-    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    utils.warn("Not in a marimo notebook buffer")
     return
   end
   require("neo-marimo.actions").interrupt_kernel(nb)
@@ -378,7 +383,7 @@ vim.api.nvim_create_user_command("MarimoRestart", function()
   local marimo = require("neo-marimo")
   local nb = marimo.current_notebook()
   if not nb then
-    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    utils.warn("Not in a marimo notebook buffer")
     return
   end
   require("neo-marimo.actions").restart_kernel(nb.bufnr, nb)
@@ -390,7 +395,7 @@ vim.api.nvim_create_user_command("MarimoNewCell", function(opts)
   local marimo = require("neo-marimo")
   local nb = marimo.current_notebook()
   if not nb then
-    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    utils.warn("Not in a marimo notebook buffer")
     return
   end
   local actions = require("neo-marimo.actions")
@@ -400,7 +405,7 @@ vim.api.nvim_create_user_command("MarimoNewCell", function(opts)
   elseif where == "above" then
     actions.new_cell_above(nb.bufnr, nb)
   else
-    vim.notify("[neo-marimo] :MarimoNewCell expects 'above' or 'below'", vim.log.levels.WARN)
+    utils.warn(":MarimoNewCell expects 'above' or 'below'")
   end
 end, {
   nargs = "?",
@@ -424,13 +429,13 @@ vim.api.nvim_create_user_command("MarimoInspectOutput", function()
   local marimo = require("neo-marimo")
   local nb = marimo.current_notebook()
   if not nb then
-    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    utils.warn("Not in a marimo notebook buffer")
     return
   end
   local row = vim.api.nvim_win_get_cursor(0)[1] - 1
   local cell = require("neo-marimo.notebook").get_cell_at_row(nb, row)
   if not cell then
-    vim.notify("[neo-marimo] Cursor is not over a cell.", vim.log.levels.WARN)
+    utils.warn("Cursor is not over a cell.")
     return
   end
 
@@ -473,15 +478,33 @@ vim.api.nvim_create_user_command("MarimoResetWidgets", function()
   local marimo = require("neo-marimo")
   local nb = marimo.current_notebook()
   if not nb then
-    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    utils.warn("Not in a marimo notebook buffer")
     return
   end
   require("neo-marimo.widgets").clear_all_overrides()
   for _, cell in ipairs(nb.cells) do
     require("neo-marimo.output").render(nb.bufnr, cell, nb.filepath)
   end
-  vim.notify("[neo-marimo] Widget overrides cleared.", vim.log.levels.INFO)
+  utils.info("Widget overrides cleared.")
 end, { desc = "Clear all widget value overrides and re-render" })
+
+-- Recovery for tmux passthrough eating a delete-images escape mid-session
+-- (plan-refinement.md F2.7): force a terminal-side delete-all, drop this
+-- notebook's placement registry, and re-render outputs so plots redraw.
+vim.api.nvim_create_user_command("MarimoImageRepaint", function()
+  local marimo = require("neo-marimo")
+  local nb = marimo.current_notebook()
+  if not nb then
+    utils.warn("Not in a marimo notebook buffer")
+    return
+  end
+  if not require("neo-marimo.image").backend() then
+    utils.warn("No image backend detected (install image.nvim or snacks.image)")
+    return
+  end
+  require("neo-marimo.actions").repaint_images(nb.bufnr, nb)
+  utils.info("Repainted inline images.")
+end, { desc = "Force-clear and redraw inline images (tmux passthrough recovery)" })
 
 -- Phase 8.3: open the widget picker for the cell under the cursor. Lists
 -- every UI element marimo emitted in the cell's last output and lets the
@@ -491,13 +514,13 @@ vim.api.nvim_create_user_command("MarimoWidget", function()
   local marimo = require("neo-marimo")
   local nb = marimo.current_notebook()
   if not nb then
-    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    utils.warn("Not in a marimo notebook buffer")
     return
   end
   local row = vim.api.nvim_win_get_cursor(0)[1] - 1
   local cell = require("neo-marimo.notebook").get_cell_at_row(nb, row)
   if not cell then
-    vim.notify("[neo-marimo] Cursor is not over a cell.", vim.log.levels.WARN)
+    utils.warn("Cursor is not over a cell.")
     return
   end
   require("neo-marimo.widget_picker").open(nb, cell)
@@ -509,7 +532,7 @@ vim.api.nvim_create_user_command("MarimoWidgetPins", function()
   local marimo = require("neo-marimo")
   local nb = marimo.current_notebook()
   if not nb then
-    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    utils.warn("Not in a marimo notebook buffer")
     return
   end
   require("neo-marimo.widget_picker").open_pins(nb)
@@ -528,7 +551,7 @@ vim.api.nvim_create_user_command("MarimoNew", function(opts)
 
   -- Refuse to overwrite an existing file
   if vim.fn.filereadable(filepath) == 1 then
-    vim.notify("[neo-marimo] File already exists: " .. filepath, vim.log.levels.ERROR)
+    utils.error("File already exists: " .. filepath)
     return
   end
 
@@ -541,13 +564,13 @@ vim.api.nvim_create_user_command("MarimoNew", function(opts)
   end
 
   -- Generate a minimal notebook with one empty cell
-  local python_path = config.options.python_path or "python3"
+  local python_path = config.get("python_path")
   local ok, content = pcall(parser.generate_py, {
     { name = "_", code = "", options = {} },
   }, filepath, python_path)
 
   if not ok then
-    vim.notify("[neo-marimo] Failed to generate notebook: " .. tostring(content), vim.log.levels.ERROR)
+    utils.error("Failed to generate notebook: " .. tostring(content))
     return
   end
 
@@ -557,7 +580,7 @@ vim.api.nvim_create_user_command("MarimoNew", function(opts)
   if lines[#lines] == "" then table.remove(lines) end
   local write_ok, write_err = pcall(vim.fn.writefile, lines, filepath)
   if not write_ok then
-    vim.notify("[neo-marimo] Could not write file: " .. tostring(write_err), vim.log.levels.ERROR)
+    utils.error("Could not write file: " .. tostring(write_err))
     return
   end
 
