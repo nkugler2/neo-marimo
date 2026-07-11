@@ -25,6 +25,9 @@ Requires nvim 0.11+ and `curl` on PATH. Single-developer, pre-release.
   `register_cell_detector`) — the main contribution surface.
 - `docs/plan-release.md` — the current plan (phases **R0–R7**). Pre-release rule:
   **no new features** — correctness, packaging, and contributor on-ramps only.
+- `TOCHANGE.md` — the maintainer's backlog. Follow the workflow in its header:
+  triage Inbox items into Open, and **delete** items once they ship (the record
+  lives in git history / plan docs, never in that file).
 
 ## Dev loop
 
