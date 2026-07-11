@@ -20,6 +20,7 @@
 local M = {}
 
 local log = require("neo-marimo.log")
+local utils = require("neo-marimo.utils")
 
 -- ── temp-file plumbing ────────────────────────────────────────────────────
 
@@ -104,8 +105,7 @@ local function write_temp(mime, bytes)
 
   local f, err = io.open(path, "wb")
   if not f then
-    vim.notify("[neo-marimo] image write failed: " .. tostring(err),
-      vim.log.levels.WARN)
+    utils.warn("image write failed: " .. tostring(err))
     return nil
   end
   f:write(bytes)
@@ -373,8 +373,7 @@ local function render_path(bufnr, row, mime, path, key)
         return {}
       end
       if not ok_create then
-        vim.notify("[neo-marimo] snacks.image failed: " .. tostring(placement),
-          vim.log.levels.WARN)
+        utils.warn("snacks.image failed: " .. tostring(placement))
       end
     end
   end

@@ -14,6 +14,7 @@
 
 local notebook = require("neo-marimo.notebook")
 local html_mod = require("neo-marimo.html")
+local utils = require("neo-marimo.utils")
 
 local M = {}
 
@@ -487,10 +488,9 @@ end
 function M.open_for_cell(nb, cell)
   local df = cell and extract_from_output(cell.output)
   if not df or not df.cols or #df.cols == 0 then
-    vim.notify(
-      "[neo-marimo] No DataFrame output on the cell under the cursor. " ..
-        "(run :MarimoInspectOutput to see what marimo sent)",
-      vim.log.levels.WARN
+    utils.warn(
+      "No DataFrame output on the cell under the cursor. " ..
+        "(run :MarimoInspectOutput to see what marimo sent)"
     )
     return
   end
@@ -553,12 +553,12 @@ function M.open_for_cell(nb, cell)
     if name then sort_by(panel, name) end
   end, "Sort by the column under the cursor")
   bind("?", function()
-    vim.notify(table.concat({
+    utils.info(table.concat({
       "Marimo DataFrame panel",
       "  s       sort by column under cursor (toggle asc/desc)",
       "  q / <Esc> close",
       "  ?       this help",
-    }, "\n"), vim.log.levels.INFO)
+    }, "\n"))
   end, "Show DataFrame panel help")
 
   -- Clean up the registry slot if the panel buffer is wiped from under us.
@@ -577,14 +577,14 @@ function M.open_at_cursor()
   local marimo = require("neo-marimo")
   local nb = marimo.current_notebook()
   if not nb then
-    vim.notify("[neo-marimo] Not in a marimo notebook buffer", vim.log.levels.WARN)
+    utils.warn("Not in a marimo notebook buffer")
     return
   end
   if nb._flush_pending then nb._flush_pending() end
   local row = vim.api.nvim_win_get_cursor(0)[1] - 1
   local cell = notebook.get_cell_at_row(nb, row)
   if not cell then
-    vim.notify("[neo-marimo] Cursor is not over a cell.", vim.log.levels.WARN)
+    utils.warn("Cursor is not over a cell.")
     return
   end
   M.open_for_cell(nb, cell)

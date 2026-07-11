@@ -33,6 +33,8 @@
 -- in their cell) are left untouched, so nested function return types
 -- are still inferred correctly.
 
+local utils = require("neo-marimo.utils")
+
 local M = {}
 
 -- Hidden shadow buffer state, keyed by source filepath.
@@ -446,8 +448,7 @@ end
 local function request_via_shadow(nb, method, extra_params, handler, fallback_msg)
   local entry = M.refresh_shadow(nb)
   if not entry then
-    vim.notify("[neo-marimo] " .. (fallback_msg or "shadow buffer unavailable"),
-      vim.log.levels.WARN)
+    utils.warn(fallback_msg or "shadow buffer unavailable")
     return
   end
 
@@ -457,11 +458,10 @@ local function request_via_shadow(nb, method, extra_params, handler, fallback_ms
   -- fired. Verify and complain if nothing is attached.
   local clients = vim.lsp.get_clients({ bufnr = entry.bufnr })
   if #clients == 0 then
-    vim.notify(
-      "[neo-marimo] No LSP attached to shadow buffer. Install a Python LSP " ..
+    utils.warn(
+      "No LSP attached to shadow buffer. Install a Python LSP " ..
       "(e.g. pyright, basedpyright, pylsp) and ensure it autostarts on " ..
-      "filetype=python.",
-      vim.log.levels.WARN
+      "filetype=python."
     )
     return
   end

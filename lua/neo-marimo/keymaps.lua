@@ -7,6 +7,7 @@ local actions = require("neo-marimo.actions")
 local lsp = require("neo-marimo.lsp")
 local dataframe = require("neo-marimo.dataframe")
 local widgets = require("neo-marimo.widgets")
+local utils = require("neo-marimo.utils")
 
 local M = {}
 
@@ -258,7 +259,7 @@ function M.setup(bufnr, nb)
     local prev_focus = widgets.get_focus(bufnr)
     local target = widgets.next_focus_target(bufnr, nb.cells, cur_cell, dir)
     if not target then
-      vim.notify("[neo-marimo] No widgets in any cell output.", vim.log.levels.INFO)
+      utils.info("No widgets in any cell output.")
       return
     end
     widgets.set_focus(bufnr, target.cell.id, target.widget.object_id, target.index)
@@ -323,17 +324,14 @@ function M.setup(bufnr, nb)
         end
       end
       if not target then
-        vim.notify("[neo-marimo] Nothing to pin — focus a widget (]w) or edit one first.",
-          vim.log.levels.INFO)
+        utils.info("Nothing to pin — focus a widget (]w) or edit one first.")
         return
       end
       local pinned = widgets.toggle_pin(nb.filepath, target_cell_id, target)
       if pinned == nil then
-        vim.notify("[neo-marimo] Widget has no object-id; can't pin it.",
-          vim.log.levels.WARN)
+        utils.warn("Widget has no object-id; can't pin it.")
       else
-        vim.notify("[neo-marimo] " .. (pinned and "Pinned " or "Unpinned ")
-          .. target.label, vim.log.levels.INFO)
+        utils.info((pinned and "Pinned " or "Unpinned ") .. target.label)
       end
     end, o("Marimo: pin/unpin widget"))
   end

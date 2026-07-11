@@ -56,6 +56,32 @@ t.case("server: <leader>mo when the browser already holds main just reopens the 
   end)
 end)
 
+-- F5.2: resync_ws (the self-heal path output.lua calls when a cell-op
+-- arrives for an unknown cell id) must emit a "resync:dispatch" trace to
+-- :MarimoWsDebug — this async transport was previously silent, so a
+-- desync bug report had nothing to grep in the one file R3.3 tells
+-- reporters to attach.
+t.case("server: resync_ws writes a resync:dispatch entry when ws logging is enabled", function()
+  config.setup({})
+  local orig_connect = server.connect_ws
+  server.connect_ws = function() return true end
+  local fp = "/tmp/nm_server_spec_resync.py"
+  server._servers[fp] = { on_message = function() end, ws_job_id = 42, ws_kiosk = true }
+  local log_path = vim.fn.tempname()
+  _G.neo_marimo_ws_log = log_path
+  local dispatched = server.resync_ws(fp)
+  _G.neo_marimo_ws_log = nil
+  server._servers[fp] = nil
+  server.connect_ws = orig_connect
+
+  t.eq(dispatched, true, "resync_ws reported a dispatched reconnect")
+  local f = io.open(log_path, "r")
+  local contents = f and f:read("*a") or ""
+  if f then f:close() end
+  os.remove(log_path)
+  t.match(contents, "resync:dispatch")
+end)
+
 -- Regression: a large cell-op (a matplotlib PNG) is one multi-megabyte JSON
 -- line that Neovim's jobstart splits across several on_stdout chunks. The
 -- handler MUST reassemble partial lines before decoding, or every fragment of

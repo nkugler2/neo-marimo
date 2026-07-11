@@ -871,6 +871,11 @@ function M.handle_cell_op(bufnr, nb, msg)
     -- marimo replays kernel-ready (re-keys the map by code) and re-emits the
     -- existing outputs, so this op comes back under an id we now know.
     -- Warn once per id; debounce the resync so a burst triggers one, not many.
+    -- Marks here are cleared by ws_handlers.rekey_cells_from_server on any
+    -- successful re-key (plan-refinement F5.4) — a reconcile means the old
+    -- "unknown" knowledge is stale, and leaving it would both grow this
+    -- table unbounded over a session and permanently block a future id from
+    -- ever re-triggering a resync.
     nb._unknown_cell_ids = nb._unknown_cell_ids or {}
     if not nb._unknown_cell_ids[cell_id] then
       nb._unknown_cell_ids[cell_id] = true
@@ -879,10 +884,9 @@ function M.handle_cell_op(bufnr, nb, msg)
       if log.enabled() then
         log.write("cell-op:DROP", { cell_id = cell_id, known_ids = known })
       end
-      vim.notify(
-        "[neo-marimo] cell-op for unknown cell '" .. cell_id
-          .. "' — resyncing. Known: " .. table.concat(known, ", "),
-        vim.log.levels.WARN
+      utils.warn(
+        "cell-op for unknown cell '" .. cell_id
+          .. "' — resyncing. Known: " .. table.concat(known, ", ")
       )
     end
     local now = vim.uv.hrtime() / 1e6

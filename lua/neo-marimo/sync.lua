@@ -193,7 +193,7 @@ function M.write_to_file(nb)
   -- back through reload_from_file and clobber the cursor.
   suppress_watcher(nb)
   local ok, err = pcall(function()
-    local py_source = parser.generate_py(cells, nb.filepath, config.options.python_path)
+    local py_source = parser.generate_py(cells, nb.filepath, config.get("python_path"))
     local lines = vim.split(py_source, "\n", { plain = true })
     -- Remove trailing empty line if writefile would add one
     if lines[#lines] == "" then
@@ -240,7 +240,7 @@ function M.write_to_file(nb)
   -- watcher reloads, sees content differs from last save, and pushes
   -- to all consumers (browser + our kiosk).
 
-  vim.notify("[neo-marimo] Saved " .. vim.fn.fnamemodify(nb.filepath, ":t"), vim.log.levels.INFO)
+  utils.info("Saved " .. vim.fn.fnamemodify(nb.filepath, ":t"))
   return true
 end
 
@@ -252,7 +252,7 @@ function M.reload_from_file(nb)
     return false
   end
 
-  local ok, data = pcall(parser.parse_file, nb.filepath, config.options.python_path)
+  local ok, data = pcall(parser.parse_file, nb.filepath, config.get("python_path"))
   if not ok then
     utils.warn("Failed to reload notebook: " .. tostring(data))
     return false

@@ -67,7 +67,7 @@ local function prompt_number(bufnr, label, current, on_set)
     if input == nil then return end
     local n = tonumber(input)
     if not n then
-      vim.notify("[neo-marimo] not a number: " .. input, vim.log.levels.WARN)
+      utils.warn("not a number: " .. input)
       return
     end
     on_set(n)
@@ -132,8 +132,7 @@ end
 
 local function interact(nb, cell, w)
   if not w.object_id then
-    vim.notify("[neo-marimo] widget has no object-id; cannot update",
-      vim.log.levels.WARN)
+    utils.warn("widget has no object-id; cannot update")
     return
   end
 
@@ -145,8 +144,7 @@ local function interact(nb, cell, w)
   elseif w.name == "checkbox" or w.name == "switch" then
     local nv = not (w.value == true or w.value == "true" or w.value == 1)
     commit(nb, cell, w, nv)
-    vim.notify("[neo-marimo] " .. w.label .. " = " .. tostring(nv),
-      vim.log.levels.INFO)
+    utils.info(w.label .. " = " .. tostring(nv))
 
   elseif w.name == "button" then
     -- Marimo button "press" is an integer-incrementing counter on the
@@ -154,7 +152,7 @@ local function interact(nb, cell, w)
     -- read button.value.
     local cur = tonumber(w.value) or 0
     commit(nb, cell, w, cur + 1)
-    vim.notify("[neo-marimo] pressed " .. w.label, vim.log.levels.INFO)
+    utils.info("pressed " .. w.label)
 
   elseif w.name == "text" or w.name == "text_area" then
     prompt_text(nb.bufnr, w.label, w.value, function(v) commit(nb, cell, w, v) end)
@@ -369,8 +367,7 @@ end
 function M.open(nb, cell)
   local list = widgets.list_for_cell(nb.bufnr, cell.id)
   if #list == 0 then
-    vim.notify("[neo-marimo] No widgets in this cell's output.",
-      vim.log.levels.INFO)
+    utils.info("No widgets in this cell's output.")
     return
   end
 
@@ -428,8 +425,7 @@ end
 function M.smart(nb, cell)
   local list = widgets.list_for_cell(nb.bufnr, cell.id)
   if #list == 0 then
-    vim.notify("[neo-marimo] No widgets in this cell's output.",
-      vim.log.levels.INFO)
+    utils.info("No widgets in this cell's output.")
     return
   end
   local fw, fcell_id = widgets.focused_widget(nb.bufnr)
@@ -452,14 +448,12 @@ end
 function M.act_last()
   local last = widgets.get_last()
   if not last then
-    vim.notify("[neo-marimo] No widget edited yet this session.",
-      vim.log.levels.INFO)
+    utils.info("No widget edited yet this session.")
     return
   end
   local nb = last.nb
   if not (nb.bufnr and vim.api.nvim_buf_is_valid(nb.bufnr)) then
-    vim.notify("[neo-marimo] Last-edited widget's notebook is gone.",
-      vim.log.levels.WARN)
+    utils.warn("Last-edited widget's notebook is gone.")
     return
   end
   local cell = nb.cell_by_id[last.cell_id]
@@ -470,8 +464,7 @@ function M.act_last()
     end
   end
   if not w then
-    vim.notify("[neo-marimo] Last-edited widget is no longer in any cell output.",
-      vim.log.levels.WARN)
+    utils.warn("Last-edited widget is no longer in any cell output.")
     return
   end
 
@@ -505,8 +498,7 @@ end
 
 function M.open_pins(nb)
   if #widgets.pins_for(nb.filepath) == 0 then
-    vim.notify("[neo-marimo] No pinned widgets — pin one with the pin-toggle keymap.",
-      vim.log.levels.INFO)
+    utils.info("No pinned widgets — pin one with the pin-toggle keymap.")
     return
   end
 
@@ -537,8 +529,7 @@ function M.open_pins(nb)
     local function act(r)
       if not r then return end
       if not r.widget then
-        vim.notify("[neo-marimo] That widget is gone — press x to unpin it.",
-          vim.log.levels.WARN)
+        utils.warn("That widget is gone — press x to unpin it.")
         return
       end
       close()

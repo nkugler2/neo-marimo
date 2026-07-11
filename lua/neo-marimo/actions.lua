@@ -325,7 +325,7 @@ end
 
 local function require_server(nb)
   if not server.is_running(nb.filepath) then
-    vim.notify("[neo-marimo] No server running. Press <leader>mo to start.", vim.log.levels.WARN)
+    utils.warn("No server running. Press <leader>mo to start.")
     return false
   end
   return true
@@ -399,7 +399,7 @@ function M.interrupt_kernel(nb)
   if not require_server(nb) then return end
   server.interrupt(nb.filepath, function(ok)
     if ok then
-      vim.notify("[neo-marimo] Interrupt sent to kernel.", vim.log.levels.INFO)
+      utils.info("Interrupt sent to kernel.")
     end
   end)
 end
@@ -418,13 +418,12 @@ function M.restart_kernel(bufnr, nb)
   end
   output.clear_all(bufnr)
 
-  vim.notify("[neo-marimo] Restarting marimo kernel...", vim.log.levels.INFO)
+  utils.info("Restarting marimo kernel...")
   server.restart(nb, function(ok)
     if ok then
-      vim.notify(
-        "[neo-marimo] Kernel restarted; outputs cleared. Run-all re-executes from scratch. "
-          .. "Open browser tabs need re-opening (open_in_browser keymap).",
-        vim.log.levels.INFO
+      utils.info(
+        "Kernel restarted; outputs cleared. Run-all re-executes from scratch. "
+          .. "Open browser tabs need re-opening (open_in_browser keymap)."
       )
     else
       utils.error("Kernel restart failed — check :MarimoServerList for orphan processes.")

@@ -177,11 +177,17 @@ local function rekey_cells_from_server(nb, cell_ids, codes)
   end
   if codes and rekey_by_code(nb, cell_ids, codes) then
     if log.enabled() then log.write("rekey:done", { via = "code", nb_ids = log.cell_ids(nb) }) end
+    -- A successful reconcile makes any earlier "unknown cell id" marks stale
+    -- by definition (output.lua F5.4): the ids we couldn't find a cell for
+    -- may now resolve, and old marks would otherwise block a future resync
+    -- forever. Clear so the next genuinely-unknown id can still self-heal.
+    nb._unknown_cell_ids = nil
     return true
   end
   if #cell_ids == #nb.cells then
     rekey_by_position(nb, cell_ids)
     if log.enabled() then log.write("rekey:done", { via = "position", nb_ids = log.cell_ids(nb) }) end
+    nb._unknown_cell_ids = nil -- see rationale above
     return true
   end
   -- Ids-only with a count mismatch. Don't clobber unsaved edits mid-write;
@@ -194,6 +200,7 @@ local function rekey_cells_from_server(nb, cell_ids, codes)
   if sync.reload_from_file(nb) and #cell_ids == #nb.cells then
     rekey_by_position(nb, cell_ids)
     if log.enabled() then log.write("rekey:done", { via = "reload+position", nb_ids = log.cell_ids(nb) }) end
+    nb._unknown_cell_ids = nil -- see rationale above
     return true
   elseif log.enabled() then
     log.write("rekey:fail", {
@@ -239,7 +246,7 @@ M.register("update-cell-ids", function(payload, ctx)
 end)
 
 M.register("neo_marimo_connected", function(_, _)
-  vim.notify("[neo-marimo] WebSocket connected.", vim.log.levels.INFO)
+  utils.info("WebSocket connected.")
 end)
 
 M.register("neo_marimo_error", function(_, ctx)

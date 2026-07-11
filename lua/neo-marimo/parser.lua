@@ -15,6 +15,10 @@ local bridge_path = utils.plugin_root() .. "/python/bridge.py"
 local BRIDGE_TIMEOUT_MS = 15000
 
 function M.parse_file(filepath, python_path)
+  -- This module deliberately doesn't require config.lua (kept dependency-free
+  -- for testability), so every in-repo caller passes config.get("python_path")
+  -- explicitly; this default is only a last-resort guard for direct callers
+  -- (e.g. from a script or `:lua`) that omit the argument entirely.
   python_path = python_path or "python3"
   local result = vim.system(
     { python_path, bridge_path, "parse", filepath },
@@ -37,6 +41,7 @@ end
 -- `cells` is a list of {name, code, options} tables.
 -- Returns the generated Python source as a string.
 function M.generate_py(cells, filepath, python_path)
+  -- Last-resort guard; see M.parse_file above.
   python_path = python_path or "python3"
   local input, err = utils.json_encode({ cells = cells, filepath = filepath })
   if err then
@@ -58,6 +63,7 @@ end
 -- Run a health check on the Python bridge.
 -- Returns {ok, python_version, marimo_version} or raises an error.
 function M.check(python_path)
+  -- Last-resort guard; see M.parse_file above.
   python_path = python_path or "python3"
   local result = vim.system(
     { python_path, bridge_path, "check" },

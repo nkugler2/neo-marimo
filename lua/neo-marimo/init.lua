@@ -116,7 +116,7 @@ function M.attach(source_bufnr)
   end
 
   -- Parse the notebook file
-  local python_path = config.options.python_path or "python3"
+  local python_path = config.get("python_path")
   local ok, data = pcall(parser.parse_file, filepath, python_path)
   if not ok then
     utils.warn("Failed to parse " .. filepath .. ": " .. tostring(data))
@@ -288,7 +288,7 @@ function M.attach(source_bufnr)
       end
 
       -- Re-parse from disk, then patch the buffer with the delta.
-      local ok, data = pcall(parser.parse_file, filepath, config.options.python_path)
+      local ok, data = pcall(parser.parse_file, filepath, config.get("python_path"))
       if not ok or not data or not data.cells then return end
 
       -- Don't fight the user: if they have unsaved edits, ask before
@@ -380,15 +380,12 @@ function M.attach(source_bufnr)
   keymaps.setup(nb_bufnr, nb)
 
   local cell_count = #nb.cells
-  vim.notify(
-    string.format("[neo-marimo] Opened %s (%d cells)", vim.fn.fnamemodify(filepath, ":t"), cell_count),
-    vim.log.levels.INFO
-  )
+  utils.info(string.format("Opened %s (%d cells)", vim.fn.fnamemodify(filepath, ":t"), cell_count))
 end
 
 -- Run :checkhealth for this plugin
 function M.check()
-  local python_path = config.options.python_path or "python3"
+  local python_path = config.get("python_path")
   local result = parser.check(python_path)
 
   if result.ok then

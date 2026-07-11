@@ -463,26 +463,39 @@ register a widget — the two things a Phase 9/10 extension would want.
 
 ---
 
-## Phase F5 — Consistency & observability
+## Phase F5 — Consistency & observability **DONE**
 
-### F5.1 Converge on `utils.warn/error/info`
+### F5.1 Converge on `utils.warn/error/info` **DONE**
 
 ~78 direct `vim.notify("[neo-marimo] …")` sites (server.lua ×12,
 widget_picker ×11, plugin/neo-marimo.lua ×35, …) vs ~41 through utils.
 Every new call site copies whichever idiom it lands next to.
 
-- [ ] Sweep to utils helpers; fix the `utils.info` docstring lie
+- [x] DONE Sweep to utils helpers; fix the `utils.info` docstring lie
       (utils.lua:68 claims debug-gated; implementation is unconditional —
-      either gate it or fix the doc).
+      either gate it or fix the doc). (Doc fixed, behavior kept
+      unconditional — INFO sites like "Connected (nvim-only)" are
+      deliberate user feedback; gating them would be a behavior change.
+      ~78 sites converted across 12 files; post-sweep grep shows
+      `vim.notify` only inside utils.lua itself. No leftovers — every
+      site used a WARN/ERROR/INFO level with no extra opts.)
 
-### F5.2 `server.lua` never writes to the debug log **[gap]**
+### F5.2 `server.lua` never writes to the debug log **[gap]** **DONE**
 
 `log.lua` is used by image/output/ws_handlers only. The async transport —
 where the R3.3 issue template will tell reporters to look — logs nothing
 to `:MarimoWsDebug`. Add `log.write` at: WS connect/disconnect/exit
 (with code), slot handoffs (main↔kiosk), resync dispatches, HTTP non-200s.
+(Done: tags `ws:connect` (spawn + established), `ws:exit` (code +
+expected/unexpected), `ws:handoff` (release / reconnect_kiosk / skip),
+`resync:dispatch`, `http:non200` (method/path/status, no bodies). Purely
+additive — no control-flow or timing changes. `http_get` untouched: its
+`curl -sf` never surfaces a status code without changing flags.
+`resync:dispatch` has a spec via the exported `resync_ws` seam; the other
+sites sit behind real process spawns / deferred timers and are untested,
+stated per plan.)
 
-### F5.3 Config fallback literals
+### F5.3 Config fallback literals **DONE**
 
 `or "python3"` ×4, `or 2718` ×4, `or "marimo"` ×3 re-encode
 `config.defaults` at call sites and will diverge the first time a default
@@ -491,14 +504,33 @@ unguarded while `init.lua:224` guards. Add a `config.get(path)` (or rely
 on defaults always being merged) and delete the scattered literals.
 Coordinate with **R0.1** — do this in the same sitting as the default-path
 restore so there's one authoritative defaults story.
+(Done: `config.get(path)` dot-path accessor — walks options, falls back
+to defaults per-path, and distinguishes an explicit user `false` from
+"not set" (spec-covered). Confirmed real bug: `M.options` is `{}` until
+`setup()` runs, so the unguarded nested indexes could error pre-setup.
+All listed literals converted; parser.lua keeps its arg-defaults as a
+documented last-resort net (module is deliberately config-free), callers
+now pass `config.get("python_path")`. New `tests/spec/config_spec.lua`.
+**R0.1 remains open in plan-release.md** — with get() in place the
+default-path restore is now a two-line value change in config.defaults.)
 
-### F5.4 Unbounded `nb._unknown_cell_ids` + handoff magic delay (small)
+### F5.4 Unbounded `nb._unknown_cell_ids` + handoff magic delay (small) **DONE**
 
-- [ ] `output.lua:612-625`: prune `_unknown_cell_ids` (e.g. clear on
+- [x] DONE `output.lua:612-625`: prune `_unknown_cell_ids` (e.g. clear on
       successful rekey); once marked, an ID never re-triggers resync.
-- [ ] `server.lua:892-914`: the fixed 1200ms browser-handoff delay is
+      (Cleared on all three success paths of `rekey_cells_from_server` —
+      same condition that stamps `_last_cell_ids_at`, so the F1.2 bail
+      path correctly leaves it intact; both directions spec-covered in
+      `ws_dispatch_spec.lua`. `reload_from_file` mutates the same `nb`
+      in place but its ws-handler call site is inside a success path, so
+      the clear there covers it.)
+- [x] DONE `server.lua:892-914`: the fixed 1200ms browser-handoff delay is
       timing-dependent on slow machines; at minimum add a rationale
       comment + config escape hatch. Not worth adaptive backoff now.
+      (`server.browser_handoff_delay_ms = 1200` in config.defaults;
+      header comment extended. Also converted the same function's
+      unguarded `share_with_browser` read to `config.get`, `~= false`
+      semantics preserved.)
 
 ---
 
@@ -592,7 +624,7 @@ currently ships blind.
 | F2 | 2.1–2.7 | ~1 session | implementer; 2.1 first, 2.5 is inline-trivial, 2.6/2.7 found post-F3 | DONE |
 | F3 | 3.1 | 1–2 sessions | Plan agent design pass first, then implementer | DONE |
 | F4 | 4.1–4.4 | ~1 session | implementer; 4.4 partly docs-writer | DONE |
-| F5 | 5.1–5.4 | ~half session | implementer (5.1 is mechanical) | |
+| F5 | 5.1–5.4 | ~half session | implementer (5.1 is mechanical) | DONE |
 | F6 | 6.1–6.3 | ~1 session | docs-writer (6.1), implementer (6.2–6.3) | |
 
 After F6, resume `plan-release.md` at R0 with a much stronger "what

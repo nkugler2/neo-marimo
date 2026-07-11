@@ -166,6 +166,38 @@ t.case("ws: update-cell-ids does not stamp _last_cell_ids_at when the re-key bai
   t.eq(nb._last_cell_ids_at, 0, "stamp must not advance when the re-key bailed")
 end)
 
+-- F5.4 regression: nb._unknown_cell_ids marks a cell-op's id as "already
+-- warned about" so a burst of ops for the same stale id only triggers one
+-- resync. But once a rekey actually reconciles, those marks describe a
+-- mapping that no longer exists — leaving them would permanently block a
+-- *future* genuinely-unknown id (of the same string) from ever resyncing
+-- again, and the table would grow unbounded over a long session.
+t.case("ws: update-cell-ids clears _unknown_cell_ids on a successful re-key", function()
+  local nb = t.make_notebook({ "a = 1", "b = 2" })
+  nb._unknown_cell_ids = { xyz = true }
+
+  -- Same count as nb.cells (2) with no codes takes the positional-rekey path,
+  -- which reconciles successfully.
+  ws.dispatch("update-cell-ids", { cell_ids = { "X1", "X2" } }, { nb = nb })
+
+  t.eq(nb._unknown_cell_ids, nil, "stale unknown-id marks are cleared on successful re-key")
+end)
+
+t.case("ws: update-cell-ids leaves _unknown_cell_ids alone when the re-key bails", function()
+  local sync = require("neo-marimo.sync")
+  local orig_is_writing, orig_reload = sync.is_writing, sync.reload_from_file
+  sync.is_writing = function() return true end
+  sync.reload_from_file = function() error("must not be called while writing") end
+
+  local nb = t.make_notebook({ "a = 1", "b = 2" })
+  nb._unknown_cell_ids = { xyz = true }
+  -- Count mismatch (3 server ids vs 2 local cells) + is_writing → bail (F1.2).
+  ws.dispatch("update-cell-ids", { cell_ids = { "X1", "X2", "X3" } }, { nb = nb })
+
+  sync.is_writing, sync.reload_from_file = orig_is_writing, orig_reload
+  t.eq(nb._unknown_cell_ids.xyz, true, "a bailed re-key must not clear marks — mapping is still stale")
+end)
+
 -- Widget value sync (browser/other consumer → nvim): marimo never re-broadcasts
 -- the widget's own cell when its value changes, only a "variable-values" op.
 -- We map the variable to its widget via the "variables" declaring-cell graph

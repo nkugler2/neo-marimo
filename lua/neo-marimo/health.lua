@@ -14,7 +14,7 @@ function M.check()
   local config = require("neo-marimo.config")
   local parser = require("neo-marimo.parser")
 
-  local python_path = config.options.python_path or "python3"
+  local python_path = config.get("python_path")
   vim.health.info("python_path: " .. python_path)
 
   -- Check Python bridge
@@ -70,7 +70,7 @@ function M.check()
   end
 
   -- Check marimo CLI
-  local marimo_cmd = config.options.marimo_cmd or "marimo"
+  local marimo_cmd = config.get("marimo_cmd")
   local cli_result = vim.system({ marimo_cmd, "--version" }, { text = true }):wait()
   if cli_result.code == 0 then
     vim.health.ok("marimo CLI found: " .. (cli_result.stdout or ""):gsub("\n", ""))
