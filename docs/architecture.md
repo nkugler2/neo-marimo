@@ -73,20 +73,20 @@ behaves exactly like the browser.
 | --- | --- |
 | `server.lua` | One marimo server process per notebook: port probing, spawn, async `/health` polling, server-token fetch, HTTP POSTs (`run`, `instantiate`, `set_ui_element_value` lives in widgets.lua), WS connect/release/reclaim (browser handoff). |
 | `python/ws_client.py` | Bridges the marimo WebSocket to stdio: newline-delimited JSON on stdout → Neovim, stdin → WS. Supports kiosk (observer) mode so nvim can coexist with a browser tab. |
-| `ws_handlers.lua` | The WS dispatch table: op name → handler. Built-ins: `cell-op`, `kernel-ready`, `update-cell-ids`, `update-cell-codes`, `completed-run`, `neo_marimo_*` status messages. |
+| `ws_handlers.lua` | The WS dispatch table: op name → handler. Built-ins: `cell-op`, `kernel-ready`, `update-cell-ids`, `update-cell-codes`, `reload` (0.23+, replaces the two granular update ops with one payload-less broadcast), `completed-run`, `neo_marimo_*` status messages. |
 
 ### Output rendering
 
-| Module | Role |
-| --- | --- |
-| `output.lua` | Per-cell render driver. Owns the **mimetype renderer registry**, the status line (⟳/✓/✖), the MAX_LINES cap, the wrap pass, and `handle_cell_op`. |
-| `html.lua` | Tokenizer + element-tree builder for marimo's HTML payloads. `serialize(node)` reconstructs the exact original substring of a subtree (byte-exact, fixture-tested), which is how subtrees feed the string-based renderers below. |
-| `tree_render.lua` | Walks the element tree and routes per node: layouts (vstack/hstack/tabs/accordion), widgets, tables, markdown spans, images, placeholders for browser-only elements (vega/plotly/data-explorer). |
-| `widgets.lua` | Widget registry per (bufnr, cell), value overrides, focus model (`]w`/`[w`, ▸ marker), pins, the **widget renderer registry**, and the async `set_value` POST. |
-| `widget_picker.lua` | The interaction UI: smart act, ordered digit picker, tab-group cycling, pins panel, edit prompts, commit. |
-| `dataframe.lua` | Dataresource-JSON + HTML-table extraction, inline 5-row preview, full side panel (`<leader>mD`, sortable). |
-| `markdown.lua` | Unwraps marimo's `<span class="markdown">` wrapper, converts the HTML back to markdown, renders with structured highlights. |
-| `image.lua` | Decodes base64 / data-URIs / inline SVG / server virtual files to temp files; draws via image.nvim or snacks.image with placement lifecycle management; text placeholder fallback. |
+| Module              | Role                                                                                                                                                                                                                             |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `output.lua`        | Per-cell render driver. Owns the **mimetype renderer registry**, the status line (⟳/✓/✖), the MAX_LINES cap, the wrap pass, and `handle_cell_op`.                                                                                |
+| `html.lua`          | Tokenizer + element-tree builder for marimo's HTML payloads. `serialize(node)` reconstructs the exact original substring of a subtree (byte-exact, fixture-tested), which is how subtrees feed the string-based renderers below. |
+| `tree_render.lua`   | Walks the element tree and routes per node: layouts (vstack/hstack/tabs/accordion), widgets, tables, markdown spans, images, placeholders for browser-only elements (vega/plotly/data-explorer).                                 |
+| `widgets.lua`       | Widget registry per (bufnr, cell), value overrides, focus model (`]w`/`[w`, ▸ marker), pins, the **widget renderer registry**, and the async `set_value` POST.                                                                   |
+| `widget_picker.lua` | The interaction UI: smart act, ordered digit picker, tab-group cycling, pins panel, edit prompts, commit.                                                                                                                        |
+| `dataframe.lua`     | Dataresource-JSON + HTML-table extraction, inline 5-row preview, full side panel (`<leader>mD`, sortable).                                                                                                                       |
+| `markdown.lua`      | Unwraps marimo's `<span class="markdown">` wrapper, converts the HTML back to markdown, renders with structured highlights.                                                                                                      |
+| `image.lua`         | Decodes base64 / data-URIs / inline SVG / server virtual files to temp files; draws via image.nvim or snacks.image with placement lifecycle management; text placeholder fallback.                                               |
 
 ### LSP and completion
 
@@ -98,7 +98,38 @@ behaves exactly like the browser.
 ### Support
 
 `highlights.lua` (groups + namespaces), `statusline.lua` (documented
-statusline API), `utils.lua` (debounce, JSON, warn).
+statusline API), `utils.lua` (debounce, JSON, warn), `log.lua` (the
+pcall-guarded, opt-in file logger behind `:MarimoWsDebug` — WS ops, re-key
+decisions, and dropped cell-ops all funnel through it so one log captures
+the full picture).
+
+### Sanctioned dependency cycles
+
+Two `require` patterns in the tables above look like load-order bugs but
+are intentional — don't "fix" them into a straight DAG:
+
+- **`buffer.lua ↔ notebook.lua`.** `buffer.lua` requires `notebook.lua` at
+  module load (it needs the `nb` state shape to do extmark/row
+  bookkeeping). `notebook.lua` requires `buffer.lua` back, but only
+  lazily, inside `try_undo_restore` — undo-restore needs to re-sync
+  extmarks after splicing trashed cells back into `nb.cells`, and that's
+  the one notebook-side operation that can't be expressed without
+  reaching into buffer state. A top-level `require` there would hit the
+  cycle mid-load: whichever module loads second would get back the
+  other's still-under-construction `M` table (Lua caches a module before
+  its file finishes executing), silently missing whatever functions
+  hadn't been defined yet. Deferring the `require` to inside the function
+  body sidesteps it — by call time both modules have long since finished
+  loading.
+- **Leaf modules lazily require the root `init` module for
+  `current_notebook`.** `blink.lua` and `lsp.lua` call
+  `require("neo-marimo").current_notebook()` from inside their functions
+  rather than requiring `neo-marimo` at the top of the file — `init.lua`
+  requires nearly every other module during its own top-level load, so a
+  top-level require of it from a leaf module would be the same class of
+  cycle. Resolving it lazily, at call time, works because by the time a
+  completion request or hover comes in, `init.lua` has long since
+  finished loading.
 
 ## Data flow: from "run cell" to pixels
 

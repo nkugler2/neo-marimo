@@ -329,6 +329,59 @@ t.case("output: image_drawn is only set after a successful draw, so a throwing i
     "the throw still surfaces as a placeholder")
 end)
 
+-- ── render_error (F6.3: previously zero test coverage) ────────────────────
+
+t.case("output: render_error renders each error object in an array payload", function()
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  local cell = make_cell(bufnr, {
+    mimetype = "application/vnd.marimo+error",
+    data = {
+      { type = "NameError", msg = "name 'x' is not defined" },
+      { type = "SyntaxError", msg = "invalid syntax" },
+    },
+  })
+  output.render(bufnr, cell)
+  local joined = table.concat(virt_lines_at(bufnr), "\n")
+  t.match(joined, "✖ NameError: name 'x' is not defined")
+  t.match(joined, "✖ SyntaxError: invalid syntax")
+end)
+
+t.case("output: render_error falls back to \"Error\" when an entry has no type/msg", function()
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  local cell = make_cell(bufnr, {
+    mimetype = "application/vnd.marimo+error",
+    data = { "a bare string entry" },
+  })
+  output.render(bufnr, cell)
+  local joined = table.concat(virt_lines_at(bufnr), "\n")
+  t.match(joined, "✖ Error: a bare string entry")
+end)
+
+t.case("output: render_error stringifies a non-table payload", function()
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  local cell = make_cell(bufnr, {
+    mimetype = "application/vnd.marimo+error",
+    data = "kernel crashed",
+  })
+  output.render(bufnr, cell)
+  local joined = table.concat(virt_lines_at(bufnr), "\n")
+  t.match(joined, "✖ kernel crashed")
+end)
+
+t.case("output: render_error shows a visible fallback line for a non-array table payload (F6.3)", function()
+  -- Before F6.3, a dict-shaped (or empty-array) error payload walked zero
+  -- ipairs iterations and produced no virt_lines at all — a reported error
+  -- that rendered as a silently blank cell. Assert it's visible now.
+  local bufnr = vim.api.nvim_create_buf(false, true)
+  local cell = make_cell(bufnr, {
+    mimetype = "application/vnd.marimo+error",
+    data = { kind = "not-an-array-shape" },
+  })
+  output.render(bufnr, cell)
+  local joined = table.concat(virt_lines_at(bufnr), "\n")
+  t.match(joined, "✖ Error %(unrecognized payload%)")
+end)
+
 t.case("highlights: MarimoOutputText is readable, not a dim/italic Comment link (F2.4)", function()
   -- F2.4: MarimoOutputText used to `link = "Comment"`, which is dim + italic
   -- in most colorschemes and made all plain repr() output unreadable.

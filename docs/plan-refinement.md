@@ -534,45 +534,93 @@ default-path restore is now a two-line value change in config.defaults.)
 
 ---
 
-## Phase F6 — Docs & coverage backfill
+## Phase F6 — Docs & coverage backfill **DONE**
 
-### F6.1 Docs-drift batch (one commit)
+### F6.1 Docs-drift batch (one commit) **DONE**
 
-- [ ] `init.lua:459` "three registries" → four (also in F4.2).
-- [ ] `architecture.md:145` + `README.md:300`: detector `priority` +
-      worked example.
-- [ ] `architecture.md:76`: add the `reload` op (0.23+) to the ws
-      built-ins list; `architecture.md:100-101`: add `log.lua` to the
-      module map.
-- [ ] Kill the "8-layer architecture" phrase — CLAUDE.md and
-      plan-release.md both cite it; `architecture.md` defines six
-      groupings. Either enumerate the layers in architecture.md or fix
-      the references. Also CLAUDE.md "12 spec files" → 11.
-- [ ] README 0.19-only claim vs health.lua `{0.19, 0.23}` — this **is**
-      R4.4; do it there, just noting the confirmation.
-- [ ] One paragraph in architecture.md documenting the sanctioned cycles:
-      the `buffer ↔ notebook` lazy edge (`notebook.lua:225`) and the
-      "leaf modules lazily require the root for `current_notebook`"
-      pattern — intentional, so a contributor doesn't "fix" them into a
-      load-order break.
+- [x] DONE `init.lua:459` "three registries" → four. Already fixed by
+      F4.2 (now at `init.lua:505`, reads "These four registries") — no
+      edit needed, confirmed only.
+- [x] DONE `architecture.md:145` + `README.md:300`: detector `priority` +
+      worked example. Already present and correct from F4.2 (key-first
+      `(type_name, predicate, priority)`, priority optional/default 50,
+      worked example) — no edit needed there. Found and fixed one nearby
+      staleness while verifying: README's "Extending" intro claimed
+      *every* registry "replaces the built-in" with no exception, which
+      contradicts `register_cell_detector`'s actual append-to-chain
+      behavior (`cell.lua:27-40`, confirmed by reading the code) and
+      contradicts architecture.md's own text a few paragraphs later.
+      Fixed the README summary line to state the exception.
+- [x] DONE `architecture.md:76`: added the `reload` op (0.23+) to the ws
+      built-ins list; `architecture.md:100-101`: added `log.lua` to the
+      module map (Support row).
+- [x] DONE Killed the "8-layer architecture" phrase in CLAUDE.md and
+      plan-release.md — architecture.md's module map has six groupings
+      (entry/lifecycle, notebook model, kernel connection, output
+      rendering, LSP, support); reworded both references to point at the
+      module map instead of restating a layer count that will drift
+      again. CLAUDE.md's "12 spec files" also reworded to avoid a
+      brittle literal count (actual count at time of writing: 14 —
+      `config_spec.lua` and `image_sweep_spec.lua` were added since this
+      plan's 2026-07-01 count of 11, and it'll keep moving).
+- [x] DONE Confirmed the README 0.19-only claim (`README.md:48, 359-360`)
+      vs `health.lua`'s `TESTED_MARIMO_SERIES = { ["0.19"] = true,
+      ["0.23"] = true }` — discrepancy still exists exactly as R4.4
+      describes it. Left untouched here; belongs to R4.4 in
+      plan-release.md.
+- [x] DONE Added a "Sanctioned dependency cycles" paragraph to
+      architecture.md documenting the `buffer.lua ↔ notebook.lua` lazy
+      edge (`notebook.lua`'s `try_undo_restore`, line drifted from 225 to
+      ~323 since this plan was written — F1.1's undo-restore rewrite
+      moved it) and the "leaf modules (`blink.lua`, `lsp.lua`) lazily
+      require the root `init` module for `current_notebook`" pattern.
 
-### F6.2 `lsp.lua` pure-function specs
+### F6.2 `lsp.lua` pure-function specs **DONE**
 
 Largest wholly-uncovered module (728 lines); position mapping
 (`notebook_to_shadow_pos` / `shadow_to_notebook_pos`) and the
 return-rewrite are pure and need no server. Every future LSP change
 currently ships blind.
+(Done: new `tests/spec/lsp_spec.lua`, 14 cases. Part 1 is pure math on
+the mapping pair — offsets, before-first/past-last rows, the defensive
+inter-cell-gap branch, negative-col clamp, round-trip loop. Part 2 goes
+through the public `lsp.refresh_shadow(nb)` so the real
+`build_shadow_text`/`transform_returns` machinery is exercised: marker
+lines, `return X` → `_RET = X` rewrite (indented returns untouched),
+marker/separator shadow rows resolve to nil, full notebook↔shadow
+round-trip on a 3-cell notebook. One minimal seam: local
+`shadow_to_notebook_pos` promoted to `M.shadow_to_notebook_pos`,
+mirroring the pattern `notebook_to_shadow_pos` already used; no
+behavior change.)
 
-### F6.3 Remaining coverage gaps from the reviews
+### F6.3 Remaining coverage gaps from the reviews **DONE**
 
-- [ ] `render_error` (`output.lua:103-116`): zero coverage; also give the
-      non-array payload a fallback line instead of silent empty output.
-- [ ] `image.lua` pure helpers (`extract_data_uri`, `extract_inline_svg`,
-      `extract_virtual_file`).
-- [ ] `wrap_spec.lua`: a case documenting the pre-embedded-newline
-      (numpy) behavior, even before/without a fix (see Deferred).
-- [ ] Run-POST test: stub `server.run_cells`, simulate bail-then-rekey,
-      assert the posted `cell_ids` are server IDs (companion to F1.2).
+- [x] DONE `render_error` (`output.lua:103-116`, drifted to ~192-211):
+      4 new cases in `output_spec.lua` (array payload, bare-string
+      entry, non-table payload, non-array table). Code fix included: a
+      dict-shaped/empty table payload made `ipairs` walk zero
+      iterations → silently blank cell; now emits a fallback
+      `✖ Error (unrecognized payload)` line, with rationale comment.
+- [x] DONE `image.lua` pure helpers — already public `M.*` fns, no seam
+      needed; new `tests/spec/image_helpers_spec.lua` covers
+      match/no-match/nil for `extract_data_uri`, `extract_inline_svg`,
+      `extract_virtual_file` (+ `has_embedded_image`).
+- [x] DONE `wrap_spec.lua`: documentation case proving `wrap_virt_line`
+      operates one kernel-split line at a time and never rejoins
+      (numpy `linewidth=75` reprs stay narrow even when the window
+      would fit more) — documents current behavior only, per the
+      Deferred note; no fix.
+- [x] DONE Run-POST test in `ws_dispatch_spec.lua`: drives
+      `actions.run_cell_at_cursor` with stubbed
+      `sync.write_to_file`/`server.is_running`/`server.run_cells`,
+      schedules a bailed `update-cell-ids` (count mismatch +
+      `is_writing`) then a successful positional rekey inside
+      `flush_pending_edits`'s wait window, asserts the POSTed id is the
+      server id, not the stale local one. Reviewer ran it 5× in
+      isolation — not flaky (1500ms wait budget vs 10/50ms defers).
+
+Phase verified: full suite 245 passed / 0 failed; lua-reviewer pass on
+the F6 diff came back clean (all docs claims checked against source).
 
 ---
 
@@ -625,7 +673,7 @@ currently ships blind.
 | F3 | 3.1 | 1–2 sessions | Plan agent design pass first, then implementer | DONE |
 | F4 | 4.1–4.4 | ~1 session | implementer; 4.4 partly docs-writer | DONE |
 | F5 | 5.1–5.4 | ~half session | implementer (5.1 is mechanical) | DONE |
-| F6 | 6.1–6.3 | ~1 session | docs-writer (6.1), implementer (6.2–6.3) | |
+| F6 | 6.1–6.3 | ~1 session | docs-writer (6.1), implementer (6.2–6.3) | DONE |
 
 After F6, resume `plan-release.md` at R0 with a much stronger "what
 exists works flawlessly" baseline — F1/F2 close every reproducible

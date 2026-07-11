@@ -166,6 +166,71 @@ t.case("ws: update-cell-ids does not stamp _last_cell_ids_at when the re-key bai
   t.eq(nb._last_cell_ids_at, 0, "stamp must not advance when the re-key bailed")
 end)
 
+-- F6.3: run-POST companion to F1.2 — end-to-end through
+-- actions.flush_pending_edits/run_cell_at_cursor, not just
+-- rekey_cells_from_server in isolation. Simulate the exact sequence F1.2
+-- fixed: a bailed re-key (count mismatch while sync.is_writing, leaves the
+-- stamp and cell.id untouched) followed by a later successful re-key (stamp
+-- advances, cell.id flips to the server id) — both landing while
+-- flush_pending_edits' vim.wait is still polling. Assert server.run_cells is
+-- eventually invoked with the SERVER id, never the stale pre-rekey local id.
+t.case("actions: run_cell_at_cursor POSTs the server cell id after a bail-then-rekey sequence (F1.2 companion)", function()
+  local server = require("neo-marimo.server")
+  local sync = require("neo-marimo.sync")
+  local actions = require("neo-marimo.actions")
+
+  local nb, bufnr = t.make_notebook({ "a = 1" })
+  local local_id = nb.cells[1].id
+  -- Force flush_pending_edits past its "nothing to save" early return without
+  -- touching the real filesystem — sync.write_to_file is stubbed below.
+  nb.dirty = true
+
+  local orig_write, orig_is_running, orig_run_cells, orig_is_writing =
+    sync.write_to_file, server.is_running, server.run_cells, sync.is_writing
+
+  -- Start inside our own write-suppression window, mirroring the real F1.2
+  -- repro: a re-key racing an in-flight save.
+  local writing = true
+  sync.write_to_file = function(n)
+    n._last_save_at = vim.uv.hrtime() / 1e6
+    return true
+  end
+  server.is_running = function() return true end
+  sync.is_writing = function() return writing end
+
+  -- Bail: server broadcasts a mismatched count (2 ids vs our 1 local cell)
+  -- while still writing — rekey_cells_from_server must bail without
+  -- reconciling (see the dedicated bail-case test above), leaving
+  -- nb._last_cell_ids_at and cell.id untouched.
+  vim.defer_fn(function()
+    ws.dispatch("update-cell-ids", { cell_ids = { "BOGUS1", "BOGUS2" } }, { nb = nb })
+  end, 10)
+
+  -- Successful rekey: the write-suppression window closes and the server
+  -- re-broadcasts with the correct count — reconciles positionally, flips
+  -- cell.id to the server id, and only now stamps _last_cell_ids_at past
+  -- flush_pending_edits' wait threshold.
+  vim.defer_fn(function()
+    writing = false
+    ws.dispatch("update-cell-ids", { cell_ids = { "SERVER1" } }, { nb = nb })
+  end, 50)
+
+  local posted_ids
+  server.run_cells = function(_filepath, cell_ids, _codes, cb)
+    posted_ids = cell_ids
+    cb(true)
+  end
+
+  actions.run_cell_at_cursor(bufnr, nb)
+
+  sync.write_to_file, server.is_running, server.run_cells, sync.is_writing =
+    orig_write, orig_is_running, orig_run_cells, orig_is_writing
+
+  t.ok(posted_ids ~= nil, "run_cells was called")
+  t.eq(posted_ids[1], "SERVER1", "posted cell_ids reflect the reconciled server id")
+  t.ok(posted_ids[1] ~= local_id, "not the stale pre-rekey local id")
+end)
+
 -- F5.4 regression: nb._unknown_cell_ids marks a cell-op's id as "already
 -- warned about" so a burst of ops for the same stale id only triggers one
 -- resync. But once a rekey actually reconciles, those marks describe a

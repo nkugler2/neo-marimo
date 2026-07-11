@@ -80,6 +80,42 @@ t.case("wrap: pathological narrow width still terminates", function()
   end
 end)
 
+-- F6.3 / documents-not-fixes (see docs/plan-refinement.md's Deferred section,
+-- "Numpy/DataFrame width"): numpy's repr embeds its own hard line breaks at
+-- its default linewidth=75 BEFORE the payload ever reaches this module —
+-- render_text_plain splits the raw string into one virt_line per embedded
+-- "\n", and wrap_virt_line only ever operates on one already-split line at a
+-- time (it has no visibility into a neighbouring line to rejoin with). So two
+-- lines the kernel broke apart stay apart forever, even in a window wide
+-- enough to hold both concatenated on one row — this is NOT a wrap_virt_line
+-- bug, it's the documented, working-as-designed limit of a per-line wrapper.
+-- This spec pins the current behavior so a future change doesn't
+-- accidentally "fix" it into unpredictable cross-line rejoining; an actual
+-- fix (if ever done) would be upstream — pushing a window-width
+-- np.set_printoptions(linewidth=...) hint into the kernel — and is out of
+-- scope here.
+t.case("wrap: kernel-pre-split lines (numpy linewidth-style) never rejoin, even when width allows it", function()
+  -- Two lines shaped like numpy's default repr wrap (~75 display cells each,
+  -- already broken apart by the kernel before this module ever sees them).
+  local line1 = { { "  " .. string.rep("1", 73), "MarimoOutputText" } }
+  local line2 = { { "  " .. string.rep("2", 73), "MarimoOutputText" } }
+
+  -- Wide enough to hold BOTH source lines concatenated on one row (75 + 75 =
+  -- 150 < 200) — if wrap_virt_line could see and rejoin pre-split lines,
+  -- this width is exactly what would let it collapse them into one.
+  local wrapped1 = wrap(line1, 200)
+  local wrapped2 = wrap(line2, 200)
+
+  t.eq(#wrapped1, 1, "line 1 passes through unchanged (fits under width on its own)")
+  t.eq(#wrapped2, 1, "line 2 passes through unchanged (fits under width on its own)")
+  -- output.render's loop calls wrap_virt_line once per already-split
+  -- virt_line, exactly mirrored here by two independent calls — there is no
+  -- code path that looks across them, so the result can only ever be 2
+  -- rendered lines, never 1.
+  t.eq(#wrapped1 + #wrapped2, 2,
+    "two kernel-embedded lines render as two lines, never rejoined into one")
+end)
+
 -- Regression: a huge single chunk (a base64 image blob that missed the image
 -- path) must NOT drive the O(n²) wrap into a multi-minute freeze. It's
 -- truncated up front so the wrap stays fast and bounded.

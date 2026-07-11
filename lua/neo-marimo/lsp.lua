@@ -422,7 +422,10 @@ local notebook_to_shadow_pos = M.notebook_to_shadow_pos
 -- Inverse mapping: shadow (row, col) → notebook (row, col). Used to
 -- translate goto-definition results so the jump lands inside the
 -- notebook buffer rather than the shadow.
-local function shadow_to_notebook_pos(nb, entry, shadow_row, shadow_col)
+-- Exposed on M (mirroring notebook_to_shadow_pos above) purely as a test
+-- seam — lsp_spec.lua exercises the mapping pair directly without a live
+-- LSP server.
+function M.shadow_to_notebook_pos(nb, entry, shadow_row, shadow_col)
   if not entry.cell_offsets then return nil end
   for i, cell in ipairs(nb.cells) do
     local off = entry.cell_offsets[i]
@@ -439,6 +442,7 @@ local function shadow_to_notebook_pos(nb, entry, shadow_row, shadow_col)
   end
   return nil
 end
+local shadow_to_notebook_pos = M.shadow_to_notebook_pos
 
 -- Send an LSP request from the notebook buffer by routing it through the
 -- shadow buffer. `method` is a textDocument/* request name. `extra_params`

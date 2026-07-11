@@ -320,7 +320,10 @@ require("neo-marimo").register_cell_detector("pytest", function(code) … end, 1
 ```
 
 Each registry is keyed by name (mimetype, widget element, WS op, or
-cell-type name); registering an existing key replaces the built-in.
+cell-type name); registering an existing key replaces the built-in, except
+`register_cell_detector`, which appends to the detector chain instead (so
+you can layer a narrower detector in front of or behind the built-ins by
+`priority` — see docs/architecture.md for the worked example).
 `register_X(key, nil)` deregisters that key instead — the underlying
 registry tables aren't exposed on the module, so these four functions are
 the only supported write path.

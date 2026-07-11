@@ -198,6 +198,15 @@ local function render_error(data)
       local msg = (type(err) == "table" and err.msg) or tostring(err)
       table.insert(lines, { { "  ✖ " .. etype .. ": " .. msg, "MarimoOutputError" } })
     end
+    -- plan-refinement F6.3: a table payload that isn't a 1-based array (a
+    -- dict-shaped error, or an empty array) walks zero ipairs iterations —
+    -- `lines` stayed empty and this fell through to a silently blank cell,
+    -- the one shape where a reported error produced no visible sign
+    -- anything went wrong. Fall back to a generic line so an error output
+    -- is never invisible, even when we can't parse its exact shape.
+    if #lines == 0 then
+      table.insert(lines, { { "  ✖ Error (unrecognized payload)", "MarimoOutputError" } })
+    end
   else
     table.insert(lines, { { "  ✖ " .. tostring(data), "MarimoOutputError" } })
   end
