@@ -33,6 +33,9 @@ function M.parse_file(filepath, python_path)
   if err then
     error("neo-marimo: failed to parse bridge output: " .. err)
   end
+  if data == nil then
+    error("neo-marimo: bridge returned empty output")
+  end
 
   return data
 end
@@ -77,6 +80,9 @@ function M.check(python_path)
   local data, err = utils.json_decode(result.stdout)
   if err then
     return { ok = false, error = "could not parse bridge output: " .. err }
+  end
+  if data == nil then
+    return { ok = false, error = "bridge returned empty output" }
   end
 
   return data

@@ -1,3 +1,9 @@
+---
+id: CLAUDE
+aliases: []
+tags: []
+---
+
 # CLAUDE.md — neo-marimo
 
 Orientation for AI assistants working in this repo. Keep it brief; the real
@@ -54,7 +60,8 @@ Requires nvim 0.11+ and `curl` on PATH. Single-developer, pre-release.
 
 ## AI agent workflow (maintainer's local setup)
 
-The main session runs **Fable 5 as orchestrator**; heavy lifting is delegated to
+The main session runs **Fable 5 OR Opus as orchestrator depending on what is
+selected**; heavy lifting is delegated to
 **Sonnet subagents** defined in `.claude/agents/` (local, gitignored):
 
 - `implementer` — one scoped Lua/Python change → runs `make test` → reports.

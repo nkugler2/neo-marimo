@@ -149,10 +149,16 @@ function M.delete_cell_at_cursor(bufnr, nb)
     -- so a "✓ ran" indicator anchored at the deleted cell's end_row
     -- would migrate onto the previous row when set_lines collapses the
     -- range, stacking on top of the previous cell's indicator. Clear it
-    -- first.
-    vim.api.nvim_buf_clear_namespace(
-      bufnr, highlights.ns_output, cell.start_row, cell.end_row + 1
-    )
+    -- first — by id, not a [start_row, end_row + 1) range: the output
+    -- mark is right_gravity = true (see output.lua's M.render), so a
+    -- gcc-style rewrite of the cell's last line can have it riding on
+    -- end_row + 1 right now, outside that range. Since `cell` is about to
+    -- be discarded entirely, a missed mark here would never get healed by
+    -- anything — a permanently orphaned extmark, not just a transient one.
+    if cell._output_mark_id then
+      pcall(vim.api.nvim_buf_del_extmark, bufnr, highlights.ns_output, cell._output_mark_id)
+      cell._output_mark_id = nil
+    end
     -- Widget value overrides are NOT cleared here but on undo-trash expiry:
     -- if the user undoes this delete within notebook.UNDO_TRASH_TTL_MS, the
     -- cell comes back with its cached output HTML, and only the lingering

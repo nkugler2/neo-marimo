@@ -519,19 +519,25 @@ t.case("editing: jump_to_cell scrolls to a cell beyond the viewport (plan-refine
       winline, win_height))
 end)
 
-t.case("editing: output mark renders before (inside) the border mark after an unrelated edit (F2.1)", function()
-  -- F2.1: ns_border (bottom border) and ns_output (status/output) both
-  -- anchor at the same row (cell.end_row). Verified empirically (cross-
-  -- checked against actual rendered output via :TOhtml, and against
-  -- nvim_buf_get_extmarks with ns_id = -1 — which returns same-position
-  -- marks from every namespace in their actual render order): at a shared
-  -- (row, col), a right_gravity = false mark always sorts/renders before a
-  -- right_gravity = true one, *regardless* of which was created or
-  -- recreated more recently, and regardless of `priority`. output.lua sets
-  -- right_gravity = false on the output mark, so it should deterministically
-  -- render before (i.e. inside the cell, above) ns_border's bottom mark
-  -- (right_gravity defaults to true) — that ordering is not supposed to be
-  -- an accident of creation timing.
+t.case("editing: output mark renders after (below) the border mark after an unrelated edit (F2.1, inverted)", function()
+  -- F2.1 originally verified: ns_border (bottom border) and ns_output
+  -- (status/output) both anchor at the same row (cell.end_row), and at a
+  -- shared (row, col) a right_gravity = false mark always sorts/renders
+  -- before a right_gravity = true one, *regardless* of which was created or
+  -- recreated more recently, and regardless of `priority` (cross-checked
+  -- against actual rendered output via :TOhtml, and against
+  -- nvim_buf_get_extmarks with ns_id = -1, which returns same-position
+  -- marks from every namespace in their actual render order).
+  --
+  -- The original F2.1 fix set right_gravity = false on the output mark so
+  -- it rendered before (inside the cell, above) the border's bottom mark.
+  -- That assignment has since been inverted (plan-refinement-pass): output
+  -- now needs to render BELOW the cell's box, not inside it, so cell
+  -- borders read as a clean box around the code and output trails after.
+  -- ns_border's bottom mark is now right_gravity = false and ns_output is
+  -- right_gravity = true, so the border deterministically renders first
+  -- and the output renders after (below) it. The underlying gravity rule
+  -- is unchanged; only which mark is assigned which gravity flipped.
   --
   -- This test isn't primarily probing that gravity rule (see output_spec.lua
   -- for the pinning behavior) — it's checking that refresh_after_mutation
@@ -584,10 +590,10 @@ t.case("editing: output mark renders before (inside) the border mark after an un
   -- nb._redraw_outputs is nil and refresh_after_mutation takes the direct
   -- fallback render loop instead of the debounced one — see buffer.lua.
   -- Either path must leave cell 1's output mark present and still ordered
-  -- ahead of its border, i.e. it must not have been dropped or left stale
-  -- by the unrelated edit to cell 2.
-  t.eq(order_at(nb.cells[1].end_row), "output,border",
-    "output still renders before (inside) the border at their shared anchor row")
+  -- after its border, i.e. it must not have been dropped or left stale by
+  -- the unrelated edit to cell 2.
+  t.eq(order_at(nb.cells[1].end_row), "border,output",
+    "output still renders after (below) the border at their shared anchor row")
   t.assert_consistent(nb, bufnr)
 end)
 

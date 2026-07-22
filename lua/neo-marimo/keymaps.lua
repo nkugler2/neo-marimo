@@ -154,8 +154,17 @@ function M.setup(bufnr, nb)
         output.render(bufnr, cell, nb.filepath)
       else
         cell._output_hidden = true
-        vim.api.nvim_buf_clear_namespace(bufnr, require("neo-marimo.highlights").ns_output,
-          cell.start_row, cell.end_row + 1)
+        -- Delete by id, not a [start_row, end_row + 1) range clear: the
+        -- output mark is right_gravity = true (see output.lua's M.render),
+        -- so a gcc-style rewrite of the cell's last line can have it riding
+        -- on end_row + 1 at this exact moment, outside that range — the
+        -- range clear would miss it and leave it visible despite
+        -- _output_hidden.
+        local hl = require("neo-marimo.highlights")
+        if cell._output_mark_id then
+          pcall(vim.api.nvim_buf_del_extmark, bufnr, hl.ns_output, cell._output_mark_id)
+          cell._output_mark_id = nil
+        end
       end
     end, o("Marimo: toggle cell output"))
   end

@@ -28,6 +28,24 @@ plan doc (`docs/plan-release.md` for the current release push,
 
 <!-- New thoughts go here. AI: triage these into Open, then clear this list. -->
 
+I should be able to hit a keybind and see all widgets in the file. Often there
+are only 2-5 widgets, so it is ok to see all of them. If there are a lot of
+widgets, we can solve that problem later.
+
+One example of an issue that I have is that I have a graph of random walks
+that I want to be able to edit widgets and see the graph change. However,
+it is hard to get the graph to actually be perfectly in the view. I often need
+to add a cell below the outputted graph just to see the whole graph. And it is
+janky with the number of cells and how far they are to see the graph in frame.
+Maybe we can add a keybind to center on a graph or specific output?
+
+Both ideas above have me thinking of something. The whole point of Neovim is to
+use keyboard shortcuts, and the whole point of this plugin is to live by that.
+So I want to look over what I have in this repo, and see if the way that I
+design this plugin to be navigated lives by that keybind ethos. Does it make
+sense to view, edit, and interact with this notebook purely with keyboard
+shortcuts?
+
 ---
 
 ## Open
@@ -40,6 +58,31 @@ plan doc (`docs/plan-release.md` for the current release push,
   investigate if it happens again on the current code.
 - **"External editing" warning** — fires at unclear times; need to note the
   exact circumstances next time it appears before anything can be fixed.
+- **Image placement doesn't reposition on a `gcc`-style edit of a cell's last
+  line** — repro: a cell whose last line is an image-producing expression
+  (e.g. `fig`); comment that line out. The rendered graph correctly
+  disappears, but the image's on-screen glyph briefly shows up shifted into
+  the next (empty) cell instead of just vanishing with it. Suspected cause:
+  unlike the `ns_output`/`ns_border` extmarks (gravity-fixed in
+  plan-refinement's F2.1 inversion), `image.lua` hands image.nvim/snacks a
+  raw row number (`image.lua` `render_path`, `y = row + 1`) with no gravity
+  control of our own, and `render_path`'s same-path fast path
+  (`if existing and existing.path == path then return {} end`,
+  `image.lua:311-315`) skips repositioning entirely when the cached image
+  content hasn't changed yet — which is exactly the window between a local
+  edit and marimo's reactive rerun confirming new output. Needs a repro with
+  `:MarimoWsDebug` logging on to confirm before fixing.
+- **Image never re-renders after being cleared, until server restart** — same
+  repro as above, one step further: uncomment the `fig` line and rerun (cell
+  or whole notebook) — the graph never comes back, and the run
+  status/icon next to `fig` doesn't reappear either, even though the fix
+  should just be a normal re-render. Only a full `:MarimoRestart` recovers
+  it. Unclear yet whether this is neo-marimo losing track of the image
+  placement key (e.g. a re-key collision in `ws_handlers.lua`) or the marimo
+  kernel itself getting wedged by whatever gets synced while the cell body is
+  comment-only. Needs a `:MarimoWsDebug` log across the full repro
+  (comment → uncomment → rerun → still broken) before attempting a fix —
+  don't guess-patch `image.lua` without it.
 
 ### Features / ideas (post-release — pre-release rule is "no new features")
 

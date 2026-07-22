@@ -147,11 +147,66 @@ t.case("output: dataframe output points at the full panel", function()
   t.match(joined, "195 more rows")
 end)
 
-t.case("output: ns_output mark stays pinned to end_row across a gcc-style last-line rewrite", function()
-  -- F2.1 regression: right_gravity defaulted to true, so replacing the
-  -- cell's last line (delete+insert of that exact line — what a comment
-  -- toggle like gcc does) rode the mark onto the next row, i.e. past this
-  -- cell's boundary. right_gravity = false must keep it pinned to end_row.
+t.case("output: ns_border bottom mark stays pinned to end_row across a gcc-style last-line rewrite", function()
+  -- This pinning contract moved here from ns_output after the F2.1 gravity
+  -- inversion (plan-refinement-pass): output now needs to render BELOW the
+  -- cell's box rather than inside it, which means the border's bottom mark
+  -- is the one that now carries right_gravity = false (output carries
+  -- right_gravity = true instead — see the companion case below, and the
+  -- comment above output.lua's M.render extmark). Without right_gravity =
+  -- false, replacing the cell's last line (delete+insert of that exact
+  -- line — what a comment toggle like gcc does) would ride the border's
+  -- bottom mark onto the next row, i.e. past this cell's boundary.
+  local notebook = require("neo-marimo.notebook")
+  local buffer = require("neo-marimo.buffer")
+  -- Build through the real create path (render_cell_borders is a local
+  -- function in buffer.lua, only reachable via M.create / M.render_all_borders).
+  local nb = notebook.new("/tmp/neo-marimo-test-border-pin.py", {
+    cells = { { name = "_", code = "x = 1\ny = 2\nz = 3" } },
+  })
+  local bufnr = buffer.create(nb, nil)
+  local cell = nb.cells[1]
+
+  local function bottom_border_marks()
+    local marks = vim.api.nvim_buf_get_extmarks(
+      bufnr, hl.ns_border, 0, -1, { details = true })
+    local out = {}
+    for _, m in ipairs(marks) do
+      if m[4].virt_lines_above == false then table.insert(out, m) end
+    end
+    return out
+  end
+
+  local marks = bottom_border_marks()
+  t.eq(#marks, 1, "one bottom border mark before the edit")
+  t.eq(marks[1][2], cell.end_row, "mark starts at end_row")
+
+  -- gcc-style rewrite: replace the exact last line (row 2, "z = 3") with
+  -- new content — a delete + insert of that one line, buffer length
+  -- unchanged.
+  vim.api.nvim_buf_set_lines(bufnr, cell.end_row, cell.end_row + 1, false,
+    { "# z = 3" })
+
+  marks = bottom_border_marks()
+  t.eq(#marks, 1, "still one bottom border mark after the edit")
+  t.eq(marks[1][2], cell.end_row,
+    "mark stays pinned to end_row instead of riding onto the next row")
+end)
+
+t.case("output: ns_output mark may ride a gcc-style last-line rewrite, but re-render heals it back to end_row", function()
+  -- Companion to the ns_border case above. After the F2.1 gravity
+  -- inversion, ns_output carries right_gravity = true (border carries
+  -- right_gravity = false), so it now inherits the failure mode F2.1
+  -- originally fixed for output: a `gcc`-style delete+insert of the cell's
+  -- exact last line transiently rides this mark onto the next row.
+  --
+  -- That's an accepted trade-off, not a regression: refresh_after_mutation
+  -- re-renders output on every mutation (debounced ~300ms in production,
+  -- see buffer.lua) which re-creates this extmark from scratch at the
+  -- live cell.end_row — the same self-heal mechanism borders always relied
+  -- on for structural edits. This test verifies both halves: the ride,
+  -- and the heal via a direct output.render call standing in for that
+  -- redraw.
   local bufnr = vim.api.nvim_create_buf(false, true)
   local cell = make_cell(bufnr, { mimetype = "text/plain", data = "hello" })
   output.render(bufnr, cell)
@@ -170,8 +225,169 @@ t.case("output: ns_output mark stays pinned to end_row across a gcc-style last-l
   marks = vim.api.nvim_buf_get_extmarks(
     bufnr, hl.ns_output, 0, -1, { details = true })
   t.eq(#marks, 1, "still one output mark after the edit")
-  t.eq(marks[1][2], cell.end_row,
-    "mark stays pinned to end_row instead of riding onto the next row")
+  t.eq(marks[1][2], cell.end_row + 1,
+    "right_gravity = true rides the mark onto the next row (accepted trade-off)")
+
+  -- Heal: a re-render (standing in for refresh_after_mutation's debounced
+  -- redraw) re-creates the extmark from scratch at the live end_row.
+  output.render(bufnr, cell)
+  marks = vim.api.nvim_buf_get_extmarks(
+    bufnr, hl.ns_output, 0, -1, { details = true })
+  t.eq(#marks, 1, "still one output mark after the heal render")
+  t.eq(marks[1][2], cell.end_row, "re-render re-anchors output back at end_row")
+end)
+
+t.case("output: border renders before (above) output at their shared end_row anchor, no edit involved", function()
+  -- Direct ordering check (no edit involved), companion to the two gcc-
+  -- rewrite cases above and to editing_spec.lua's "renders after (below)"
+  -- case. ns_border's bottom mark (right_gravity = false) and ns_output's
+  -- mark (right_gravity = true) share the exact same anchor (cell.end_row,
+  -- 0). Verified empirically (nvim_buf_get_extmarks with ns_id = -1
+  -- returns same-position marks from every namespace in their actual
+  -- render order, cross-checked against :TOhtml): at a shared (row, col) a
+  -- right_gravity = false mark always sorts/renders before a right_gravity
+  -- = true one, regardless of creation order or priority. So the border's
+  -- bottom line must render first, putting output after it — below the
+  -- cell's box.
+  local notebook = require("neo-marimo.notebook")
+  local buffer = require("neo-marimo.buffer")
+  local nb = notebook.new("/tmp/neo-marimo-test-border-output-order.py", {
+    cells = { { name = "_", code = "a = 1\nx = 9" } },
+  })
+  local bufnr = buffer.create(nb, nil)
+  local cell = nb.cells[1]
+
+  cell.status = "idle"
+  cell._has_run = true
+  cell.output = { mimetype = "text/plain", data = "hello" }
+  output.render(bufnr, cell)
+
+  local function order_at(row)
+    local marks = vim.api.nvim_buf_get_extmarks(bufnr, -1, 0, -1, { details = true })
+    local out = {}
+    for _, m in ipairs(marks) do
+      if m[2] == row and m[4].virt_lines_above == false then
+        if m[4].ns_id == hl.ns_border then
+          table.insert(out, "border")
+        elseif m[4].ns_id == hl.ns_output then
+          table.insert(out, "output")
+        end
+      end
+    end
+    return table.concat(out, ",")
+  end
+
+  t.eq(order_at(cell.end_row), "border,output",
+    "border's bottom line renders before output at their shared anchor row")
+end)
+
+-- Build a notebook via the real make_notebook path but with nb._redraw_outputs
+-- stubbed to a no-op, mirroring editing_spec.lua's debounce-wiring test.
+-- This matters for the two regressions below: make_notebook's plain
+-- attach_change_tracking has no nb._redraw_outputs, so refresh_after_mutation
+-- takes the *synchronous* test-only fallback (output.render_all) and would
+-- heal a ridden output mark immediately on flush — before the keymap/action
+-- code under test ever runs its own clear, masking the exact race being
+-- regression-tested. Production's nb._redraw_outputs is a *debounced*
+-- closure (~300ms, see init.lua/buffer.lua), so a flush right after an edit
+-- reliably resolves cell.start_row/end_row and repaints borders but does NOT
+-- yet re-render output. A no-op stand-in reproduces that timing precisely:
+-- flush resolves offsets, output stays stale/ridden.
+local function make_notebook_no_output_redraw(codes)
+  local nb, bufnr = t.make_notebook(codes)
+  nb._redraw_outputs = function() end
+  return nb, bufnr
+end
+
+t.case("output: hiding output (toggle_output keymap) clears a ridden ns_output mark, not just its expected range", function()
+  -- Regression found in review: keymaps.lua's toggle_output "hide" branch
+  -- used to clear ns_output with a [start_row, end_row + 1) range clear —
+  -- the same pattern M.render itself used to use before the fix above.
+  -- Since output is right_gravity = true (F2.1 inversion), a gcc-style
+  -- rewrite of the cell's last line can ride the mark onto end_row + 1,
+  -- outside that range. If the user hides output in the window between
+  -- such an edit and the debounced redraw healing it (~300ms in
+  -- production), the range clear would miss the ridden mark and it would
+  -- stay visible despite cell._output_hidden = true.
+  local keymaps = require("neo-marimo.keymaps")
+  local nb, bufnr = make_notebook_no_output_redraw({ "a = 1\nx = 9", "b = 2" })
+  local cell = nb.cells[1]
+
+  cell.status = "idle"
+  cell._has_run = true
+  cell.output = { mimetype = "text/plain", data = "hello" }
+  output.render(bufnr, cell, nb.filepath)
+  t.eq(#vim.api.nvim_buf_get_extmarks(bufnr, hl.ns_output, 0, -1, {}), 1,
+    "one output mark before the edit")
+
+  -- gcc-style rewrite of cell 1's exact last line (its end_row). Rides the
+  -- right_gravity = true output mark onto end_row + 1 (cell 2's start_row).
+  vim.api.nvim_buf_set_lines(bufnr, cell.end_row, cell.end_row + 1, false,
+    { "# x = 9" })
+
+  -- Flush now, exactly like toggle_output's own keymap body does before
+  -- reading cell offsets. With nb._redraw_outputs stubbed to a no-op, this
+  -- resolves cell.start_row/end_row and repaints borders but does not heal
+  -- the ridden output mark — same as production between the edit and the
+  -- debounce firing.
+  nb._flush_pending()
+  t.eq(vim.api.nvim_buf_get_extmarks(bufnr, hl.ns_output, 0, -1, {})[1][2],
+    cell.end_row + 1, "sanity check: the mark is still ridden ahead of end_row after flush")
+
+  keymaps.setup(bufnr, nb)
+  vim.api.nvim_win_set_cursor(0, { cell.start_row + 1, 0 })
+
+  local toggle_fn
+  for _, m in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "n")) do
+    if m.desc == "Marimo: toggle cell output" then toggle_fn = m.callback end
+  end
+  t.ok(toggle_fn, "toggle_output keymap registered")
+  toggle_fn()
+
+  t.eq(cell._output_hidden, true, "cell marked hidden")
+  t.eq(#vim.api.nvim_buf_get_extmarks(bufnr, hl.ns_output, 0, -1, {}), 0,
+    "no ns_output mark survives anywhere in the buffer, including where it rode to")
+end)
+
+t.case("output: deleting a cell clears a ridden ns_output mark instead of orphaning it", function()
+  -- Regression found in review: actions.delete_cell_at_cursor's pre-delete
+  -- ns_output clear used the same [start_row, end_row + 1) range pattern.
+  -- Since output is right_gravity = true, a gcc-style rewrite of the
+  -- cell's last line can ride the mark onto end_row + 1, outside that
+  -- range. Unlike the hide case above, a miss here is permanent: the cell
+  -- object is discarded by the delete, so nothing will ever re-render (and
+  -- thus heal) that mark again — it's orphaned in the buffer forever.
+  local actions = require("neo-marimo.actions")
+  local nb, bufnr = make_notebook_no_output_redraw({ "a = 1\nx = 9", "b = 2" })
+  local cell = nb.cells[1]
+
+  cell.status = "idle"
+  cell._has_run = true
+  cell.output = { mimetype = "text/plain", data = "hello" }
+  output.render(bufnr, cell, nb.filepath)
+  t.eq(#vim.api.nvim_buf_get_extmarks(bufnr, hl.ns_output, 0, -1, {}), 1,
+    "one output mark before the edit")
+
+  -- gcc-style rewrite of cell 1's exact last line (its end_row) — rides
+  -- the output mark onto end_row + 1 (cell 2's start_row).
+  vim.api.nvim_buf_set_lines(bufnr, cell.end_row, cell.end_row + 1, false,
+    { "# x = 9" })
+
+  -- Flush now (delete_cell_at_cursor also does this internally, before
+  -- reading cell offsets) — with nb._redraw_outputs stubbed, this resolves
+  -- offsets/borders without healing the ridden output mark, matching
+  -- production's debounce window.
+  nb._flush_pending()
+  t.eq(vim.api.nvim_buf_get_extmarks(bufnr, hl.ns_output, 0, -1, {})[1][2],
+    cell.end_row + 1, "sanity check: the mark is still ridden ahead of end_row after flush")
+
+  vim.api.nvim_win_set_cursor(0, { cell.start_row + 1, 0 })
+  actions.delete_cell_at_cursor(bufnr, nb)
+
+  t.eq(#nb.cells, 1, "cell 1 deleted")
+  t.eq(#vim.api.nvim_buf_get_extmarks(bufnr, hl.ns_output, 0, -1, {}), 0,
+    "no orphaned ns_output mark left anywhere in the buffer after delete")
+  t.assert_consistent(nb, bufnr)
 end)
 
 t.case("output: full notebook.py cell-4 payload renders every tab", function()

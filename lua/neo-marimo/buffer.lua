@@ -462,10 +462,24 @@ local function render_cell_borders(bufnr, cell, width)
   end
 
   -- Bottom border: virtual line AFTER end_row
+  -- right_gravity = false (not the default true), for two reasons:
+  --   1. ns_output's mark shares this exact anchor (cell.end_row, 0) with
+  --      right_gravity = true (plan-refinement F2.1 inversion — see the
+  --      comment above output.lua's M.render extmark). At the same anchor
+  --      a right_gravity = false mark always sorts/renders before a
+  --      right_gravity = true one, regardless of creation order or
+  --      priority — verified empirically via nvim_buf_get_extmarks with
+  --      ns_id = -1, cross-checked against :TOhtml. That's what puts the
+  --      border's bottom line before (above) the output instead of the
+  --      output riding inside the box.
+  --   2. It also pins the border across a `gcc`-style delete+insert of the
+  --      cell's exact last line, instead of the mark riding onto the next
+  --      row until render_all_borders next repaints.
   if #bot_chunks > 0 then
     cell.bot_mark_id = vim.api.nvim_buf_set_extmark(bufnr, hl.ns_border, cell.end_row, 0, {
       virt_lines = { bot_chunks },
       virt_lines_above = false,
+      right_gravity = false,
       priority = 100,
     })
   end
@@ -617,18 +631,23 @@ function M.refresh_after_mutation(bufnr, nb)
 
   -- Re-render outputs after borders on every mutation, not just resize.
   -- render_all_borders above just recreated every border mark at
-  -- cell.end_row; the output mark (also at cell.end_row, see output.lua)
-  -- needs re-rendering too, for a reason that's about *content*, not
-  -- stacking order: with right_gravity = false, the output mark's render
-  -- position relative to the border's bottom mark is already deterministic
-  -- (verified: a right_gravity = false mark always sorts/renders before a
-  -- right_gravity = true one at the same anchor, regardless of creation
-  -- order — priority doesn't enter into it either). What isn't automatic
-  -- is the *content*: an edit anywhere in the notebook can shift
-  -- cell.end_row for cells below it, and the output virt_lines themselves
-  -- may need rewrapping (window width) or just haven't been touched since
-  -- the buffer changed underneath them. Re-rendering here keeps the output
-  -- pinned to the live end_row and its content current, not stale.
+  -- cell.end_row (right_gravity = false); the output mark (also at
+  -- cell.end_row, see output.lua, right_gravity = true) needs re-rendering
+  -- too, for two reasons now, not one:
+  --   1. Content: an edit anywhere in the notebook can shift cell.end_row
+  --      for cells below it, and the output virt_lines themselves may need
+  --      rewrapping (window width) or just haven't been touched since the
+  --      buffer changed underneath them. Re-rendering here keeps the
+  --      output pinned to the live end_row and its content current, not
+  --      stale.
+  --   2. Healing: since the F2.1 inversion, the output mark is
+  --      right_gravity = true, so a `gcc`-style delete+insert of a cell's
+  --      exact last line can transiently ride it onto the next row (the
+  --      border mark, right_gravity = false, doesn't have this problem —
+  --      see render_cell_borders). This redraw re-creates the output
+  --      extmark from scratch at the live end_row, so it's what heals that
+  --      ride, the same way it always healed borders after structural
+  --      edits.
   -- Goes through the same debounced closure init.lua wires up for
   -- WinResized so a burst of keystrokes doesn't re-run the (comparatively
   -- expensive) output tree walk on every single mutation.

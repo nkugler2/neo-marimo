@@ -675,11 +675,26 @@ function M.render(bufnr, cell, filepath)
 
   local saved_toplines = capture_toplines(bufnr)
 
-  -- Clear previous output marks for this cell's row range
-  vim.api.nvim_buf_clear_namespace(
-    bufnr, hl.ns_output,
-    cell.start_row, cell.end_row + 1
-  )
+  -- Clear this cell's own previous output mark by id, mirroring
+  -- render_cell_borders' top_mark_id/bot_mark_id pattern in buffer.lua.
+  --
+  -- This used to be a row-range nvim_buf_clear_namespace(start_row,
+  -- end_row + 1), which relied on the old mark never straying outside
+  -- [start_row, end_row]. That held while the output mark was
+  -- right_gravity = false (pinned to end_row). Since the F2.1 gravity
+  -- inversion (output is now right_gravity = true, see the extmark below),
+  -- a `gcc`-style rewrite of the cell's exact last line can transiently
+  -- ride the old mark onto end_row + 1 — outside that range — so the
+  -- range-based clear would silently leave the stale mark behind instead
+  -- of replacing it. Deleting by id is exact regardless of where the mark
+  -- has drifted to, and (unlike widening the range) can't accidentally
+  -- sweep up a neighboring cell's already-correct output mark when
+  -- M.render is called for a single cell in isolation (the common case —
+  -- see actions.lua, keymaps.lua, ws_handlers.lua).
+  if cell._output_mark_id then
+    pcall(vim.api.nvim_buf_del_extmark, bufnr, hl.ns_output, cell._output_mark_id)
+    cell._output_mark_id = nil
+  end
 
   -- Prime the per-cell render context so image/widget renderers can
   -- attach (image.nvim placements, widget registry keys) against the
@@ -799,26 +814,38 @@ function M.render(bufnr, cell, filepath)
   end
 
   -- Attach at end_row so the output moves with the cell as it grows.
-  -- right_gravity = false (not the default true), for two independently
-  -- verified reasons (plan-refinement F2.1):
-  --   1. With the default right_gravity = true, a `gcc`-style delete+insert
-  --      of the cell's exact last line rides the mark onto the next cell's
-  --      start row, so the output renders after the next cell's top line
-  --      instead of after this cell.
-  --   2. ns_border's bottom-border mark shares this exact anchor
-  --      (cell.end_row, 0) and defaults to right_gravity = true. Verified
-  --      empirically (nvim_buf_get_extmarks with ns_id = -1, cross-checked
-  --      against actual screen output via :TOhtml): at the *same* (row,
-  --      col), a right_gravity = false mark always sorts — and renders —
-  --      before a right_gravity = true one, regardless of which was
-  --      created or recreated more recently. So this isn't just a "pins
-  --      the gcc case" fix — it's what makes the output mark deterministically
-  --      render before (inside the cell, above) the border's bottom line
-  --      instead of flip-flopping with it.
-  vim.api.nvim_buf_set_extmark(bufnr, hl.ns_output, cell.end_row, 0, {
+  --
+  -- right_gravity = true (inverted from the original F2.1 fix). The
+  -- original plan-refinement finding still holds and is worth keeping:
+  -- ns_border's bottom-border mark shares this exact anchor (cell.end_row,
+  -- 0), and — verified empirically via nvim_buf_get_extmarks with
+  -- ns_id = -1, cross-checked against actual screen output via :TOhtml —
+  -- at the *same* (row, col) a right_gravity = false mark always sorts
+  -- and renders before a right_gravity = true one, regardless of which was
+  -- created or recreated more recently, and regardless of priority.
+  --
+  -- F2.1 used that rule to put output (false) before the border (true),
+  -- i.e. output rendered *inside* the cell's box, above the bottom line.
+  -- We now want the opposite visual outcome — output BELOW the cell's box
+  -- — so the assignment is inverted: the border mark is right_gravity =
+  -- false and this output mark is right_gravity = true, making the border
+  -- deterministically render first and the output sit after it.
+  --
+  -- Trade-off accepted: with right_gravity = true, a `gcc`-style
+  -- delete+insert of the cell's exact last line transiently rides this
+  -- mark onto the next row (the same failure mode F2.1 originally fixed
+  -- for output — it's now the border's problem to avoid, and this mark's
+  -- problem to tolerate). That's healed by refresh_after_mutation's
+  -- debounced output redraw (~300ms), which re-renders this extmark from
+  -- scratch at the *live* cell.end_row — the same self-heal mechanism
+  -- borders always relied on for structural edits. The by-id clear at the
+  -- top of this function (cell._output_mark_id) is what makes that heal
+  -- actually work: it finds and deletes the old, ridden mark wherever it
+  -- drifted to, instead of a row-range clear that would miss it.
+  cell._output_mark_id = vim.api.nvim_buf_set_extmark(bufnr, hl.ns_output, cell.end_row, 0, {
     virt_lines = virt_lines,
     virt_lines_above = false,
-    right_gravity = false,
+    right_gravity = true,
     priority = 90,
   })
 

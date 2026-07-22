@@ -115,6 +115,10 @@ function M.new(data, index)
     -- extmark IDs, populated during rendering
     top_mark_id = nil,
     bot_mark_id = nil,
+    -- ns_output mark id, populated by output.lua's M.render — lets it
+    -- delete the exact previous mark instead of a row-range clear (see
+    -- M.render's comment for why that matters after the F2.1 inversion).
+    _output_mark_id = nil,
     -- Range extmark in ns_cell_anchor spanning [start_row, end_row]; set by
     -- buffer.place_cell_anchors, not here (a fresh cell has no buffer rows
     -- yet at construction time). See buffer.lua for the gravity rationale.

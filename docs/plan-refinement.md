@@ -679,3 +679,60 @@ After F6, resume `plan-release.md` at R0 with a much stronger "what
 exists works flawlessly" baseline — F1/F2 close every reproducible
 TOCHANGE bug, F3 closes the class the editing bugs came from, and F4
 means v0.1.0 freezes an API that can actually be extended.
+
+---
+
+## Post-execution reconciliation (2026-07-21)
+
+The four review agents were re-run to completion after a session
+interruption and their final reports cross-checked against the executed
+F1–F6 plan. Result: **every confirmed bug and architecture finding maps
+to a shipped F-item** — with three small exceptions that never made it
+into the plan. Captured here as **F7** so they aren't lost; each is a
+single implementer-subagent task.
+
+### F7.1 Silent drop of undecodable WS stdout lines (small)
+
+`server.lua` `dispatch_line`: `if err or not msg then return end` — a
+line that fails `json_decode` (e.g. a stray `\r` making a CRLF-shaped
+line, or any future framing bug) drops a whole WS message with **zero
+diagnostic**. F5.2 added `log.write` to connect/exit/handoff/resync/
+http-non-200 but not here.
+
+- [ ] Add `log.write("ws:drop-undecodable", { len = #line, err = err })`
+      (no body content — could be huge) before the return.
+- [ ] `server_spec.lua` additions for `_reassemble_stdout`: (a) stream
+      ends mid-fragment with no trailing newline (killed ws_client —
+      assert the partial is never emitted as a line); (b) a `\r`-suffixed
+      line is either tolerated (strip `\r` before decode) or at least
+      logged via the new tag, not silently dropped.
+
+### F7.2 `bridge_spec.lua`: decorator-with-args round-trip (small)
+
+F1.4 added the `async def` round-trip; a cell whose decorator carries
+args (e.g. `@app.cell(hide_code=True)`) still has no round-trip case
+covering `# id:` injection/extraction adjacency.
+
+### F7.3 Watch-list additions (no action, record only)
+
+From the transport review, judged not worth acting on now:
+
+- `http_post_raw` status-line parse (`stdout:match("^(.*)\n(%d+)%s*$")`)
+  could misparse a response body ending in a digits-only line;
+  marimo's JSON responses make this near-impossible.
+- `SAVE_SUPPRESS_MS = 1500` vs marimo's ~1s polling fallback — under
+  heavy load a late echo could slip past the suppression window and
+  round-trip a stale reload. Needs a slow-fs repro before touching.
+
+### Working-tree note (2026-07-21)
+
+An uncommitted follow-up to F2.1 sits in the working tree (8 files,
++358/−65, suite green at 249/249): the border/output gravity assignment
+is **inverted** (border `right_gravity = false`, output `true`) so output
+renders **below the cell's box** instead of inside it — the TOCHANGE
+"run text and output should go below the cell" item — with by-id output
+mark cleanup (`cell._output_mark_id`) replacing row-range clears in
+`output.render`, `delete_cell_at_cursor`, and the output-toggle keymap,
+plus `parser.lua` nil-guards for empty bridge output. Specs updated to
+the inverted contract (ride-then-heal is the documented trade-off).
+Needs a commit once the maintainer signs off on the diff.
