@@ -691,7 +691,7 @@ to a shipped F-item** — with three small exceptions that never made it
 into the plan. Captured here as **F7** so they aren't lost; each is a
 single implementer-subagent task.
 
-### F7.1 Silent drop of undecodable WS stdout lines (small)
+### F7.1 Silent drop of undecodable WS stdout lines (small) **DONE**
 
 `server.lua` `dispatch_line`: `if err or not msg then return end` — a
 line that fails `json_decode` (e.g. a stray `\r` making a CRLF-shaped
@@ -699,19 +699,34 @@ line, or any future framing bug) drops a whole WS message with **zero
 diagnostic**. F5.2 added `log.write` to connect/exit/handoff/resync/
 http-non-200 but not here.
 
-- [ ] Add `log.write("ws:drop-undecodable", { len = #line, err = err })`
-      (no body content — could be huge) before the return.
-- [ ] `server_spec.lua` additions for `_reassemble_stdout`: (a) stream
-      ends mid-fragment with no trailing newline (killed ws_client —
-      assert the partial is never emitted as a line); (b) a `\r`-suffixed
-      line is either tolerated (strip `\r` before decode) or at least
-      logged via the new tag, not silently dropped.
+- [x] DONE Added the drop-log with length + error only (never the body — the
+      line can be multi-megabyte per the chunked-stdout comment). Extracted
+      the decode+log into a module-level `M._decode_ws_line` seam that
+      `dispatch_line` calls, so the drop branch is directly assertable
+      without spawning a real ws_client job (same seam pattern as F5.2's
+      `resync_ws`).
+- [x] DONE `server_spec.lua` cases: (a) stream ends mid-fragment with no
+      trailing newline → partial stays buffered, never emitted; (b) verified
+      `vim.json.decode` already tolerates a trailing `\r` as insignificant
+      whitespace and asserted the tolerated line fires NO drop-log; (c)
+      drives `M._decode_ws_line` on a genuinely malformed line with
+      `log.write` stubbed, asserting exactly one `ws:drop-undecodable` entry
+      with `len`+`err` and — explicitly — no field carrying the raw body.
+      (lua-reviewer flagged the original tests only exercised the
+      precondition; this seam closes that gap.)
 
-### F7.2 `bridge_spec.lua`: decorator-with-args round-trip (small)
+### F7.2 `bridge_spec.lua`: decorator-with-args round-trip (small) **DONE**
 
 F1.4 added the `async def` round-trip; a cell whose decorator carries
 args (e.g. `@app.cell(hide_code=True)`) still has no round-trip case
 covering `# id:` injection/extraction adjacency.
+
+- [x] DONE Added `"bridge: decorator-with-args cell round-trips code,
+      options, and id"` to `bridge_spec.lua`: asserts `@app.cell(hide_code=True)`
+      survives `generate_py`, the injected `# id:` lands immediately before
+      the decorated (non-bare) line, code/id round-trip through `parse_file`,
+      and `options.hide_code` survives. Executed against marimo 0.19.4 (not
+      skipped).
 
 ### F7.3 Watch-list additions (no action, record only)
 

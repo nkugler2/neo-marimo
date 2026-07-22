@@ -139,6 +139,71 @@ t.case("server: multiple complete lines in one chunk all emit", function()
   t.eq(emitted, { "one", "two" })
 end)
 
+-- F7.1 regression: if ws_client.py is killed mid-write (or the pipe just
+-- closes) the final on_stdout chunk has no trailing newline, so the last
+-- fragment is a permanent partial. It must stay buffered and never be
+-- handed to dispatch_line as a "complete" line — that would feed a
+-- truncated JSON fragment straight into json_decode and (previously)
+-- vanish with no diagnostic at all.
+t.case("server: a stream that dies mid-fragment never emits the incomplete partial", function()
+  local emitted, tail = feed_chunks({
+    { '{"op":"cell-op", "da' },  -- ws_client.py dies right here, no newline ever arrives
+  })
+  t.eq(emitted, {}, "the incomplete fragment must never surface as a completed line")
+  t.eq(tail, '{"op":"cell-op", "da', "it stays parked in the buffer instead of being lost")
+end)
+
+-- Drive M._decode_ws_line (the seam dispatch_line calls) with log.write
+-- stubbed, so the drop-undecodable branch is exercised directly rather than
+-- just its precondition. Restores the real log.write in a finally-style pcall.
+local function decode_capturing_log(line)
+  local log = require("neo-marimo.log")
+  local real_write = log.write
+  local logged = {}
+  log.write = function(tag, meta) table.insert(logged, { tag = tag, meta = meta }) end
+  local ok, msg, err = pcall(server._decode_ws_line, line)
+  log.write = real_write
+  assert(ok, msg)
+  return msg, err, logged
+end
+
+-- F7.1: a stray "\r" (e.g. CRLF-shaped framing from some future transport
+-- bug) survives reassembly unchanged — _reassemble_stdout only splits on
+-- "\n", it does not normalize line endings. vim.json.decode treats trailing
+-- whitespace (including "\r") as insignificant per RFC 8259, so a
+-- \r-suffixed but otherwise complete line is TOLERATED transparently by
+-- _decode_ws_line; no stripping needed and no drop-log fires.
+t.case("server: a \\r-suffixed but complete line is tolerated, no drop-log", function()
+  local emitted = feed_chunks({ { '{"op":"cell-op"}\r', "" } })
+  t.eq(emitted, { '{"op":"cell-op"}\r' }, "reassembly does not strip the trailing \\r")
+  local msg, err, logged = decode_capturing_log(emitted[1])
+  t.eq(err, nil, "trailing \\r is insignificant whitespace — no drop")
+  t.eq(msg and msg.op, "cell-op", "the message decodes correctly despite the \\r")
+  t.eq(#logged, 0, "the tolerated line must not emit a drop-undecodable log entry")
+end)
+
+t.case("server: a genuinely malformed line hits the drop-undecodable log branch", function()
+  -- Reassembly reported this as a "complete" line (newline seen), but the
+  -- content itself is truncated/corrupt — the exact failure mode the
+  -- log-and-drop branch reports instead of swallowing silently.
+  local emitted = feed_chunks({ { '{"op":"cell-op"', "" } })
+  t.eq(emitted, { '{"op":"cell-op"' })
+  local msg, err, logged = decode_capturing_log(emitted[1])
+  t.eq(msg, nil, "truncated JSON does not decode, so the line is dropped")
+  t.ok(err ~= nil, "an error is surfaced to the caller")
+  t.eq(#logged, 1, "exactly one drop-undecodable entry is logged")
+  t.eq(logged[1].tag, "ws:drop-undecodable", "logged under the F7.1 tag")
+  t.eq(logged[1].meta.len, #emitted[1], "logs the line length")
+  t.ok(logged[1].meta.err ~= nil, "logs the decode error")
+  -- The line body must NEVER be logged — it can be multi-megabyte.
+  for k, v in pairs(logged[1].meta) do
+    t.ok(k == "len" or k == "err", "unexpected log field: " .. tostring(k))
+    if type(v) == "string" then
+      t.ok(v ~= emitted[1], "the raw line body must never appear in the log meta")
+    end
+  end
+end)
+
 -- F1.3 regression: ws_client.py used to exit 0 on an abnormal WS close (the
 -- async-for over the socket raised ConnectionClosedError inside a task, and
 -- asyncio.wait() silently discarded the never-inspected exception). A dead

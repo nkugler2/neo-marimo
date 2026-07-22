@@ -85,6 +85,41 @@ t.case("bridge: async def cell round-trips code and id", function()
   end
 end)
 
+t.case("bridge: decorator-with-args cell round-trips code, options, and id", function()
+  -- F1.4 covered a bare `@app.cell` async cell; still missing coverage for
+  -- `@app.cell(hide_code=True)` — a decorator carrying args changes where
+  -- the `# id:` comment lands relative to the decorator line, so this
+  -- exercises that injection/extraction adjacency directly.
+  local filepath = vim.fn.tempname() .. ".py"
+  local cells = {
+    { name = "_", code = "x = 1", options = {}, id = "AAaa" },
+    {
+      name = "_",
+      code = "y = x + 1",
+      options = { hide_code = true },
+      id = "BBbb",
+    },
+  }
+
+  local src = parser.generate_py(cells, filepath, py)
+  t.match(src, "@app%.cell%(hide_code=True%)", "generated source keeps the decorator args")
+  t.match(src, "# id: BBbb\n@app%.cell%(hide_code=True%)", "id comment is attributed to the decorated cell")
+
+  local f = assert(io.open(filepath, "w"))
+  f:write(src)
+  f:close()
+
+  local data = parser.parse_file(filepath, py)
+  os.remove(filepath)
+
+  t.eq(#data.cells, #cells)
+  for i, want in ipairs(cells) do
+    t.eq(data.cells[i].code, want.code, "cell " .. i .. " code")
+    t.eq(data.cells[i].id, want.id, "cell " .. i .. " id")
+  end
+  t.eq(data.cells[2].options.hide_code, true, "hide_code option survives the round-trip")
+end)
+
 -- F1.4 regression: a user's own literal comment that happens to match the
 -- `# id: XXXX` shape must not be misattributed to the *next* cell just
 -- because it's the last line of the current cell's body. bridge.py's own

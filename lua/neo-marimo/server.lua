@@ -484,6 +484,28 @@ function M.stop(filepath)
   utils.info("Server stopped.")
 end
 
+-- Decode one complete JSON line from ws_client.py, logging + swallowing the
+-- undecodable ones. Returns `msg, err` (err non-nil => caller drops the line).
+-- Module-level (not a dispatch_line closure) purely so server_spec can assert
+-- the drop-log tag/shape without spawning a real ws_client job.
+function M._decode_ws_line(line)
+  local msg, err = utils.json_decode(line)
+  if err or not msg then
+    -- Undecodable line: truncated/corrupt JSON, a future ws_client.py
+    -- framing bug, etc. (a bare trailing "\r" is actually tolerated by
+    -- vim.json.decode as insignificant whitespace — see server_spec.lua —
+    -- but we don't rely on that leniency for anything less trivial).
+    -- Previously dropped with zero diagnostic, which made transport bugs
+    -- indistinguishable from "marimo just didn't send anything" during
+    -- debugging. Log length + error only — the line itself can be
+    -- multi-megabyte (see the chunked-stdout comment above) and must
+    -- never be logged whole.
+    log.write("ws:drop-undecodable", { len = #line, err = err })
+    return nil, err or "decode returned nil"
+  end
+  return msg, nil
+end
+
 -- Connect a WebSocket client to the running server.
 --
 -- `opts.kiosk` (default false): connect as a kiosk consumer instead of the
@@ -516,7 +538,7 @@ function M.connect_ws(filepath, on_message, opts)
   -- Decode one complete JSON line from ws_client.py and dispatch it.
   local function dispatch_line(line)
     if line == "" then return end
-    local msg, err = utils.json_decode(line)
+    local msg, err = M._decode_ws_line(line)
     if err or not msg then return end
     -- Mark the WS as live the moment we see our own neo_marimo_connected
     -- sentinel. start_and_open waits on this flag before opening the browser,
