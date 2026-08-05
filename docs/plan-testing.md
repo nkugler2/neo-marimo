@@ -26,7 +26,7 @@ Rules that always apply (from CLAUDE.md):
   **self-skip** cleanly when marimo is absent (see `bridge_spec.lua` for the
   pattern), so `make test` stays green on any machine.
 
-Phase order matters for T0→T2 (each builds on the last). T3–T6 are
+Phase order matters for T0→T2 (each builds on the last). T3–T7 are
 independent of each other and can go to separate implementer agents in
 parallel once T2 lands.
 
@@ -339,6 +339,99 @@ artifact attached.
 
 ---
 
+## T7 — real-notebook corpus (drop-in third-party notebooks)
+
+**Goal:** adding a real-world marimo notebook (from marimo's examples repo,
+the gallery, or anyone's project) to the test suite is a **file drop, zero
+wiring**. The suite auto-discovers it and exercises it at up to three levels.
+Corpus notebooks serve two distinct purposes, and the design must keep them
+separate: *regression* (notebooks using supported features must stay green
+forever) and *exploration* (notebooks using unsupported/future features —
+new widgets, new marimo constructs, unusual layouts — must produce a
+readable gap report, not a wall of red).
+
+Depends on T0 (snapshots) for level 2 and T1/T2 (recorder/replay) for
+level 3. Can start any time after T2.
+
+**Build:**
+
+1. `tests/corpus/<name>.py` — drop a notebook file in, that's the whole
+   workflow. A sidecar manifest `tests/corpus/manifest.lua` (or `.json`)
+   holds one entry per notebook:
+   - `source` — URL it came from (provenance; marimo's repo is Apache-2.0,
+     note the license for anything copied from elsewhere).
+   - `mode` — `"strict"` (regression: everything must pass) or
+     `"exploratory"` (report gaps, never fail the suite).
+   - `levels` — which levels to run (default: all that apply).
+   A notebook missing from the manifest gets a generated default entry
+   (`exploratory`, all levels) and a notice — the drop-in path must work
+   before anyone edits a manifest.
+2. **Level 1 — parse round-trip** (gated on `NEO_MARIMO_TEST_PYTHON`, like
+   `bridge_spec.lua`): parse the notebook through `bridge.py`, regenerate,
+   reparse; assert cell count/codes stable. Catches "someone structures
+   their notebook a way our parser mangles" — the cheapest and broadest win
+   from real-world files.
+3. **Level 2 — kernel-free render snapshot** (no python needed): build the
+   notebook via `t.make_notebook` from the parsed cell codes (parse output
+   from level 1 is cached to a committed `.parsed.json` sidecar so level 2
+   still runs on machines without marimo), snapshot `t.render_state` —
+   cell boxes, boundaries, structure. Catches layout/tracking regressions
+   against real notebook shapes (30-cell notebooks, huge cells, decorators,
+   markdown-heavy files) that hand-written fixtures never cover.
+4. **Level 3 — recorded transcript + replay** (optional per-notebook):
+   `make transcripts CORPUS=<name>` records a run-all session via the T1
+   recorder; replay + snapshot via T2. This is where **dependencies** bite:
+   real notebooks import pandas/altair/etc.
+   - If the notebook carries PEP 723 inline script metadata (marimo's
+     sandbox convention), the recorder runs the kernel via
+     `uv run --script`-style resolution so deps come from the notebook
+     itself.
+   - Otherwise, missing imports → skip level 3 with a notice (the
+     `capture_fixtures.py` skip pattern), never an error. Levels 1–2 still
+     run — a notebook is valuable even if we never execute it.
+5. **Exploratory gap report:** in `exploratory` mode, failures and unknowns
+   are collected, not thrown: unknown ops from replay (reuse T2's coverage
+   guard machinery), widgets with no registered renderer, HTML the output
+   renderer punts on, parse warnings. Emitted as a single readable summary
+   block at the end of the run (`CORPUS GAPS: <notebook>: 2 unknown widgets
+   (foo, bar), 1 unknown op (baz)`), and written to
+   `tests/corpus/<name>.gaps.txt` (gitignored) for diffing. **This is the
+   future-feature workflow**: drop in a notebook using the new thing →
+   read the gap report → implement → flip the manifest entry to `strict`
+   once green. Flipping to strict is the "done" signal for the feature.
+6. `make corpus-add URL=<raw-github-url> [NAME=<name>]` — fetch a notebook
+   (curl is already a plugin dependency), write it to `tests/corpus/`,
+   append a default manifest entry with the source URL filled in. Seed the
+   corpus with 3–5 notebooks from `marimo-team/marimo`'s `examples/`
+   directory spanning: an intro/tutorial notebook, a widget-heavy one, a
+   dataframe/plotting one, and one markdown/layout-heavy one.
+7. Corpus specs live in `tests/spec/corpus_spec.lua`, auto-generating cases
+   from the manifest so `make test` picks new notebooks up with no code
+   change; `FILTER=corpus` (or a notebook's name) works via the existing
+   run.lua filter.
+
+**Acceptance:**
+
+- Dropping a new `.py` into `tests/corpus/` and running `make test` runs
+  levels 1–2 on it with zero other edits (level 1 self-skipping without
+  marimo).
+- The seeded strict notebooks are green in `make test`.
+- An exploratory notebook containing an unsupported widget produces the gap
+  summary and does **not** fail the suite.
+- `make corpus-add` on a real marimo-examples URL yields a working corpus
+  entry end-to-end.
+
+**Known risk / permitted deviation:** transcript determinism (T1's
+byte-identical bar) may be unreachable for arbitrary third-party notebooks
+(random data, network fetches, timestamps). That bar applies only to the
+curated T1 scenarios; corpus level-3 transcripts may instead be marked
+`unstable` in the manifest, meaning they are re-recorded rather than
+committed, or skipped in CI. Don't burn time chasing determinism for a
+notebook that fetches live data — levels 1–2 already carry most of its
+value.
+
+---
+
 ## Suggested hand-off to implementer agents
 
 - **Agent A:** T0, then T1 (sequential — same artifact conventions).
@@ -347,6 +440,7 @@ artifact attached.
 - **Agent C:** T3 + T4 (after T2; they share the helpers and Makefile).
 - **Agent D:** T6 any time after T0 (Job 1 only needs the base suite);
   T5 last, only if T0–T4 shipped and appetite remains.
+- **Agent E:** T7 after T2 (needs snapshots + replay; parallel with C/D).
 
 Each hand-off should include: this file, the phase section, and the
 reminder that acceptance criteria are the contract while build steps are
