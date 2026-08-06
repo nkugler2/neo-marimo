@@ -1,0 +1,38 @@
+{
+  "notebook": "dataframe_table",
+  "marimo_version": "0.19.4",
+  "cell_count": 5,
+  "violations": [],
+  "cells": [
+    {
+      "name": "_",
+      "code": "import marimo as mo",
+      "options": {},
+      "id": null
+    },
+    {
+      "name": "_",
+      "code": "# ui.table accepts a list of rows as dicts, or a dict mapping column names to values,\n# or a dataframe-like object\ntable = mo.ui.table(\n    [\n        {\"first_name\": \"Michael\", \"last_name\": \"Scott\"},\n        {\"first_name\": \"Jim\", \"last_name\": \"Halpert\"},\n        {\"first_name\": \"Pam\", \"last_name\": \"Beesly\"},\n    ],\n    # Show full name on hover for each row using column placeholders\n    hover_template=\"{{first_name}} {{last_name}}\",\n    # Add header tooltip for column headers (shown via info icon + title)\n    header_tooltip={\n        \"first_name\": \"Employee's first name\",\n        \"last_name\": \"Employee's last name\",\n    },\n)\ntable",
+      "options": {},
+      "id": null
+    },
+    {
+      "name": "_",
+      "code": "# Per-cell hover: provide a callable for finer control\ndef cell_hover(row_id: str, column_name: str, value) -> str:\n    return f\"{row_id}:{column_name}={value}\"\n\nhover_table = mo.ui.table(\n    [{\"a\": i, \"b\": i * i} for i in range(8)],\n    hover_template=cell_hover,\n)\nhover_table",
+      "options": {},
+      "id": null
+    },
+    {
+      "name": "_",
+      "code": "table.value",
+      "options": {},
+      "id": null
+    },
+    {
+      "name": "_",
+      "code": "# Demonstrate a long table with a sticky header and a custom max height\nlong_rows = [{\"row\": i, \"first_name\": f\"First {i}\", \"last_name\": f\"Last {i}\"} for i in range(200)]\nlong_table = mo.ui.table(\n    long_rows,\n    pagination=False,\n    max_height=300,\n)\nlong_table",
+      "options": {},
+      "id": null
+    }
+  ]
+}

@@ -598,6 +598,67 @@ committed, or skipped in CI. Don't burn time chasing determinism for a
 notebook that fetches live data — levels 1–2 already carry most of its
 value.
 
+**Implementation notes (2026-08):**
+
+- All 4 seeded notebooks are **real fetches** from `marimo-team/marimo`
+  (Apache-2.0) via `raw.githubusercontent.com` — network access was
+  available in the implementing environment, so no hand-written substitute
+  notebooks were needed: `marimo/_tutorials/intro.py` (intro/tutorial,
+  strict), `examples/ui/code_editor.py` (widget-heavy, exploratory),
+  `examples/ui/table.py` (dataframe/plotting, strict), and
+  `examples/markdown/admonitions.py` (markdown/layout-heavy, exploratory).
+- The widget-heavy pick went through one real revision: `mo.ui.run_button`
+  was tried first on the assumption its `<marimo-run-button>` tag would be
+  unsupported (tree_render.lua's `WIDGET_TAGS` only lists `"button"`), but a
+  real recorded transcript showed marimo actually serves `run_button`
+  through `mo.ui.button`'s own `<marimo-button>` custom element — already
+  fully supported, so it silently proved nothing. Cross-checked against
+  every `_name: Final[str] = "marimo-..."` constant in the installed
+  marimo's `_plugins/ui/_impl/` (`grep -rn` beats guessing) before picking
+  `mo.ui.code_editor` (`<marimo-code-editor>`, genuinely absent from both
+  `WIDGET_TAGS` and `PLACEHOLDER_TAGS`), which does reach `render_unknown`
+  and is what `tests/corpus/manifest.lua`'s entry documents.
+- Level 2 (kernel-free) turns out structurally unable to exercise the
+  widget/HTML gap-scan categories at all: `t.make_notebook` builds buffer +
+  cell borders only, with no `cell-op` output ever dispatched (there's no
+  kernel), so `Gaps:scan_render_state` only ever has parse-warning-shaped
+  input to work with at level 2. The "unknown widget" / "HTML punt"
+  categories are real only once level 3 has replayed an actual `cell-op`
+  with rendered content — confirmed by chasing exactly this down when
+  `code_editor`'s gap didn't show up until a transcript existed.
+- All three `levels = {1,2,3}` notebooks' recordings (`intro_tutorial`,
+  `dataframe_table`, `widgets_code_editor`) turned out byte-identical across
+  3 consecutive `make transcripts CORPUS=<name>` runs — same bar T1 held its
+  curated scenarios to, achieved without any extra normalization work since
+  `tests/record_transcripts.lua`'s existing scrub rules (PYTHONHASHSEED pin,
+  UUID/timestamp/port/hex-addr rules) already cover what these notebooks
+  emit. Rather than leave the "Known risk" opt-out on the table, these three
+  are committed with `git add -f` (the escape hatch the corpus
+  `.gitignore` rule's own comment names) so a fresh clone's `make test`
+  demonstrates the full three-level story — including the exploratory gap
+  report — with no manual recording step. `markdown_admonitions` has no
+  level-3 transcript (its manifest entry only requests levels 1–2 — pure
+  presentation, not worth a kernel spawn).
+- `tests/corpus_add.lua` (the `make corpus-add` implementation) is tested
+  against `file://` URLs in `tests/spec/corpus_add_spec.lua`, per the task's
+  explicit instruction to avoid a hard network dependency in the suite — it
+  was also exercised once by hand against a real
+  `raw.githubusercontent.com` URL to confirm the network path itself works
+  (not committed; that was a manual check, reverted afterwards). Testability
+  needed one small addition beyond what the plan specified:
+  `tests/corpus.lua`'s `M.dir` now reads an optional
+  `NEO_MARIMO_CORPUS_DIR` env override (unset in every normal `make test`/
+  `make transcripts` invocation) so the spec can point a real, `os.exit()`-
+  ing `nvim -l` subprocess at a throwaway directory instead of mutating this
+  repo's actual `tests/corpus/manifest.lua`.
+- `python/bridge.py` gained one new subcommand, `check-imports <filepath>`,
+  used by the corpus level-3 recorder to skip a real kernel spawn (and the
+  WS session it would produce) for a notebook whose dependencies the test
+  python doesn't have — AST-based (walks each cell's `Import`/`ImportFrom`
+  nodes, checks `importlib.util.find_spec`) rather than actually importing,
+  since importing an arbitrary third-party notebook's dependencies here
+  could run arbitrary top-level side effects.
+
 ---
 
 ## Suggested hand-off to implementer agents

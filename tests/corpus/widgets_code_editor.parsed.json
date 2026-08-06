@@ -1,0 +1,32 @@
+{
+  "notebook": "widgets_code_editor",
+  "marimo_version": "0.19.4",
+  "cell_count": 4,
+  "violations": [],
+  "cells": [
+    {
+      "name": "_",
+      "code": "import marimo as mo",
+      "options": {},
+      "id": null
+    },
+    {
+      "name": "_",
+      "code": "initial_code = \"\"\"# implement foo below\ndef foo():\n    ...\n\"\"\"\n\neditor = mo.ui.code_editor(value=initial_code, language=\"python\")\neditor",
+      "options": {},
+      "id": null
+    },
+    {
+      "name": "_",
+      "code": "editor.value",
+      "options": {},
+      "id": null
+    },
+    {
+      "name": "_",
+      "code": "copy_editor = mo.ui.code_editor(\n    value=\"let a = 'b';\",\n    language=\"javascript\",\n    show_copy_button=False,\n)\ncopy_editor",
+      "options": {},
+      "id": null
+    }
+  ]
+}

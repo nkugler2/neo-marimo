@@ -13,3 +13,12 @@ invest-data/
 # Committed goldens live in tests/snapshots/*.txt; .actual.txt is only the
 # throwaway "what we actually got" side of a failing run, for local diffing.
 tests/snapshots/*.actual.txt
+
+# T7 corpus (docs/plan-testing.md T7): gap reports are regenerated every
+# `make test` run, not goldens — see tests/corpus.lua's Gaps:write. Corpus
+# level-3 transcripts are optional/unstable per-notebook (unlike the curated
+# tests/transcripts/ corpus, which IS committed) and live in a separate tree
+# for exactly that reason; a maintainer who verifies one is stable can still
+# `git add -f` it.
+tests/corpus/*.gaps.txt
+tests/corpus/transcripts/

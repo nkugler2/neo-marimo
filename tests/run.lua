@@ -54,5 +54,13 @@ io.write("\n\n")
 for _, f in ipairs(failures) do
   io.write("FAIL: " .. f.name .. "\n" .. tostring(f.err) .. "\n\n")
 end
+
+-- End-of-run reports (T7's CORPUS GAPS summary). pcall'd individually so one
+-- broken report can't hide another or the pass/fail tally below.
+for _, fn in ipairs(t.on_finish or {}) do
+  local ok, err = pcall(fn)
+  if not ok then io.write("[on_finish] report failed: " .. tostring(err) .. "\n") end
+end
+
 io.write(string.format("%d passed, %d failed\n", pass, fail))
 os.exit(fail == 0 and 0 or 1)

@@ -3,9 +3,10 @@
 neo-marimo bridge: parse and generate marimo notebook files.
 
 Usage:
-  bridge.py parse <filepath>    -> stdout: JSON cell list
-  bridge.py generate            -> stdin: JSON cell data, stdout: .py source
-  bridge.py check               -> stdout: JSON {ok, python_version, marimo_version}
+  bridge.py parse <filepath>          -> stdout: JSON cell list
+  bridge.py generate                  -> stdin: JSON cell data, stdout: .py source
+  bridge.py check                     -> stdout: JSON {ok, python_version, marimo_version}
+  bridge.py check-imports <filepath>  -> stdout: JSON {missing: [module, ...]}
 """
 import json
 import re
@@ -126,6 +127,64 @@ def cmd_parse(filepath: str) -> None:
     }, sys.stdout)
 
 
+def cmd_check_imports(filepath: str) -> None:
+    """Static check: which modules imported anywhere in the notebook's cells
+    are NOT importable from this interpreter. stdout: {"missing": [...]}.
+
+    Used by tests/record_transcripts.lua's T7 corpus recorder
+    (docs/plan-testing.md T7, "missing imports -> skip level 3 with a
+    notice") to decide whether to spawn a real marimo kernel against a
+    third-party notebook, without letting a doomed spawn fail loudly deep
+    inside marimo's own error handling. AST-based rather than actually
+    importing each module in-process: importing an arbitrary third-party
+    notebook's dependencies here (as opposed to just checking they're
+    resolvable) could run arbitrary top-level side effects.
+    """
+    import ast
+    import importlib.util
+    from marimo._ast.parse import parse_notebook
+
+    content = Path(filepath).read_text(encoding="utf-8")
+    result = parse_notebook(content, filepath=filepath)
+
+    modules: set[str] = set()
+    if result is not None:
+        for cell in result.cells:
+            try:
+                tree = ast.parse(cell.code)
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        modules.add(alias.name.split(".")[0])
+                elif isinstance(node, ast.ImportFrom):
+                    # node.level > 0 is a relative import (`from . import x`)
+                    # — meaningless for a single-file notebook, skip it.
+                    if node.module and node.level == 0:
+                        modules.add(node.module.split(".")[0])
+
+    # Python 3.10+; older interpreters just treat nothing as stdlib, which
+    # only makes this check slightly more conservative (a stdlib module
+    # would still resolve via find_spec below, so it's never misreported).
+    stdlib = getattr(sys, "stdlib_module_names", frozenset())
+
+    missing = []
+    for m in sorted(modules):
+        if m in stdlib or m == "marimo":
+            continue
+        try:
+            found = importlib.util.find_spec(m) is not None
+        except (ImportError, ModuleNotFoundError, ValueError):
+            # A namespace-package quirk or similar find_spec edge case isn't
+            # the same claim as "not installed" — don't false-positive skip.
+            found = True
+        if not found:
+            missing.append(m)
+
+    json.dump({"missing": missing}, sys.stdout)
+
+
 def cmd_generate() -> None:
     from marimo._ast.codegen import generate_filecontents, get_header_comments
     from marimo._ast.cell import CellConfig
@@ -180,6 +239,11 @@ if __name__ == "__main__":
         cmd_generate()
     elif cmd == "check":
         cmd_check()
+    elif cmd == "check-imports":
+        if len(sys.argv) < 3:
+            print("Usage: bridge.py check-imports <filepath>", file=sys.stderr)
+            sys.exit(1)
+        cmd_check_imports(sys.argv[2])
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
         sys.exit(1)

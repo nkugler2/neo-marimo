@@ -31,6 +31,7 @@ local root = vim.fn.fnamemodify(this, ":h:h")
 package.path = table.concat({
   root .. "/lua/?.lua",
   root .. "/lua/?/init.lua",
+  root .. "/tests/?.lua", -- tests/corpus.lua, for `make transcripts CORPUS=<name>` (T7)
   package.path,
 }, ";")
 
@@ -243,10 +244,18 @@ end
 
 -- Record one scenario. `run_actions(ctx)` drives the scripted action list;
 -- `ctx` = { nb, bufnr, filepath, srv, emit_action, run_all, wait_quiescent }.
-local function record_scenario(name, run_actions)
+-- `opts.copy` (default copy_scenario) and `opts.out_dir` (default OUT_DIR)
+-- let the T7 corpus recorder below reuse this whole choreography against
+-- tests/corpus/*.py and a separate tests/corpus/transcripts/ output tree,
+-- instead of duplicating server-start/health/token/WS-connect/instantiate.
+local function record_scenario(name, run_actions, opts)
+  opts = opts or {}
+  local copy = opts.copy or copy_scenario
+  local out_dir = opts.out_dir or OUT_DIR
+
   io.write("recording " .. name .. " ...\n")
 
-  local filepath = copy_scenario(name)
+  local filepath = copy(name)
   local nb, bufnr = build_notebook(filepath)
 
   -- ── capture + normalization state (per scenario — fresh mapping) ──────
@@ -455,7 +464,8 @@ local function record_scenario(name, run_actions)
   server.stop(filepath)
   server._decode_ws_line = ORIG_DECODE
 
-  local out_path = OUT_DIR .. "/" .. name .. ".jsonl"
+  vim.fn.mkdir(out_dir, "p")
+  local out_path = out_dir .. "/" .. name .. ".jsonl"
   local f = assert(io.open(out_path, "w"))
   f:write(table.concat(out_lines, "\n"))
   if #out_lines > 0 then f:write("\n") end
@@ -521,6 +531,70 @@ SCENARIOS.edit_rerun = function(ctx)
   ctx.emit_action("run-cell")
   ctx.run_all()
   ctx.wait_quiescent()
+end
+
+-- ── T7 corpus recording (`make transcripts CORPUS=<name>`) ────────────────
+--
+-- Reuses record_scenario's whole server-start/health/token/WS-connect/
+-- instantiate choreography against tests/corpus/*.py instead of
+-- tests/scenarios/*.py — a real third-party notebook has no scripted action
+-- list behind it (we don't know its semantics ahead of time), so the run is
+-- just "instantiate every cell and let it settle", output goes to a SEPARATE
+-- tree (tests/corpus/transcripts/<version>/, gitignored — see
+-- tests/corpus.lua's transcript_path doc comment on why corpus recordings
+-- aren't committed the way the curated tests/transcripts/ corpus is), and a
+-- notebook whose imports this python doesn't have is skipped with a notice
+-- rather than let the kernel spawn fail loudly mid-recording
+-- (docs/plan-testing.md T7 build step 4's explicit contract — mirrors
+-- capture_fixtures.py's own "skip: <lib> not installed" pattern).
+local CORPUS_NAME = os.getenv("CORPUS")
+if CORPUS_NAME and CORPUS_NAME ~= "" then
+  local corpus = require("corpus")
+  local corpus_path = corpus.path(CORPUS_NAME)
+  if vim.fn.filereadable(corpus_path) ~= 1 then
+    io.write("record_transcripts: no such corpus notebook: " .. corpus_path .. "\n")
+    os.exit(1)
+  end
+
+  local check = vim.system(
+    { PYTHON, root .. "/python/bridge.py", "check-imports", corpus_path },
+    { text = true }
+  ):wait()
+  if check.code == 0 then
+    local decode_ok, decoded = pcall(vim.json.decode, check.stdout or "")
+    if decode_ok and decoded.missing and #decoded.missing > 0 then
+      io.write("record_transcripts: " .. CORPUS_NAME .. ": skipped — missing import(s) in "
+        .. PYTHON .. ": " .. table.concat(decoded.missing, ", ") .. "\n")
+      os.exit(0)
+    end
+  else
+    -- Import-check itself failing (e.g. the notebook doesn't even parse) is
+    -- not the same claim as "imports are missing" — don't silently skip on
+    -- an unrelated bridge error, let the real recording attempt surface it.
+    io.write("record_transcripts: " .. CORPUS_NAME .. ": check-imports failed ("
+      .. tostring(check.stderr) .. "), attempting to record anyway\n")
+  end
+
+  local function copy_corpus(name)
+    local f = assert(io.open(corpus_path, "r"), "missing corpus notebook: " .. corpus_path)
+    local content = f:read("*a")
+    f:close()
+    local tmp_dir = vim.fn.tempname()
+    vim.fn.mkdir(tmp_dir, "p")
+    local tmp_path = tmp_dir .. "/" .. name .. ".py"
+    local lines = vim.split(content, "\n", { plain = true })
+    if lines[#lines] == "" then table.remove(lines) end
+    vim.fn.writefile(lines, tmp_path)
+    return tmp_path
+  end
+
+  -- No extra action script — record_scenario's own leading `instantiate`
+  -- beat (registers + runs every cell) is the whole point here.
+  local ok = record_scenario(CORPUS_NAME, function(_ctx) end, {
+    copy = copy_corpus,
+    out_dir = corpus.dir .. "/transcripts/" .. VERSION_DIR,
+  })
+  os.exit(ok and 0 or 1)
 end
 
 -- ── main ──────────────────────────────────────────────────────────────────

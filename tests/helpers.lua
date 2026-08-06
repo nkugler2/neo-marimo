@@ -13,6 +13,20 @@ function H.case(name, fn)
   table.insert(H.cases, { name = name, fn = fn })
 end
 
+-- Callbacks run once, after every case has executed, before run.lua prints
+-- its final pass/fail tally — for a report that only makes sense as one
+-- block once everything is known (T7's "CORPUS GAPS:" summary is the reason
+-- this exists: a per-notebook gap line printed inline mid-suite would land
+-- wherever tests/spec/corpus_spec.lua happens to sort alphabetically, not at
+-- the end a human is actually looking at). Generic on purpose — any future
+-- "summarize across every case" report can reuse this instead of growing its
+-- own end-of-run hook in run.lua.
+H.on_finish = {}
+
+function H.after_all(fn)
+  table.insert(H.on_finish, fn)
+end
+
 -- ── assertions ────────────────────────────────────────────────────────────
 
 local function fail(msg)
@@ -377,12 +391,18 @@ end
 -- opts.on_action(action, extra): called for every `__action__` marker with
 -- its action name and the rest of the marker's fields.
 -- opts.drain_timeout: forwarded to H.drain after the whole replay.
+-- opts.path: replay a transcript at an explicit path instead of looking one
+-- up under H.transcript_dir() by `name`. Added for T7's corpus level 3
+-- (tests/corpus.lua's own transcript_path, a sibling tree under
+-- tests/corpus/transcripts/ — corpus recordings are optional/unstable
+-- per-notebook and deliberately not committed alongside the curated T1
+-- scenario corpus, see tests/corpus.lua's transcript_path doc comment).
 function H.replay(name, nb, bufnr, opts)
   opts = opts or {}
   local server = require("neo-marimo.server")
   local ws_handlers = require("neo-marimo.ws_handlers")
 
-  local path = H.transcript_dir() .. "/" .. name .. ".jsonl"
+  local path = opts.path or (H.transcript_dir() .. "/" .. name .. ".jsonl")
   local f = assert(io.open(path, "r"), "missing transcript: " .. path)
 
   local action_count = 0

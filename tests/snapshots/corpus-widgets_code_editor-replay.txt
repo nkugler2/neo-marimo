@@ -1,0 +1,53 @@
+== buffer ==
+  0| import marimo as mo
+  1| initial_code = """# implement foo below
+  2| def foo():
+  3|     ...
+  4| """
+  5| 
+  6| editor = mo.ui.code_editor(value=initial_code, language="python")
+  7| editor
+  8| editor.value
+  9| copy_editor = mo.ui.code_editor(
+ 10|     value="let a = 'b';",
+ 11|     language="javascript",
+ 12|     show_copy_button=False,
+ 13| )
+ 14| copy_editor
+
+== ns:neo_marimo_border ==
+[0,0]
+  virt_line[below]: ╰──────────────────────────────────────────────────────────────────────╯  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[0,0]
+  virt_line[above]: ╭─  py #1 ─────────────────────────────────────────────────────────────╮  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonLabel,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[1,0]
+  virt_line[above]: ╭─  py #2 ─────────────────────────────────────────────────────────────╮  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonLabel,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[7,0]
+  virt_line[below]: ╰──────────────────────────────────────────────────────────────────────╯  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[8,0]
+  virt_line[below]: ╰──────────────────────────────────────────────────────────────────────╯  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[8,0]
+  virt_line[above]: ╭─  py #3 ─────────────────────────────────────────────────────────────╮  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonLabel,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[9,0]
+  virt_line[above]: ╭─  py #4 ─────────────────────────────────────────────────────────────╮  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonLabel,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[14,0]
+  virt_line[below]: ╰──────────────────────────────────────────────────────────────────────╯  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonBorder]
+
+== ns:neo_marimo_cell_anchor ==
+[0,0] -> [0,19]
+[1,0] -> [7,6]
+[8,0] -> [8,12]
+[9,0] -> [14,11]
+
+== ns:neo_marimo_output ==
+[0,0]
+  virt_line[below]:   ✓ ran  hl=[MarimoStatusOk]
+[7,0]
+  virt_line[below]:   ✓ ran  hl=[MarimoStatusOk]
+  virt_line[below]:   [code_editor] value=# implement foo below^@def foo():^@    ...^@  hl=[MarimoOutputText,MarimoWidgetLabel,Comment,MarimoWidgetValue]
+[8,0]
+  virt_line[below]:   ✓ ran  hl=[MarimoStatusOk]
+  virt_line[below]:   '# implement foo below\ndef foo():\n    ...\n'  hl=[MarimoOutputText]
+[14,0]
+  virt_line[below]:   ✓ ran  hl=[MarimoStatusOk]
+  virt_line[below]:   [code_editor] value=let a = 'b';  hl=[MarimoOutputText,MarimoWidgetLabel,Comment,MarimoWidgetValue]

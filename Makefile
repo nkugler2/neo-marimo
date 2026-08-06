@@ -9,7 +9,7 @@ PYTHON ?= ~/.pyenv/versions/3.12.10/envs/MyMainTestingPython/bin/python
 # previous clone (preserved at $(PACK_DIR).pre-dev-link).
 PACK_DIR ?= $(HOME)/.local/share/nvim/site/pack/core/opt/neo-marimo
 
-.PHONY: test test-e2e snapshots fixtures transcripts dev-link dev-unlink
+.PHONY: test test-e2e snapshots fixtures transcripts corpus-add dev-link dev-unlink
 
 # NEO_MARIMO_TEST_PYTHON gates the python-dependent specs (bridge round-trip,
 # e2e); they self-skip when the interpreter is missing or has no marimo, so
@@ -44,8 +44,29 @@ fixtures:
 # exist next to it (see tests/record_transcripts.lua for why python_path and
 # marimo_cmd have to come from the same env here). FILTER selects scenarios
 # by name, e.g. `make transcripts FILTER=widgets`.
+#
+# CORPUS=<name> records a T7 corpus notebook (tests/corpus/<name>.py)
+# instead: `make transcripts CORPUS=widgets_code_editor`. Output goes to
+# tests/corpus/transcripts/<major.minor>/ (gitignored — corpus-level
+# transcript determinism isn't guaranteed the way the curated FILTER=
+# scenarios above are; see docs/plan-testing.md T7's "Known risk"
+# paragraph), and a notebook whose imports this python doesn't have is
+# skipped with a notice rather than erroring.
+CORPUS ?=
 transcripts:
-	NEO_MARIMO_TEST_PYTHON=$(PYTHON) $(NVIM) -l tests/record_transcripts.lua $(FILTER)
+	NEO_MARIMO_TEST_PYTHON=$(PYTHON) CORPUS=$(CORPUS) $(NVIM) -l tests/record_transcripts.lua $(FILTER)
+
+# `make corpus-add URL=<raw-github-url> [NAME=<name>]` (T7): curl-fetches a
+# notebook into tests/corpus/<name>.py and appends a default (exploratory)
+# tests/corpus/manifest.lua entry with the source URL recorded — the
+# drop-in-a-real-notebook workflow, from the command line. NAME defaults to
+# the URL's own filename. URL may be any curl-understood scheme, including
+# file:// (tests/spec/corpus_add_spec.lua exercises exactly that, so this
+# target's own correctness is covered by `make test` without network access).
+URL ?=
+NAME ?=
+corpus-add:
+	URL=$(URL) NAME=$(NAME) $(NVIM) -l tests/corpus_add.lua
 
 dev-link:
 	@if [ -e "$(PACK_DIR)" ] && [ ! -L "$(PACK_DIR)" ]; then \

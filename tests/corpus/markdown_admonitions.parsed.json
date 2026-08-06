@@ -1,0 +1,32 @@
+{
+  "notebook": "markdown_admonitions",
+  "marimo_version": "0.19.4",
+  "cell_count": 4,
+  "violations": [],
+  "cells": [
+    {
+      "name": "_",
+      "code": "mo.md(r\"\"\"\nUse **admonitions** in markdown to bring attention to text. Here are some examples.\n\"\"\")",
+      "options": { "hide_code": true },
+      "id": null
+    },
+    {
+      "name": "_",
+      "code": "mo.md(\"\"\"\n/// admonition | Heads up.\n\nHere's some information.\n///\n\"\"\")",
+      "options": {},
+      "id": null
+    },
+    {
+      "name": "_",
+      "code": "mo.md(\"\"\"\n/// attention | Attention!\n\nThis is important.\n///\n\"\"\")",
+      "options": {},
+      "id": null
+    },
+    {
+      "name": "_",
+      "code": "import marimo as mo",
+      "options": {},
+      "id": null
+    }
+  ]
+}

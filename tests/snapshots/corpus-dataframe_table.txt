@@ -1,0 +1,66 @@
+== buffer ==
+  0| import marimo as mo
+  1| # ui.table accepts a list of rows as dicts, or a dict mapping column names to values,
+  2| # or a dataframe-like object
+  3| table = mo.ui.table(
+  4|     [
+  5|         {"first_name": "Michael", "last_name": "Scott"},
+  6|         {"first_name": "Jim", "last_name": "Halpert"},
+  7|         {"first_name": "Pam", "last_name": "Beesly"},
+  8|     ],
+  9|     # Show full name on hover for each row using column placeholders
+ 10|     hover_template="{{first_name}} {{last_name}}",
+ 11|     # Add header tooltip for column headers (shown via info icon + title)
+ 12|     header_tooltip={
+ 13|         "first_name": "Employee's first name",
+ 14|         "last_name": "Employee's last name",
+ 15|     },
+ 16| )
+ 17| table
+ 18| # Per-cell hover: provide a callable for finer control
+ 19| def cell_hover(row_id: str, column_name: str, value) -> str:
+ 20|     return f"{row_id}:{column_name}={value}"
+ 21| 
+ 22| hover_table = mo.ui.table(
+ 23|     [{"a": i, "b": i * i} for i in range(8)],
+ 24|     hover_template=cell_hover,
+ 25| )
+ 26| hover_table
+ 27| table.value
+ 28| # Demonstrate a long table with a sticky header and a custom max height
+ 29| long_rows = [{"row": i, "first_name": f"First {i}", "last_name": f"Last {i}"} for i in range(200)]
+ 30| long_table = mo.ui.table(
+ 31|     long_rows,
+ 32|     pagination=False,
+ 33|     max_height=300,
+ 34| )
+ 35| long_table
+
+== ns:neo_marimo_border ==
+[0,0]
+  virt_line[below]: ╰──────────────────────────────────────────────────────────────────────╯  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[0,0]
+  virt_line[above]: ╭─  py #1 ─────────────────────────────────────────────────────────────╮  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonLabel,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[1,0]
+  virt_line[above]: ╭─  py #2 ─────────────────────────────────────────────────────────────╮  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonLabel,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[17,0]
+  virt_line[below]: ╰──────────────────────────────────────────────────────────────────────╯  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[18,0]
+  virt_line[above]: ╭─  py #3 ─────────────────────────────────────────────────────────────╮  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonLabel,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[26,0]
+  virt_line[below]: ╰──────────────────────────────────────────────────────────────────────╯  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[27,0]
+  virt_line[below]: ╰──────────────────────────────────────────────────────────────────────╯  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[27,0]
+  virt_line[above]: ╭─  py #4 ─────────────────────────────────────────────────────────────╮  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonLabel,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[28,0]
+  virt_line[above]: ╭─  py #5 ─────────────────────────────────────────────────────────────╮  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonLabel,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[35,0]
+  virt_line[below]: ╰──────────────────────────────────────────────────────────────────────╯  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonBorder]
+
+== ns:neo_marimo_cell_anchor ==
+[0,0] -> [0,19]
+[1,0] -> [17,5]
+[18,0] -> [26,11]
+[27,0] -> [27,11]
+[28,0] -> [35,10]

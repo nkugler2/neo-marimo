@@ -1,0 +1,41 @@
+== buffer ==
+  0| mo.md(r"""
+  1| Use **admonitions** in markdown to bring attention to text. Here are some examples.
+  2| """)
+  3| mo.md("""
+  4| /// admonition | Heads up.
+  5| 
+  6| Here's some information.
+  7| ///
+  8| """)
+  9| mo.md("""
+ 10| /// attention | Attention!
+ 11| 
+ 12| This is important.
+ 13| ///
+ 14| """)
+ 15| import marimo as mo
+
+== ns:neo_marimo_border ==
+[0,0]
+  virt_line[above]: ╭─  md #1 ─────────────────────────────────────────────────────────────╮  hl=[MarimoCellMarkdownBorder,MarimoCellMarkdownBorder,MarimoCellMarkdownLabel,MarimoCellMarkdownBorder,MarimoCellMarkdownBorder]
+[2,0]
+  virt_line[below]: ╰──────────────────────────────────────────────────────────────────────╯  hl=[MarimoCellMarkdownBorder,MarimoCellMarkdownBorder,MarimoCellMarkdownBorder]
+[3,0]
+  virt_line[above]: ╭─  md #2 ─────────────────────────────────────────────────────────────╮  hl=[MarimoCellMarkdownBorder,MarimoCellMarkdownBorder,MarimoCellMarkdownLabel,MarimoCellMarkdownBorder,MarimoCellMarkdownBorder]
+[8,0]
+  virt_line[below]: ╰──────────────────────────────────────────────────────────────────────╯  hl=[MarimoCellMarkdownBorder,MarimoCellMarkdownBorder,MarimoCellMarkdownBorder]
+[9,0]
+  virt_line[above]: ╭─  md #3 ─────────────────────────────────────────────────────────────╮  hl=[MarimoCellMarkdownBorder,MarimoCellMarkdownBorder,MarimoCellMarkdownLabel,MarimoCellMarkdownBorder,MarimoCellMarkdownBorder]
+[14,0]
+  virt_line[below]: ╰──────────────────────────────────────────────────────────────────────╯  hl=[MarimoCellMarkdownBorder,MarimoCellMarkdownBorder,MarimoCellMarkdownBorder]
+[15,0]
+  virt_line[below]: ╰──────────────────────────────────────────────────────────────────────╯  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[15,0]
+  virt_line[above]: ╭─  py #4 ─────────────────────────────────────────────────────────────╮  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonLabel,MarimoCellPythonBorder,MarimoCellPythonBorder]
+
+== ns:neo_marimo_cell_anchor ==
+[0,0] -> [2,4]
+[3,0] -> [8,4]
+[9,0] -> [14,4]
+[15,0] -> [15,19]
