@@ -41,6 +41,11 @@ local function virt_lines_at(bufnr)
 end
 
 t.case("output: tabs payload attaches virt_lines and registers widgets", function()
+  -- T0: was a handful of t.match/t.no_match greps over the joined output
+  -- (status line, tab header, table row, no truncation); one snapshot of
+  -- the real ns_output extmark state covers all of that plus everything
+  -- those greps didn't happen to check, and shows the whole render in a
+  -- diff instead of a pass/fail per substring.
   local bufnr = vim.api.nvim_create_buf(false, true)
   local cell = make_cell(bufnr, {
     mimetype = "text/html",
@@ -48,13 +53,7 @@ t.case("output: tabs payload attaches virt_lines and registers widgets", functio
   })
   output.render(bufnr, cell)
 
-  local lines = virt_lines_at(bufnr)
-  local joined = table.concat(lines, "\n")
-  t.ok(#lines > 10, "rich output attached (" .. #lines .. " lines)")
-  t.match(joined, "✓ ran", "status line present")
-  t.match(joined, "tab: Selectors")
-  t.match(joined, "│ a", "table inside tab")
-  t.no_match(joined, "truncated", "widget payloads skip the cap")
+  t.snapshot("output-tabs_with_table", t.render_state(bufnr))
 
   local reg = widgets.list_for_cell(bufnr, cell.id)
   t.eq(#reg, 3, "widgets registered through the real render path")
@@ -391,32 +390,22 @@ t.case("output: deleting a cell clears a ridden ns_output mark instead of orphan
 end)
 
 t.case("output: full notebook.py cell-4 payload renders every tab", function()
+  -- T0: this used to be ~15 t.match/t.no_match calls hand-picking one
+  -- element per tab family — easy to miss a regression in anything not
+  -- explicitly spot-checked. One snapshot of the full render state
+  -- (buffer + ns_output extmark, highlights included) replaces all of it.
   local bufnr = vim.api.nvim_create_buf(false, true)
   local cell = make_cell(bufnr, {
     mimetype = "text/html",
     data = t.fixture("notebook_cell4"),
   })
   output.render(bufnr, cell)
-  local joined = table.concat(virt_lines_at(bufnr), "\n")
 
-  for _, tab in ipairs({ "Buttons", "Selectors", "Text & File",
-                         "Tables", "Charts %(UI%)", "Refresh" }) do
-    t.match(joined, "tab: " .. tab)
-  end
-  -- Spot-check one element of each family.
-  t.match(joined, "Click me")
-  t.match(joined, "Slider 0%-10")
-  t.match(joined, "20‥80")
-  t.match(joined, "Text input")
-  t.match(joined, "│ a", "table renders inside its tab")
-  t.match(joined, "altair chart")
-  t.match(joined, "plotly chart")
-  t.match(joined, "file upload")
-  t.match(joined, "↻ refresh")
-  t.no_match(joined, "<marimo%-")
-  t.no_match(joined, "truncated")
+  t.snapshot("output-notebook_cell4", t.render_state(bufnr))
 
-  -- Every interactive widget across all tabs is in the registry.
+  -- Widget-registry membership is separate state (not part of the visible
+  -- render), so it stays a direct assertion rather than folding into the
+  -- snapshot.
   local reg = widgets.list_for_cell(bufnr, cell.id)
   local names = {}
   for _, w in ipairs(reg) do names[w.name] = (names[w.name] or 0) + 1 end

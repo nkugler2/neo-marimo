@@ -1,7 +1,10 @@
 -- Pipeline tests: real-marimo fixture HTML → tree_render → virt_lines.
 -- Assertions are structural (what the user would see + what the widget
 -- registry holds) rather than byte-golden, so cosmetic renderer tweaks
--- don't break the suite.
+-- don't break the suite. One exception: the tabs_with_table cell-4 case
+-- below is a T0 byte-golden snapshot (content + ordering in one diff);
+-- a cosmetic tweak that touches it is a `make snapshots` re-accept, not
+-- a test bug.
 
 local t = require("helpers")
 local tree_render = require("neo-marimo.tree_render")
@@ -49,25 +52,13 @@ end)
 -- ── the cell-4 regression ─────────────────────────────────────────────────
 
 t.case("render: tabs_with_table shows tabs AND the table (cell-4 bug)", function()
+  -- T0: this was ~10 t.match/t.no_match calls plus a manual :find()
+  -- ordering check (tab headers must come BEFORE the table — the original
+  -- cell-4 bug rendered only the table). A snapshot of the flattened
+  -- output text captures both the content AND that ordering in one diff,
+  -- without hand-picking substrings.
   local lines, ctx, reg = render_fixture("tabs_with_table")
-  local joined = table.concat(lines, "\n")
-
-  -- All three tab headers present.
-  t.match(joined, "tab: Selectors")
-  t.match(joined, "tab: Tables")
-  t.match(joined, "tab: Refresh")
-  -- The widgets inside the Selectors tab rendered.
-  t.match(joined, "Slider")
-  t.match(joined, "%[x%] Check")
-  -- The dataframe inside the Tables tab rendered as an inline table —
-  -- scoped to its tab, not replacing the whole payload.
-  t.match(joined, "│ a")
-  t.match(joined, "│ 1")
-  t.no_match(joined, "_marimo_row_id")
-  -- Tab headers must appear BEFORE the table (the old bug rendered only
-  -- the table).
-  t.ok(joined:find("tab: Selectors") < joined:find("│ a"),
-    "tabs render around the table, table doesn't hijack")
+  t.snapshot("render-tabs_with_table", table.concat(lines, "\n"))
 
   -- Interactive widgets registered in document order; the table is not a
   -- registry entry.
@@ -77,9 +68,6 @@ t.case("render: tabs_with_table shows tabs AND the table (cell-4 bug)", function
   end
 
   t.ok(ctx.skip_cap, "widget payloads skip the line cap")
-  -- Nothing leaked as raw markup.
-  t.no_match(joined, "marimo%-")
-  t.no_match(joined, "</")
 end)
 
 -- ── plain widgets ─────────────────────────────────────────────────────────

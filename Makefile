@@ -9,13 +9,20 @@ PYTHON ?= ~/.pyenv/versions/3.12.10/envs/MyMainTestingPython/bin/python
 # previous clone (preserved at $(PACK_DIR).pre-dev-link).
 PACK_DIR ?= $(HOME)/.local/share/nvim/site/pack/core/opt/neo-marimo
 
-.PHONY: test fixtures dev-link dev-unlink
+.PHONY: test snapshots fixtures dev-link dev-unlink
 
 # NEO_MARIMO_TEST_PYTHON gates the python-dependent specs (bridge round-trip);
 # they self-skip when the interpreter is missing or has no marimo, so the rest
 # of the suite runs anywhere (including CI before marimo is installed).
 test:
 	NEO_MARIMO_TEST_PYTHON=$(PYTHON) $(NVIM) -l tests/run.lua $(FILTER)
+
+# Regenerate snapshot goldens (tests/helpers.lua's t.snapshot, T0): same run
+# as `make test`, but a missing/mismatched golden under tests/snapshots/ gets
+# written instead of failing. Re-run twice with no other changes to sanity
+# check determinism (the second run should be a no-op / `git diff` clean).
+snapshots:
+	NEO_MARIMO_UPDATE_SNAPSHOTS=1 NEO_MARIMO_TEST_PYTHON=$(PYTHON) $(NVIM) -l tests/run.lua $(FILTER)
 
 # Re-capture the marimo HTML fixture corpus (needs a marimo-equipped python).
 fixtures:

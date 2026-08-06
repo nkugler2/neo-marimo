@@ -1,0 +1,16 @@
+  ▎ tab: Selectors
+  │  Slider: [━━━━━━━━━━━━●━━━━━━━━━━━] 5  (0‥10)
+  │  
+  │  [x] Check
+  
+  ▎ tab: Tables
+  │  │ a    │ b    │ c    │ cat  │
+  │  ├──────┤──────┤──────┤──────┤
+  │  │ 1    │ 5    │ 10   │ x    │
+  │  │ 2    │ 4    │ 15   │ y    │
+  │  │ 3    │ 3    │ 10   │ x    │
+  │  │ 4    │ 2    │ 20   │ y    │
+  │  │ 5    │ 1    │ 25   │ x    │
+  
+  ▎ tab: Refresh
+  │  ↻ refresh  every 1m  (runs in browser)

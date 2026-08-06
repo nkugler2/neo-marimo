@@ -8,3 +8,8 @@ invest-data/
 # (understand-anything analysis cache + graph; Claude Code local settings.)
 .understand-anything/
 .claude/
+
+# Snapshot-mismatch dumps (tests/helpers.lua's t.snapshot, T0 plan-testing).
+# Committed goldens live in tests/snapshots/*.txt; .actual.txt is only the
+# throwaway "what we actually got" side of a failing run, for local diffing.
+tests/snapshots/*.actual.txt
