@@ -1,0 +1,27 @@
+== buffer ==
+  0| x = 1 + 1
+  1| x
+  2| y = x * 10
+  3| y
+
+== ns:neo_marimo_border ==
+[0,0]
+  virt_line[above]: ╭─  py #1 ─────────────────────────────────────────────────────────────╮  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonLabel,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[1,0]
+  virt_line[below]: ╰──────────────────────────────────────────────────────────────────────╯  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[2,0]
+  virt_line[above]: ╭─  py #2 ─────────────────────────────────────────────────────────────╮  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonLabel,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[3,0]
+  virt_line[below]: ╰──────────────────────────────────────────────────────────────────────╯  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonBorder]
+
+== ns:neo_marimo_cell_anchor ==
+[0,0] -> [1,1]
+[2,0] -> [3,1]
+
+== ns:neo_marimo_output ==
+[1,0]
+  virt_line[below]:   ✓ ran  hl=[MarimoStatusOk]
+  virt_line[below]:   2  hl=[MarimoOutputText]
+[3,0]
+  virt_line[below]:   ✓ ran  hl=[MarimoStatusOk]
+  virt_line[below]:   20  hl=[MarimoOutputText]

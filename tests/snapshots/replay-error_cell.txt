@@ -1,0 +1,27 @@
+== buffer ==
+  0| 1 / 0
+
+== ns:neo_marimo_border ==
+[0,0]
+  virt_line[below]: ╰──────────────────────────────────────────────────────────────────────╯  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[0,0]
+  virt_line[above]: ╭─  py #1 ─────────────────────────────────────────────────────────────╮  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonLabel,MarimoCellPythonBorder,MarimoCellPythonBorder]
+
+== ns:neo_marimo_cell_anchor ==
+[0,0] -> [0,5]
+
+== ns:neo_marimo_output ==
+[0,0]
+  virt_line[below]:   ✓ ran  hl=[MarimoStatusOk]
+  virt_line[below]:   ✖ exception: division by zero  hl=[MarimoOutputError]
+  virt_line[below]:   <span class="codehilite"><div class="highlight"><pre><span></span><span  hl=[MarimoOutputText]
+  virt_line[below]:   class="gt">Traceback (most recent call last):</span>  hl=[MarimoOutputText,MarimoOutputText]
+  virt_line[below]:     File <span class="nb">&quot;<tmp-path>&quot;</span>, line <span  hl=[MarimoOutputText]
+  virt_line[below]:   class="m">1</span>, in <span class="n">&lt;module&gt;</span>  hl=[MarimoOutputText,MarimoOutputText]
+  virt_line[below]:   <span class="w">    </span><span class="mi">1</span> <span class="o">/</span>   hl=[MarimoOutputText]
+  virt_line[below]:   <span class="mi">0</span>  hl=[MarimoOutputText,MarimoOutputText]
+  virt_line[below]:   <span class="w">    </span><span class="pm">~~^~~</span>  hl=[MarimoOutputText]
+  virt_line[below]:   <span class="gr">ZeroDivisionError</span>: <span class="n">division by  hl=[MarimoOutputText]
+  virt_line[below]:   zero</span>  hl=[MarimoOutputText,MarimoOutputText]
+  virt_line[below]:   </pre></div>  hl=[MarimoOutputText]
+  virt_line[below]:   </span>  hl=[MarimoOutputText]

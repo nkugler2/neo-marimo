@@ -240,6 +240,162 @@ function H.snapshot(name, text)
     name, actual_path, diff or "(vim.diff produced no output)"))
 end
 
+-- ── replay layer (T2) ────────────────────────────────────────────────────
+--
+-- t.replay(name, nb, bufnr, opts) feeds a recorded WS transcript (T1,
+-- tests/transcripts/<version>/<name>.jsonl) through the exact decode+dispatch
+-- path production uses — server._decode_ws_line then ws_handlers.dispatch —
+-- against a real notebook/buffer from t.make_notebook. No server, no kernel,
+-- no python: the transcript already IS the kernel's output, byte-for-byte.
+
+-- Newest transcript-version directory wins, mirroring H.fixture_dir.
+-- Caveat (shared with H.fixture_dir): the sort is lexicographic, so a
+-- two-digit minor breaks it ("0.9" > "0.10"). Fine for 0.19/0.23; switch
+-- both to a numeric-aware sort before recording a version where it isn't.
+function H.transcript_dir()
+  local dirs = vim.fn.glob(H.root .. "/tests/transcripts/*", false, true)
+  table.sort(dirs, function(a, b) return a > b end)
+  assert(dirs[1], "no transcript directories — run `make transcripts`")
+  return dirs[1]
+end
+
+function H.transcript_names()
+  local out = {}
+  for _, p in ipairs(vim.fn.glob(H.transcript_dir() .. "/*.jsonl", false, true)) do
+    table.insert(out, vim.fn.fnamemodify(p, ":t:r"))
+  end
+  table.sort(out)
+  return out
+end
+
+-- Extract a scenario's cell source straight from tests/scenarios/<name>.py,
+-- for building the matching t.make_notebook(codes) a replay dispatches
+-- against. NOT a general marimo-cell parser — bridge.py owns that — this
+-- only has to handle the 5 committed scenario files, which all use marimo's
+-- default 4-space generated indent, one flat body per cell, and end each
+-- cell with a bare `return`/`return (...)` line. Verified byte-identical
+-- against the committed transcripts' own kernel-ready `codes` field; reach
+-- for that field directly (or extend this) if a future scenario needs
+-- anything this can't handle (nested defs, multi-line strings, etc).
+function H.scenario_codes(name)
+  local path = H.root .. "/tests/scenarios/" .. name .. ".py"
+  local f = assert(io.open(path, "r"), "missing scenario: " .. path)
+  local content = f:read("*a")
+  f:close()
+
+  local lines = vim.split(content, "\n", { plain = true })
+  local codes = {}
+  local i = 1
+  while i <= #lines do
+    if lines[i]:match("^@app%.cell") then
+      i = i + 2 -- skip "@app.cell" and the "def _(...):" signature line
+      local body = {}
+      while i <= #lines and not lines[i]:match("^    return%f[%A]") do
+        table.insert(body, (lines[i]:gsub("^    ", "")))
+        i = i + 1
+      end
+      -- A trailing blank line right before `return` isn't part of the
+      -- cell's actual source (marimo's own extraction drops it too).
+      while #body > 0 and body[#body] == "" do table.remove(body) end
+      table.insert(codes, table.concat(body, "\n"))
+      i = i + 1 -- skip the `return` line itself
+    else
+      i = i + 1
+    end
+  end
+  return codes
+end
+
+-- Pump the event loop until scheduled render work has run. output.lua's
+-- handle_cell_op defers the actual M.render call via vim.schedule instead of
+-- rendering inline (so a burst of cell-ops during a real WS session doesn't
+-- redraw mid-burst) — a dispatched cell-op's extmarks don't exist until the
+-- loop gets a turn. vim.wait(0) runs exactly one loop iteration, which
+-- empirically flushes everything *currently* queued (verified: a callback
+-- registered immediately before is visibly run after a single call); loop a
+-- few times anyway — cheap (each pass is sub-millisecond when there's
+-- nothing left to do) — in case a callback ever enqueues another one, capped
+-- by `timeout_ms` as a hard backstop against ever hanging a test on a stuck
+-- schedule queue.
+function H.drain(timeout_ms)
+  timeout_ms = timeout_ms or 500
+  local start = vim.uv.hrtime() / 1e6
+  for _ = 1, 10 do
+    vim.wait(0)
+    if (vim.uv.hrtime() / 1e6) - start >= timeout_ms then break end
+  end
+end
+
+-- Feed tests/transcripts/<newest>/<name>.jsonl through server._decode_ws_line
+-- + ws_handlers.dispatch against `nb`/`bufnr` (from t.make_notebook).
+--
+-- Each transcript line is either an `{"__action__": ...}` marker (T1) or a
+-- raw WS message. Markers are counted and (optionally) reported via
+-- opts.on_action; everything else is decoded and dispatched exactly the way
+-- init.lua's nb._on_ws_message does at the dispatch call site (init.lua:165)
+-- — op = msg.op or msg.name, payload = msg.data if it's a table else the
+-- whole message, ctx = { nb = nb, bufnr = bufnr, raw = msg }.
+--
+-- opts.until_action: stop once this many `__action__` markers have been
+-- reached (that marker's own messages are NOT replayed), so a caller can
+-- snapshot an intermediate state — e.g. edit_rerun's "edited, not yet
+-- rerun" beat sits between its 2nd and 3rd markers. nil replays the whole
+-- file.
+-- opts.on_dispatch(op, payload, ok): called after every non-marker line is
+-- decoded and dispatched; `ok` is ws_handlers.dispatch's own return value.
+-- Used by the coverage-guard case to tell "no handler for this op" (ok ==
+-- false, error count unchanged) apart from "handler threw".
+-- opts.on_action(action, extra): called for every `__action__` marker with
+-- its action name and the rest of the marker's fields.
+-- opts.drain_timeout: forwarded to H.drain after the whole replay.
+function H.replay(name, nb, bufnr, opts)
+  opts = opts or {}
+  local server = require("neo-marimo.server")
+  local ws_handlers = require("neo-marimo.ws_handlers")
+
+  local path = H.transcript_dir() .. "/" .. name .. ".jsonl"
+  local f = assert(io.open(path, "r"), "missing transcript: " .. path)
+
+  local action_count = 0
+  for line in f:lines() do
+    if line ~= "" then
+      local ok_decode, decoded = pcall(vim.json.decode, line)
+      if ok_decode and type(decoded) == "table" and decoded.__action__ then
+        action_count = action_count + 1
+        if opts.until_action and action_count > opts.until_action then
+          break
+        end
+        if opts.on_action then
+          local extra = {}
+          for k, v in pairs(decoded) do
+            if k ~= "__action__" then extra[k] = v end
+          end
+          opts.on_action(decoded.__action__, extra)
+        end
+      else
+        -- Same decode point production uses (server.lua's dispatch_line
+        -- closure inside connect_ws). Replay skips M._reassemble_stdout's
+        -- chunk-stitching on purpose: that reassembles ws_client.py's
+        -- stdout chunks into one complete line, and a transcript is already
+        -- one complete JSON object per line by construction (T1 records
+        -- post-reassembly) — reassembling again here would be a no-op at
+        -- best and silently wrong if a transcript line ever legitimately
+        -- contained an embedded newline.
+        local msg = server._decode_ws_line(line)
+        if msg then
+          local op = msg.op or msg.name
+          local payload = (type(msg.data) == "table" and msg.data) or msg
+          local ok = ws_handlers.dispatch(op, payload, { nb = nb, bufnr = bufnr, raw = msg })
+          if opts.on_dispatch then opts.on_dispatch(op, payload, ok) end
+        end
+      end
+    end
+  end
+  f:close()
+
+  H.drain(opts.drain_timeout)
+end
+
 -- ── render-state serializer (T0) ─────────────────────────────────────────
 --
 -- t.render_state(bufnr, opts) -> one stable string: buffer lines, then
@@ -389,6 +545,28 @@ function H.render_state(bufnr, opts)
               "  virt_line[%s]: %s%s", pos, line_text, hls_suffix(hls)))
           end
         end
+      end
+    end
+  end
+
+  -- Image placements (T2 replay layer) live in image.lua's own registry, not
+  -- in a namespace this serializer already walks — inline-image backends
+  -- (image.nvim/snacks.image, or the T2 test-stub standing in for them) draw
+  -- via their own extmarks outside ns_output. Surfacing (key, file) here is
+  -- what let a T2 replay case catch the F2.6 registry-migration leak: a
+  -- re-key that fails to migrate an old placement key shows up as an extra
+  -- or missing line here, not as pixels.
+  local image_ok, image_mod = pcall(require, "neo-marimo.image")
+  if image_ok and image_mod._placements_for_test then
+    local placements = image_mod._placements_for_test(bufnr)
+    if placements and next(placements) then
+      local keys = {}
+      for k in pairs(placements) do table.insert(keys, k) end
+      table.sort(keys)
+      table.insert(out, "")
+      table.insert(out, "== images ==")
+      for _, k in ipairs(keys) do
+        table.insert(out, string.format("[%s] %s", k, vim.fn.fnamemodify(placements[k].path, ":t")))
       end
     end
   end

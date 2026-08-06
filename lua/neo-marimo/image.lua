@@ -120,7 +120,27 @@ end
 -- mirrors the plan: image.nvim first (most popular), snacks.image second.
 local _backend_cache = nil
 
+-- Test-only backend override (T2 replay layer, docs/plan-testing.md). The
+-- headless test env has neither image.nvim nor snacks.image on its
+-- package.path, so pick_backend() always falls through to the graceful
+-- "no backend" text fallback for a real replay — which means the placement
+-- registry (register_placement / migrate_keys / clear_for_cell, the code
+-- the F2.6 re-key leak actually lived in) never runs during a replay test,
+-- and the fallback text embeds vim.fn.stdpath("cache")'s machine-specific
+-- home-dir path, which isn't snapshot-portable either. Installing a fake
+-- "backend" here — a plain function standing in for a real backend's draw
+-- call (image.nvim's img:render(), snacks' placement.new) — lets replay
+-- exercise the real bookkeeping with deterministic (bufnr, key, path) data
+-- while skipping only the one thing that can't run headless: the actual
+-- escape-code emission. `nil` restores auto-detection.
+local _test_backend = nil
+
+function M._set_test_backend(fn)
+  _test_backend = fn
+end
+
 local function pick_backend()
+  if _test_backend then return "test-stub" end
   if _backend_cache ~= nil then return _backend_cache end
 
   local ok_image = pcall(require, "image")
@@ -376,6 +396,20 @@ local function render_path(bufnr, row, mime, path, key)
         utils.warn("snacks.image failed: " .. tostring(placement))
       end
     end
+  elseif backend == "test-stub" then
+    -- `_test_backend` stands in for a real backend's own draw call — see
+    -- its declaration above. It receives the same (bufnr, row, mime, path,
+    -- key) a real backend implementation branch does; a truthy return means
+    -- "drew fine", exactly like ok_create above, and an optional second
+    -- return value is the closer registered like any other backend's.
+    local ok_create, closer = pcall(_test_backend, bufnr, row, mime, path, key)
+    if log.enabled() then
+      log.write("img:test-stub", { ok_create = ok_create, key = key, path = path })
+    end
+    if ok_create then
+      register_placement(bufnr, key, path, type(closer) == "function" and closer or function() end)
+      return {}
+    end
   end
 
   -- Fallback: announce the file so the user can open it externally.
@@ -504,6 +538,15 @@ M._b64_decode = b64_decode
 -- clear_for_cell behaviour with a plain close-spy closure.
 function M._register_for_test(bufnr, key, path, closer)
   register_placement(bufnr, key, path, closer)
+end
+
+-- Read-only view of the placement registry for one buffer (T2 replay
+-- layer): { [key] = { path = <file>, close = <fn> } }, the same shape
+-- register_placement stores. Used by tests/helpers.lua's t.render_state to
+-- surface placement data (which cell, which file) in a snapshot without
+-- reaching into the module's private `_placements` table directly.
+function M._placements_for_test(bufnr)
+  return _placements[bufnr]
 end
 
 return M

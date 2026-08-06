@@ -1,0 +1,58 @@
+== buffer ==
+  0| import pandas as pd
+  1| df = pd.DataFrame({"a": range(300), "b": [i * i for i in range(300)]})
+  2| df
+  3| # Non-interactive backend: this scenario is recorded/replayed headless,
+  4| # never with a display, so the default backend (which can differ per
+  5| # platform) must not be allowed to pick an interactive one.
+  6| import matplotlib
+  7| matplotlib.use("Agg")
+  8| import matplotlib.pyplot as plt
+  9| import numpy as np
+ 10| 
+ 11| # Enough points that the exported PNG's base64 payload spans multiple
+ 12| # WS/stdout chunks (see server.lua's _reassemble_stdout why-comment) —
+ 13| # this scenario exists specifically to exercise that reassembly.
+ 14| x_vals = np.linspace(0, 20, 4000)
+ 15| fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
+ 16| ax.plot(x_vals, np.sin(x_vals) * np.cos(x_vals * 3))
+ 17| ax.set_title("dense plot for chunked-stdout coverage")
+ 18| ax
+
+== ns:neo_marimo_border ==
+[0,0]
+  virt_line[below]: ╰──────────────────────────────────────────────────────────────────────╯  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[0,0]
+  virt_line[above]: ╭─  py #1 ─────────────────────────────────────────────────────────────╮  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonLabel,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[1,0]
+  virt_line[above]: ╭─  py #2 ─────────────────────────────────────────────────────────────╮  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonLabel,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[2,0]
+  virt_line[below]: ╰──────────────────────────────────────────────────────────────────────╯  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[3,0]
+  virt_line[above]: ╭─  py #3 ─────────────────────────────────────────────────────────────╮  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonLabel,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[18,0]
+  virt_line[below]: ╰──────────────────────────────────────────────────────────────────────╯  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonBorder]
+
+== ns:neo_marimo_cell_anchor ==
+[0,0] -> [0,19]
+[1,0] -> [2,2]
+[3,0] -> [18,2]
+
+== ns:neo_marimo_output ==
+[0,0]
+  virt_line[below]:   ✓ ran  hl=[MarimoStatusOk]
+[2,0]
+  virt_line[below]:   ✓ ran  hl=[MarimoStatusOk]
+  virt_line[below]:   │ a    │ b    │  hl=[MarimoOutputText]
+  virt_line[below]:   ├──────┤──────┤  hl=[MarimoOutputText]
+  virt_line[below]:   │ 0    │ 0    │  hl=[MarimoOutputText]
+  virt_line[below]:   │ 1    │ 1    │  hl=[MarimoOutputText]
+  virt_line[below]:   │ 2    │ 4    │  hl=[MarimoOutputText]
+  virt_line[below]:   │ 3    │ 9    │  hl=[MarimoOutputText]
+  virt_line[below]:   │ 4    │ 16   │  hl=[MarimoOutputText]
+  virt_line[below]:   … 5 more rows · <leader>mD for full panel  hl=[Comment,MarimoMarkdownInlineCode,Comment]
+[18,0]
+  virt_line[below]:   ✓ ran  hl=[MarimoStatusOk]
+
+== images ==
+[<cell-3>] 3bbcc30f5babe3e1.png

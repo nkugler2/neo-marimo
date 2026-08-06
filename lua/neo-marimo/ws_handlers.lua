@@ -245,6 +245,33 @@ M.register("update-cell-ids", function(payload, ctx)
   end
 end)
 
+-- remove-ui-elements: marimo tells clients to drop a cell's UI elements
+-- right before it reruns. We don't need the notice separately — output.lua's
+-- M.render already calls widgets.clear_for_cell/image.clear_for_cell for a
+-- cell before drawing its next output (see M.render's own comment), so this
+-- op's effect always lands anyway on the cell-op that follows. Registered
+-- explicitly (rather than left unhandled) so ws_handlers.dispatch's
+-- no-handler path stays reserved for ops we've genuinely never seen before —
+-- T2's replay coverage guard (docs/plan-testing.md) treats "dispatch
+-- returned false" as "marimo sent an op we silently drop," and this one
+-- isn't dropped, it's a documented no-op.
+-- Caveat: the "subsumed by clear-before-draw" argument assumes a cell-op
+-- always follows. No recorded transcript shows otherwise, but if marimo
+-- ever sends remove-ui-elements with NO subsequent cell-op (e.g. a run
+-- cancelled before producing output), stale widget/image registrations
+-- would survive — at that point this needs a real clear_for_cell body.
+M.register("remove-ui-elements", function(_, _) end)
+
+-- datasets: table/column metadata (name, dtype, sample values) for a
+-- DataFrame or SQL result, feeding marimo's browser-only "Data Sources"
+-- panel — a UI surface this plugin doesn't have an nvim-side equivalent of.
+-- Explicitly a no-op for the same reason as remove-ui-elements above: this
+-- keeps ws_handlers.dispatch's "no handler" path reserved for ops nobody's
+-- looked at yet, rather than papering over a real gap. Found by T2's replay
+-- coverage guard the first time rich_output.py's DataFrame cell was
+-- replayed (docs/plan-testing.md).
+M.register("datasets", function(_, _) end)
+
 M.register("neo_marimo_connected", function(_, _)
   utils.info("WebSocket connected.")
 end)

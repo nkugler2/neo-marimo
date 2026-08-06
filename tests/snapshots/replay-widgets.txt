@@ -1,0 +1,35 @@
+== buffer ==
+  0| import marimo as mo
+  1| slider = mo.ui.slider(0, 10, value=5, label="N")
+  2| slider
+  3| doubled = slider.value * 2
+  4| doubled
+
+== ns:neo_marimo_border ==
+[0,0]
+  virt_line[below]: ╰──────────────────────────────────────────────────────────────────────╯  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[0,0]
+  virt_line[above]: ╭─  py #1 ─────────────────────────────────────────────────────────────╮  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonLabel,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[1,0]
+  virt_line[above]: ╭─  py #2 ─────────────────────────────────────────────────────────────╮  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonLabel,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[2,0]
+  virt_line[below]: ╰──────────────────────────────────────────────────────────────────────╯  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[3,0]
+  virt_line[above]: ╭─  py #3 ─────────────────────────────────────────────────────────────╮  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonLabel,MarimoCellPythonBorder,MarimoCellPythonBorder]
+[4,0]
+  virt_line[below]: ╰──────────────────────────────────────────────────────────────────────╯  hl=[MarimoCellPythonBorder,MarimoCellPythonBorder,MarimoCellPythonBorder]
+
+== ns:neo_marimo_cell_anchor ==
+[0,0] -> [0,19]
+[1,0] -> [2,6]
+[3,0] -> [4,7]
+
+== ns:neo_marimo_output ==
+[0,0]
+  virt_line[below]:   ✓ ran  hl=[MarimoStatusOk]
+[2,0]
+  virt_line[below]:   ✓ ran  hl=[MarimoStatusOk]
+  virt_line[below]:   N: [━━━━━━━━━━━━●━━━━━━━━━━━] 5  (0‥10)  hl=[MarimoOutputText,MarimoWidgetLabel,MarimoWidgetTrack,MarimoWidgetTrack,MarimoWidgetThumb,MarimoWidgetTrack,MarimoWidgetTrack,MarimoWidgetValue,Comment]
+[4,0]
+  virt_line[below]:   ✓ ran  hl=[MarimoStatusOk]
+  virt_line[below]:   16  hl=[MarimoOutputText]

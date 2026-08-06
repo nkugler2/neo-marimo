@@ -271,6 +271,62 @@ generically is flaky, it is acceptable to expose a small test-only hook in
 the plugin (like the existing `nb._flush_pending()` pattern) to flush
 pending render work synchronously — precedent already exists in helpers.lua.
 
+**Deviation taken:** the async-drain risk above didn't materialize — the only
+`vim.schedule` in the replayed call chain is `output.lua`'s `handle_cell_op`
+deferring its own `M.render` (verified: no debounce/timer sits between
+`ws_handlers.dispatch` and a render for any op these transcripts exercise),
+and a single `vim.wait(0)` reliably flushes an already-queued schedule
+callback. `H.drain` still loops a few times under a wall-clock cap rather
+than assuming exactly one pass is always enough, as cheap insurance against a
+future handler adding a second level of scheduling — but the
+`nb._flush_pending()`-style plugin hook was not needed.
+
+Scenario cell codes are read from `tests/scenarios/*.py` via a small
+purpose-built extractor (`H.scenario_codes` in tests/helpers.lua) rather than
+via `python/bridge.py` or a hand-copied list — it only has to handle this
+corpus's own 5 files (marimo's default 4-space indent, one flat body per
+cell, ending in a bare `return`), and its output was checked byte-identical
+against the committed transcripts' own `kernel-ready.codes` field.
+
+Two ops present in every transcript had no registered handler at all:
+`remove-ui-elements` (marimo's pre-rerun UI-teardown notice — already
+subsumed by `output.render`'s own `widgets.clear_for_cell` /
+`image.clear_for_cell` before it draws a cell's next output) and `datasets`
+(table/column metadata feeding marimo's browser-only "Data Sources" panel,
+which this plugin has no nvim-side equivalent of). Both are now registered
+as explicit no-ops in `ws_handlers.lua`, with a comment explaining why —
+this is exactly the class of finding the coverage guard exists to surface,
+and leaving either unregistered would have made the guard fail on *every*
+transcript rather than only on a genuinely new/unexpected op.
+
+The image-rendering seam (build step 4) is `image.lua`'s `M._set_test_backend`:
+a test-only override that makes `pick_backend()` return a fake `"test-stub"`
+backend, so `render_path` runs its normal `register_placement`/
+`migrate_keys`/`clear_for_cell` bookkeeping against a plain recorder function
+instead of a real backend's draw call (image.nvim's `img:render()`, snacks'
+`placement.new`) — neither of which is reachable from this headless test
+env's `package.path` anyway. `t.render_state` grew an `== images ==` section
+reading `image.lua`'s own placement registry (`M._placements_for_test`) so a
+re-key that fails to migrate a placement's key shows up in the snapshot
+directly, which is what the dedicated F2.6 regression case in
+`replay_spec.lua` exercises.
+
+Recording `rich_output.jsonl` (T1) turned out to have a real bug, found only
+once T2 tried to actually decode and place its image: T1's `py_object_addr`
+normalization rule (`0x%x+` → `<hex-addr>`, meant for a bare Python object
+repr like `<Figure object at 0x7f...>`) was unanchored, and a ~220KB base64
+PNG is long enough that the literal substring "0x" followed by hex-looking
+base64 digits occurs by chance dozens of times inside the image itself —
+silently corrupting it into invalid base64 on every recording. Fixed by
+anchoring the rule to `"at 0x%x+"` (the literal text Python always emits
+right before the address, which base64's alphabet can't produce on its own)
+in `tests/record_transcripts.lua`, then re-recorded only `rich_output`
+(the other 4 scenarios never matched `0x` at all, confirmed against the
+previously-committed files) and re-verified T1's byte-identical-across-two-runs
+bar still holds. This is why `replay-rich_output.txt`'s `== images ==`
+section shows a real decoded placement rather than an
+`[image — invalid base64]` fallback line.
+
 ---
 
 ## T3 — Gated end-to-end smoke tests (real kernel)
