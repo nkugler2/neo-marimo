@@ -1,10 +1,16 @@
-# Runs the full test suite on every push and pull request, against both the
-# current stable Neovim and nightly (extmark/API behavior occasionally shifts
-# between versions, and users will be on both).
+# Runs the test suite on every push and pull request. Two jobs, split by
+# what they need:
+#   - `unit`   — the Lua-only suite (unit + replay layers, docs/plan-testing.md
+#     T0-T2). No python/marimo required; this is the fast, always-required
+#     check.
+#   - `marimo` — the same suite, but with a marimo-equipped python so the
+#     python-gated specs (bridge round-trip; future E2E per plan-testing.md
+#     T3) actually run instead of self-skipping. Matrixed across the two
+#     marimo series this plugin tracks (see health.lua / the fixture corpus
+#     under tests/fixtures/).
 #
-# marimo is installed so the python-gated specs (bridge round-trip) run too;
-# if that install ever breaks, those specs self-skip and the rest of the
-# suite still guards the Lua side.
+# See docs/plan-testing.md (phase T6) for the acceptance criteria this
+# workflow satisfies.
 name: test
 
 on:
@@ -13,29 +19,76 @@ on:
   pull_request:
 
 jobs:
-  test:
+  unit:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        neovim: [stable, nightly]
-    name: nvim ${{ matrix.neovim }}
+    name: unit + replay (nvim stable)
     steps:
       - uses: actions/checkout@v4
 
       - uses: rhysd/action-setup-vim@v1
         with:
           neovim: true
-          version: ${{ matrix.neovim }}
+          version: stable
+
+      # The Makefile's PYTHON default is the maintainer's personal pyenv
+      # path, which doesn't exist on the runner. Point it at whatever python3
+      # is on PATH instead — the bridge-gated specs probe `import marimo` (not
+      # just executable existence) and self-skip cleanly without it, so this
+      # job proves the "no marimo installed" path stays green, not just that
+      # it happens to avoid running those specs.
+      - name: Run tests (no marimo)
+        run: make test PYTHON=python3
+
+      - name: Upload snapshot diffs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-diffs-unit
+          path: tests/snapshots/*.actual.txt
+          if-no-files-found: ignore
+
+  marimo:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        marimo-version: ["0.19.*", "0.23.*"]
+    name: marimo ${{ matrix.marimo-version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: stable
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      # Pin to the tested series (see health.lua). Bump together with the
-      # fixture corpus when adopting a new marimo series.
       - name: Install marimo
-        run: pip install "marimo==0.19.*"
+        run: pip install "marimo==${{ matrix.marimo-version }}"
 
+      # NEO_MARIMO_TEST_PYTHON's sibling-binary lookup for the actual kernel
+      # (marimo_cmd, distinct from python_path — see the comment in
+      # tests/record_transcripts.lua) needs `marimo` next to `python` on
+      # PATH. setup-python's install is exactly that: pip installs marimo's
+      # console script into the same bin/ dir as the python it configured,
+      # so no extra wiring is needed here.
       - name: Run tests
         run: make test PYTHON=python
+
+      - name: Upload snapshot diffs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-diffs-marimo-${{ matrix.marimo-version }}
+          path: tests/snapshots/*.actual.txt
+          if-no-files-found: ignore
+
+  # Style gates (stylua/luacheck) belong to release-plan phase R2
+  # (docs/plan-release.md); as of this workflow, no .stylua.toml or
+  # .luacheckrc exist in the repo, so R2 hasn't landed yet. Add a `lint` job
+  # here once it does — don't pull R2 forward into T6.
+  # TODO(R2): add a lint job running `stylua --check lua/ tests/` and
+  # `luacheck lua/` once .stylua.toml / .luacheckrc land.

@@ -448,6 +448,27 @@ decision here — T0–T4 already deliver the core value.
    landed by the time this runs, add them as a third job; if not, leave a
    TODO comment in the workflow, don't pull R2 forward.
 
+**Deviation taken:** the repo already had a stale pre-T6 `.github/workflows/test.yml`
+(from an earlier commit, before this plan existed) — a single job matrixed
+over nvim stable/nightly that always installed marimo 0.19 and never
+self-skip-tested the no-python path. Replaced it wholesale rather than
+layering T6 on top, since the old shape didn't separate the fast
+always-green check from the marimo-gated one the acceptance criteria calls
+for. Named the two jobs `unit` and `marimo` (rather than literally "Job 1"/
+"Job 2") and dropped the old nightly-nvim leg — not part of this phase's
+contract and it would have doubled the marimo matrix's runtime for no
+acceptance-criteria benefit; can be added back as a separate concern later.
+Each matrix leg (unit, and each marimo version) uploads its own
+`snapshot-diffs-*` artifact on failure so a red 0.23-only leg doesn't get its
+diff clobbered by a green 0.19 leg's artifact name.
+
+Verified locally (cannot push from this worktree, so no live GitHub run):
+`make test` green: 271 passed; `make test PYTHON=/nonexistent/python` green:
+265 passed (6 bridge-round-trip cases self-skip, everything else still runs)
+with a clean `git status` after (no snapshot self-test artifacts left behind
+by either run); YAML parses cleanly (`ruby -ryaml`, ruby's json parser was
+available where python's `yaml` module was not).
+
 **Acceptance:** green run on GitHub for the current master; a PR with a
 deliberately broken snapshot shows a red check with the actual-vs-golden
 artifact attached.
