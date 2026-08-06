@@ -43,6 +43,8 @@ Requires nvim 0.11+ and `curl` on PATH. Single-developer, pre-release.
   `nvim -l tests/run.lua html` (filter). Marimo-gated specs (bridge round-trips)
   **self-skip** when the interpreter lacks marimo, so the rest run anywhere.
 - Re-capture fixtures: `make fixtures` (needs a marimo-equipped python).
+- `make demo [SCENARIO=widgets]` drops you into a real, attached, kernel-running
+  nvim session for manual checks — see `docs/testing.md` for the full test story.
 - Style gates (`stylua`, `luacheck`) land in plan phase R2; run them once present.
 
 ## Rules of the codebase

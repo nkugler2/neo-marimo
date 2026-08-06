@@ -9,6 +9,16 @@ H.cases = {}
 -- Repo root (tests/ lives directly under it). Set by run.lua before specs load.
 H.root = nil
 
+-- Name of the t.case currently executing, set by run.lua right before it
+-- calls case.fn. t.snapshot reads this to name the exact `make snapshots
+-- FILTER=...` invocation that re-selects the failing case (T4) — run.lua's
+-- filter matches against case.name (a plain substring check), not the
+-- snapshot's own name, and the two aren't always textually related (e.g.
+-- output_spec.lua's case names don't literally contain their snapshot
+-- names). nil outside of a case (or if run.lua is ever bypassed), in which
+-- case t.snapshot falls back to the snapshot name itself.
+H._current_case = nil
+
 function H.case(name, fn)
   table.insert(H.cases, { name = name, fn = fn })
 end
@@ -234,6 +244,43 @@ local function ensure_trailing_newline(s)
   return s
 end
 
+-- The exact command that re-runs (only) the currently-executing case with
+-- goldens regenerated: FILTER's value must be the *case* name
+-- (H._current_case), not the snapshot's own name — run.lua's filter is a
+-- plain substring match against case.name, and the two names aren't always
+-- textually related. Falls back to the snapshot name if called outside a
+-- t.case (shouldn't happen via `make test`, but keeps the message sane for a
+-- stray direct call).
+--
+-- Two escaping steps, in order, both load-bearing — a naive `FILTER="%s"`
+-- (the original T4 version) breaks on real case names: snapshot_spec.lua has
+-- one containing backticks, and output_spec.lua has one containing a `"`.
+--   1. Double any literal "$" in the value. This isn't about the shell at
+--      all — it's because GNU Make expands "$" inside a command-line-set
+--      variable's value every time it computes that value (verified
+--      empirically; see the Makefile's `export NEO_MARIMO_TEST_FILTER`
+--      comment), so an unescaped "$" would silently eat characters (e.g.
+--      "$HOME" truncating to "OME") no matter how the shell layer is
+--      quoted. "$$" is make's own escape for a literal "$" and survives
+--      make's expansion intact. No committed case name currently contains
+--      "$" — this is defensive, and the one genuinely remaining limitation:
+--      a value containing "$" must be typed as "$$" by whoever pastes this,
+--      which the printed command below does NOT do for them (see the
+--      Makefile comment for why a fully general fix isn't worth the
+--      complexity here).
+--   2. vim.fn.shellescape the result: wraps in single quotes (escaping any
+--      embedded single quote as '\''), which is what actually neutralizes
+--      backticks/`"`/`$(...)`/spaces for the shell the human pastes this
+--      into — double quotes do NOT neutralize backticks (`` "`cmd`" `` still
+--      runs `cmd`), which is exactly what made the original version unsafe.
+-- Verified against both real hostile case names (see snapshot_spec.lua's own
+-- "accept_command" cases) and empirically against `make snapshots
+-- FILTER='...'` end-to-end (docs/plan-testing.md's T4 deviation note).
+local function accept_command(name)
+  local filter_value = (H._current_case or name):gsub("%$", "$$")
+  return "make snapshots FILTER=" .. vim.fn.shellescape(filter_value)
+end
+
 function H.snapshot(name, text)
   text = ensure_trailing_newline(text)
   local dir = H.root .. "/tests/snapshots"
@@ -246,8 +293,8 @@ function H.snapshot(name, text)
   if not f then
     if not update then
       fail(string.format(
-        "missing snapshot '%s' (%s) — run `make snapshots` to create it",
-        name, golden_path))
+        "missing snapshot '%s' (%s) — run `%s` to create it",
+        name, golden_path, accept_command(name)))
     end
     local wf = assert(io.open(golden_path, "w"))
     wf:write(text)
@@ -279,8 +326,8 @@ function H.snapshot(name, text)
 
   local diff = vim.diff(golden, text, { result_type = "unified", ctxlen = 2 })
   fail(string.format(
-    "snapshot '%s' mismatch — actual written to %s\n%s",
-    name, actual_path, diff or "(vim.diff produced no output)"))
+    "snapshot '%s' mismatch — actual written to %s\n%s\nrun `%s` to accept this change",
+    name, actual_path, diff or "(vim.diff produced no output)", accept_command(name)))
 end
 
 -- ── replay layer (T2) ────────────────────────────────────────────────────

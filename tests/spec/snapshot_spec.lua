@@ -32,6 +32,19 @@ local function with_update_env(value, fn)
   if not ok then error(err, 0) end
 end
 
+-- Temporarily overrides t._current_case (run.lua normally sets this right
+-- before calling a case's fn — see accept_command in tests/helpers.lua) so a
+-- case can exercise accept_command's H._current_case == nil fallback path
+-- without actually running outside of a t.case. Always restores, even if
+-- `fn` throws — same discipline as with_update_env above.
+local function with_current_case(value, fn)
+  local orig = t._current_case
+  t._current_case = value
+  local ok, err = pcall(fn)
+  t._current_case = orig
+  if not ok then error(err, 0) end
+end
+
 t.case("snapshot: missing golden without the update env fails and names `make snapshots`", function()
   local name = "selftest-missing-no-update"
   cleanup(name)
@@ -87,6 +100,57 @@ t.case("snapshot: mismatch without the update env fails with a diff and writes .
   local f = assert(io.open(actual_path, "r"), ".actual.txt written on mismatch")
   t.eq(f:read("*a"), "line one\nline THREE\n")
   f:close()
+  cleanup(name)
+end)
+
+-- Regression for the T4 review finding: a naive `FILTER="<case name>"` broke
+-- on real case names (a backtick in one, a literal `"` in another — see
+-- snapshot_spec.lua's own case above and output_spec.lua:554). This case's
+-- OWN name is deliberately hostile (backticks AND a double quote) so the
+-- test is self-contained proof, not just "matches what happens to be in
+-- other spec files today".
+t.case("snapshot: accept_command escapes a case name with `backticks` and \"quotes\"", function()
+  local name = "selftest-accept-command-hostile"
+  cleanup(name)
+  with_update_env("1", function() t.snapshot(name, "one\n") end)
+
+  with_update_env(false, function()
+    local ok, err = pcall(t.snapshot, name, "two\n")
+    t.ok(not ok, "mismatch fails")
+    local msg = tostring(err)
+
+    -- t._current_case is this very case's own name (set by run.lua right
+    -- before invoking it) — read it live rather than hand-duplicating the
+    -- literal string above, so a typo here can't fake a pass.
+    local expected = "FILTER=" .. vim.fn.shellescape(t._current_case)
+    t.match(msg, vim.pesc(expected),
+      "printed command's FILTER is exactly vim.fn.shellescape(the case name)")
+
+    -- Sanity: the hostile characters actually made it through unmangled
+    -- inside that shellescape'd token (not, say, silently stripped).
+    t.match(msg, "`backticks`", "backticks survive verbatim")
+    t.match(msg, '"quotes"', "the embedded double quote survives verbatim")
+  end)
+
+  cleanup(name)
+end)
+
+t.case("snapshot: accept_command falls back to the snapshot name when no case is tracked", function()
+  local name = "selftest-accept-command-no-case"
+  cleanup(name)
+  with_update_env("1", function() t.snapshot(name, "one\n") end)
+
+  with_current_case(nil, function()
+    with_update_env(false, function()
+      local ok, err = pcall(t.snapshot, name, "two\n")
+      t.ok(not ok, "mismatch fails")
+      local msg = tostring(err)
+      local expected = "FILTER=" .. vim.fn.shellescape(name)
+      t.match(msg, vim.pesc(expected),
+        "falls back to the snapshot's own name (shellescape'd the same way) when H._current_case is nil")
+    end)
+  end)
+
   cleanup(name)
 end)
 

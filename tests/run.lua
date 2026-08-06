@@ -19,7 +19,19 @@ package.path = table.concat({
 local t = require("helpers")
 t.root = root
 
+-- A positional CLI arg (direct `nvim -l tests/run.lua html` invocation)
+-- always wins; otherwise fall back to NEO_MARIMO_TEST_FILTER, which is how
+-- `make test`/`make snapshots` pass FILTER through (Makefile's own comment
+-- on `export NEO_MARIMO_TEST_FILTER` explains why: putting a value straight
+-- into the recipe's process environment, instead of splicing it into recipe
+-- text as `$(FILTER)`, is what keeps a case name containing shell
+-- metacharacters — e.g. snapshot_spec.lua's backtick-containing case name —
+-- from being interpreted by a shell at all).
 local filter = _G.arg and _G.arg[1] or nil
+if not filter or filter == "" then
+  local env_filter = os.getenv("NEO_MARIMO_TEST_FILTER")
+  if env_filter and env_filter ~= "" then filter = env_filter end
+end
 
 -- Load every spec (they register cases into t.cases as a side effect).
 local specs = vim.fn.glob(root .. "/tests/spec/*_spec.lua", false, true)
@@ -38,6 +50,11 @@ local failures = {}
 
 for _, case in ipairs(t.cases) do
   if not filter or case.name:find(filter, 1, true) then
+    -- Exposed to helpers.lua's t.snapshot so a failure can name the exact
+    -- `make snapshots FILTER=...` invocation that re-selects THIS case (T4)
+    -- — the case name (not the snapshot name) is what run.lua's own filter
+    -- matches against, and the two aren't always textually related.
+    t._current_case = case.name
     local ok, err = xpcall(case.fn, debug.traceback)
     if ok then
       pass = pass + 1

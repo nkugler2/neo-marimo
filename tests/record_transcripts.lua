@@ -599,8 +599,22 @@ end
 
 -- ── main ──────────────────────────────────────────────────────────────────
 
+-- Positional CLI args (direct `nvim -l tests/record_transcripts.lua widgets`
+-- invocation) win; otherwise fall back to NEO_MARIMO_TEST_FILTER
+-- (space-separated for more than one name), which is how `make transcripts
+-- FILTER=...` passes it through — see the Makefile's `export
+-- NEO_MARIMO_TEST_FILTER` comment for why this is an env var and not a
+-- positional recipe argument (a scenario name is never attacker/typo-prone
+-- shell-metacharacter content in practice, but the plumbing is shared with
+-- tests/run.lua's FILTER, which is — consistency over a one-off exception).
 local requested = {}
 for i = 1, #(_G.arg or {}) do requested[_G.arg[i]] = true end
+if next(requested) == nil then
+  local env_filter = os.getenv("NEO_MARIMO_TEST_FILTER")
+  if env_filter and env_filter ~= "" then
+    for word in env_filter:gmatch("%S+") do requested[word] = true end
+  end
+end
 
 local names = {}
 for name in pairs(SCENARIOS) do

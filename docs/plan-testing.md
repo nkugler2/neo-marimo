@@ -432,6 +432,102 @@ you into a live manual session that is the same every time.
   two minutes and successfully: run the suite, break a snapshot, read the
   diff, accept it, and start a demo session.
 
+**Deviation taken:** none from the build steps' intent, but two things worth
+recording for whoever touches `tests/demo_init.lua` next:
+
+- **`FILTER` must name the failing *case*, not the snapshot.** run.lua's
+  filter is a plain substring match against `case.name`, and a snapshot's own
+  name isn't always a substring of its case's name (e.g.
+  `output_spec.lua`'s case `"output: tabs payload attaches virt_lines and
+  registers widgets"` snapshots as `"output-tabs_with_table"` — neither string
+  contains the other). Fixed by having run.lua stash the currently-executing
+  case's name (`t._current_case`) before calling `case.fn`, and having
+  `t.snapshot`'s failure messages build the accept command from that instead
+  of the snapshot name.
+
+  **Post-review correction:** the first version of this (`FILTER="<case
+  name>"`, hand-rolled double-quoting) was a real command-injection bug, not
+  just a cosmetic escaping gap — a review caught it and it's worse than
+  "breaks on paste": `output_spec.lua`'s case name contains a literal `"`
+  (breaks out of the wrapping quotes) and `snapshot_spec.lua` has one
+  containing backticks, and **double quotes do not neutralize backticks in
+  POSIX shell** — `` "`cmd`" `` still runs `cmd`. Worse, the root cause
+  wasn't only the printed message: the Makefile recipes themselves spliced
+  `$(FILTER)`'s expanded text straight into a double-quoted recipe line
+  (`nvim -l tests/run.lua "$(FILTER)"`), so *any* value containing a backtick
+  reaching `FILTER` — typed by hand or pasted from the (now-fixed) message —
+  got executed by the recipe's own shell. Confirmed by demonstration:
+  `make snapshots FILTER='probe `touch /tmp/pwned` end'` really did create
+  `/tmp/pwned`.
+
+  Fixed at both layers:
+  1. **Makefile:** `FILTER` is no longer referenced as `$(FILTER)` inside any
+     recipe's shell text. `export NEO_MARIMO_TEST_FILTER = $(FILTER)` instead
+     places the value directly into each recipe's process environment
+     (execve's envp), which a shell never re-parses for word-splitting,
+     globbing, or command substitution — `tests/run.lua` and
+     `tests/record_transcripts.lua` read `NEO_MARIMO_TEST_FILTER` (namespaced
+     to avoid colliding with an unrelated ambient `$FILTER`) as a fallback
+     when no positional CLI arg was given, so direct invocations
+     (`nvim -l tests/run.lua html`) are untouched. Re-verified the backtick
+     case is inert through this path: `make snapshots FILTER='probe
+     `touch /tmp/pwned` end'` no longer creates the file.
+  2. **`tests/helpers.lua`'s `accept_command`:** doubles any literal `$` in
+     the value (GNU Make expands `$` inside a command-line-set variable's
+     value every time it *computes* that value — this happens even for the
+     export form above, so it's not a shell issue at all; confirmed
+     empirically that an unescaped `$` silently eats characters, e.g. an
+     embedded `$HOME` truncating to `OME`), then wraps the result with
+     `vim.fn.shellescape` (single-quote based — this is what actually
+     neutralizes backticks/`"`/spaces for the human's own shell, unlike the
+     original hand-rolled double quotes).
+
+  **Genuinely remaining limitation** (documented rather than solved with a
+  heavier value-passing mechanism, since no committed case name hits it): a
+  case name containing a literal `$` must be typed as `$$` by whoever pastes
+  the printed command, because of the make-level expansion above — this is
+  inherent to how GNU Make computes command-line-variable values and applies
+  regardless of the export vs. `$(FILTER)`-in-text choice.
+
+  Re-verified end-to-end after the fix, including against real hostile case
+  names (not just synthetic ones): `make test FILTER='snapshot: missing
+  golden without the update env fails and names `touch /tmp/PWNED2`'` (a
+  deliberately-injected payload riding along the shape of
+  `snapshot_spec.lua`'s real backtick-containing case name) selected zero
+  cases and created no file; `make test FILTER='<that real case name,
+  verbatim>'` correctly selected and passed exactly that one case. Separately,
+  corrupted a committed golden (`output-tabs_with_table.txt`), confirmed
+  `make test` fails with a diff + `.actual.txt` + the printed accept command,
+  ran that command verbatim, confirmed it regenerated ONLY the one golden
+  (`git status`/`git diff` showed no other file touched, byte-identical to
+  the pre-corruption original), and that `make test` was green again
+  afterward (279 cases, up from 277 — two new regression cases added to
+  `snapshot_spec.lua` exercise `accept_command` directly: one with a
+  self-contained hostile case name containing both a backtick and a `"`, one
+  covering the `H._current_case == nil` fallback path).
+- **`nvim -u FILE`'s automatic `'runtimepath'/plugin/**` scan runs BEFORE
+  `FILE` itself executes**, not after — prepending this working copy onto
+  `'runtimepath'` inside `tests/demo_init.lua` was too late for
+  `plugin/neo-marimo.lua`'s autocmds/user commands (the real attach entry
+  point) to be picked up by nvim's own automatic pass; verified empirically
+  (the plugin's `NeoMarimo` augroup didn't exist after the prepend). Same
+  reason lazy-loading plugin managers explicitly `:runtime` their managed
+  plugins rather than relying on the automatic scan — their bootstrap IS the
+  `-u`/init.lua execution, same boat this demo script is in. Fixed with an
+  explicit `vim.cmd("runtime! plugin/neo-marimo.lua")` right after the
+  `rtp:prepend`. Verified for real (not just reasoned about): `make demo`
+  with `NVIM_ARGS='--headless -c "sleep 4" -c qa'` against all of
+  `basic_run`/`widgets`/`error_cell` shows the real attach message
+  (`Opened <scenario>.py (N cells)`) followed by a REAL kernel actually
+  connecting (`Server ready. Connecting...` → `WebSocket connected.` →
+  `Connected (nvim-only). Run cells with the run keymaps.`), and leaves no
+  stray `marimo edit` process or bound port behind after nvim exits. An
+  unknown `SCENARIO` fails cleanly with a notify + `return` rather than
+  hanging. The genuinely-interactive path (does the notebook LOOK right in a
+  real terminal, do keymaps like `<leader>mr`/`<leader>mv` feel right) was
+  NOT exercised from this non-interactive environment — that part is on the
+  next human (or agent with a real TTY) to eyeball once.
+
 ---
 
 ## T5 — tmux visual snapshots (optional; do last; cuttable)
