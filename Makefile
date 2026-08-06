@@ -9,7 +9,7 @@ PYTHON ?= ~/.pyenv/versions/3.12.10/envs/MyMainTestingPython/bin/python
 # previous clone (preserved at $(PACK_DIR).pre-dev-link).
 PACK_DIR ?= $(HOME)/.local/share/nvim/site/pack/core/opt/neo-marimo
 
-.PHONY: test snapshots fixtures dev-link dev-unlink
+.PHONY: test snapshots fixtures transcripts dev-link dev-unlink
 
 # NEO_MARIMO_TEST_PYTHON gates the python-dependent specs (bridge round-trip);
 # they self-skip when the interpreter is missing or has no marimo, so the rest
@@ -27,6 +27,15 @@ snapshots:
 # Re-capture the marimo HTML fixture corpus (needs a marimo-equipped python).
 fixtures:
 	$(PYTHON) tests/capture_fixtures.py
+
+# Re-record the WS session transcripts (tests/scenarios/*.py -> real marimo
+# kernel -> tests/transcripts/<major.minor>/*.jsonl, T1). Needs the same
+# marimo-equipped python as `make fixtures`; a sibling `marimo` binary must
+# exist next to it (see tests/record_transcripts.lua for why python_path and
+# marimo_cmd have to come from the same env here). FILTER selects scenarios
+# by name, e.g. `make transcripts FILTER=widgets`.
+transcripts:
+	NEO_MARIMO_TEST_PYTHON=$(PYTHON) $(NVIM) -l tests/record_transcripts.lua $(FILTER)
 
 dev-link:
 	@if [ -e "$(PACK_DIR)" ] && [ ! -L "$(PACK_DIR)" ]; then \

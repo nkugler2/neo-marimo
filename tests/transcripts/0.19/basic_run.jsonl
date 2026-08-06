@@ -1,0 +1,17 @@
+{"op": "neo_marimo_connected", "session_id": "<session-id>", "port": "<port>"}
+{"op": "kernel-ready", "data": {"op": "kernel-ready", "cell_ids": ["<cell-1>", "<cell-2>"], "codes": ["x = 1 + 1\nx", "y = x * 10\ny"], "names": ["_", "_"], "layout": null, "configs": [{"column": null, "disabled": false, "hide_code": false}, {"column": null, "disabled": false, "hide_code": false}], "resumed": false, "ui_values": {}, "last_executed_code": {}, "last_execution_time": {}, "app_config": {"width": "compact", "app_title": null, "layout_file": null, "css_file": null, "html_head_file": null, "auto_download": [], "sql_output": "auto"}, "kiosk": false, "capabilities": {"terminal": true, "pylsp": false, "ty": false, "basedpyright": false}, "auto_instantiated": false}}
+{"__action__":"instantiate"}
+{"op": "variables", "data": {"op": "variables", "variables": [{"name": "x", "declared_by": ["<cell-1>"], "used_by": ["<cell-2>"]}, {"name": "y", "declared_by": ["<cell-2>"], "used_by": []}]}}
+{"op": "cell-op", "data": {"op": "cell-op", "cell_id": "<cell-1>", "output": null, "console": null, "status": "queued", "stale_inputs": null, "run_id": "<uuid>", "serialization": null, "timestamp": 0}}
+{"op": "cell-op", "data": {"op": "cell-op", "cell_id": "<cell-2>", "output": null, "console": null, "status": "queued", "stale_inputs": null, "run_id": "<uuid>", "serialization": null, "timestamp": 0}}
+{"op": "remove-ui-elements", "data": {"op": "remove-ui-elements", "cell_id": "<cell-1>"}}
+{"op": "remove-ui-elements", "data": {"op": "remove-ui-elements", "cell_id": "<cell-2>"}}
+{"op": "cell-op", "data": {"op": "cell-op", "cell_id": "<cell-1>", "output": null, "console": [], "status": "running", "stale_inputs": null, "run_id": "<uuid>", "serialization": null, "timestamp": 0}}
+{"op": "variable-values", "data": {"op": "variable-values", "variables": [{"name": "x", "value": "2", "datatype": "int"}]}}
+{"op": "cell-op", "data": {"op": "cell-op", "cell_id": "<cell-1>", "output": {"channel": "output", "mimetype": "text/html", "data": "<pre class='text-xs'>2</pre>", "timestamp": 0}, "console": null, "status": null, "stale_inputs": null, "run_id": "<uuid>", "serialization": null, "timestamp": 0}}
+{"op": "cell-op", "data": {"op": "cell-op", "cell_id": "<cell-1>", "output": null, "console": null, "status": "idle", "stale_inputs": null, "run_id": null, "serialization": null, "timestamp": 0}}
+{"op": "cell-op", "data": {"op": "cell-op", "cell_id": "<cell-2>", "output": null, "console": [], "status": "running", "stale_inputs": null, "run_id": "<uuid>", "serialization": null, "timestamp": 0}}
+{"op": "variable-values", "data": {"op": "variable-values", "variables": [{"name": "y", "value": "20", "datatype": "int"}]}}
+{"op": "cell-op", "data": {"op": "cell-op", "cell_id": "<cell-2>", "output": {"channel": "output", "mimetype": "text/html", "data": "<pre class='text-xs'>20</pre>", "timestamp": 0}, "console": null, "status": null, "stale_inputs": null, "run_id": "<uuid>", "serialization": null, "timestamp": 0}}
+{"op": "cell-op", "data": {"op": "cell-op", "cell_id": "<cell-2>", "output": null, "console": null, "status": "idle", "stale_inputs": null, "run_id": null, "serialization": null, "timestamp": 0}}
+{"op": "completed-run", "data": {"op": "completed-run"}}

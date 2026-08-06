@@ -242,6 +242,13 @@ local function wait_for_server(srv, timeout_ms, cb)
   tick()
 end
 
+-- Test seam for tests/record_transcripts.lua (T1 WS session recorder): it
+-- needs to poll health the exact same way start_and_connect does, not a
+-- second curl-based copy that can silently drift from what production
+-- actually waits on. Mirrors the M._decode_ws_line / M._reassemble_stdout
+-- convention (underscore-prefixed alias onto an existing local).
+M._wait_for_server = wait_for_server
+
 -- Fetch the notebook HTML and extract the skew-protection server token.
 -- Calls `cb(token|nil)`.
 local function fetch_server_token(port, filepath, cb)
@@ -254,6 +261,9 @@ local function fetch_server_token(port, filepath, cb)
     cb(html:match('<marimo%-server%-token[^>]*data%-token="([^"]+)"'))
   end)
 end
+
+-- Test seam for tests/record_transcripts.lua — see M._wait_for_server above.
+M._fetch_server_token = fetch_server_token
 
 -- Generate a UUID v4-like string for session IDs.
 local function new_session_id()

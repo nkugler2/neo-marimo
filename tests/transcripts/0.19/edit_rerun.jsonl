@@ -1,0 +1,24 @@
+{"op": "neo_marimo_connected", "session_id": "<session-id>", "port": "<port>"}
+{"op": "kernel-ready", "data": {"op": "kernel-ready", "cell_ids": ["<cell-1>"], "codes": ["n = 1\nn"], "names": ["_"], "layout": null, "configs": [{"column": null, "disabled": false, "hide_code": false}], "resumed": false, "ui_values": {}, "last_executed_code": {}, "last_execution_time": {}, "app_config": {"width": "compact", "app_title": null, "layout_file": null, "css_file": null, "html_head_file": null, "auto_download": [], "sql_output": "auto"}, "kiosk": false, "capabilities": {"terminal": true, "pylsp": false, "ty": false, "basedpyright": false}, "auto_instantiated": false}}
+{"__action__":"instantiate"}
+{"op": "variables", "data": {"op": "variables", "variables": [{"name": "n", "declared_by": ["<cell-1>"], "used_by": []}]}}
+{"op": "cell-op", "data": {"op": "cell-op", "cell_id": "<cell-1>", "output": null, "console": null, "status": "queued", "stale_inputs": null, "run_id": "<uuid>", "serialization": null, "timestamp": 0}}
+{"op": "remove-ui-elements", "data": {"op": "remove-ui-elements", "cell_id": "<cell-1>"}}
+{"op": "cell-op", "data": {"op": "cell-op", "cell_id": "<cell-1>", "output": null, "console": [], "status": "running", "stale_inputs": null, "run_id": "<uuid>", "serialization": null, "timestamp": 0}}
+{"op": "variable-values", "data": {"op": "variable-values", "variables": [{"name": "n", "value": "1", "datatype": "int"}]}}
+{"op": "cell-op", "data": {"op": "cell-op", "cell_id": "<cell-1>", "output": {"channel": "output", "mimetype": "text/html", "data": "<pre class='text-xs'>1</pre>", "timestamp": 0}, "console": null, "status": null, "stale_inputs": null, "run_id": "<uuid>", "serialization": null, "timestamp": 0}}
+{"op": "cell-op", "data": {"op": "cell-op", "cell_id": "<cell-1>", "output": null, "console": null, "status": "idle", "stale_inputs": null, "run_id": null, "serialization": null, "timestamp": 0}}
+{"op": "completed-run", "data": {"op": "completed-run"}}
+{"__action__":"edit-and-save","cell":"<cell-1>","new_code":"n = 2\nn"}
+{"op": "update-cell-ids", "data": {"op": "update-cell-ids", "cell_ids": ["<cell-1>"]}}
+{"op": "update-cell-codes", "data": {"op": "update-cell-codes", "cell_ids": ["<cell-1>"], "codes": ["n = 2\nn"], "code_is_stale": true}}
+{"__action__":"run-cell"}
+{"op": "remove-ui-elements", "data": {"op": "remove-ui-elements", "cell_id": "<cell-1>"}}
+{"op": "variables", "data": {"op": "variables", "variables": [{"name": "n", "declared_by": ["<cell-1>"], "used_by": []}]}}
+{"op": "cell-op", "data": {"op": "cell-op", "cell_id": "<cell-1>", "output": null, "console": null, "status": "queued", "stale_inputs": null, "run_id": "<uuid>", "serialization": null, "timestamp": 0}}
+{"op": "remove-ui-elements", "data": {"op": "remove-ui-elements", "cell_id": "<cell-1>"}}
+{"op": "cell-op", "data": {"op": "cell-op", "cell_id": "<cell-1>", "output": null, "console": [], "status": "running", "stale_inputs": null, "run_id": "<uuid>", "serialization": null, "timestamp": 0}}
+{"op": "variable-values", "data": {"op": "variable-values", "variables": [{"name": "n", "value": "2", "datatype": "int"}]}}
+{"op": "cell-op", "data": {"op": "cell-op", "cell_id": "<cell-1>", "output": {"channel": "output", "mimetype": "text/html", "data": "<pre class='text-xs'>2</pre>", "timestamp": 0}, "console": null, "status": null, "stale_inputs": null, "run_id": "<uuid>", "serialization": null, "timestamp": 0}}
+{"op": "cell-op", "data": {"op": "cell-op", "cell_id": "<cell-1>", "output": null, "console": null, "status": "idle", "stale_inputs": null, "run_id": null, "serialization": null, "timestamp": 0}}
+{"op": "completed-run", "data": {"op": "completed-run"}}

@@ -153,6 +153,65 @@ python proves fragile, an alternative recorder is a thin Lua script run via
 `_decode_ws_line` input to a file. Either route satisfies the acceptance
 criteria; pick whichever is less code.
 
+**Deviation taken:** built `tests/record_transcripts.lua` (the permitted
+`nvim -l` alternative) instead of a python HTTP driver. Reimplementing
+marimo's start/health/token-fetch/instantiate/save/rekey choreography from
+scratch in Python would have duplicated a lot of already-battle-tested logic
+in `server.lua`, `sync.lua`, `actions.lua` and `ws_handlers.lua` (port
+selection, skew-token fetch, the save→watch→update-cell-ids rekey dance,
+widget object-id lookup). Driving those exact production code paths
+directly was less code, and every recorded action is byte-for-byte what a
+keymap press does — not a hand-rolled approximation of one. The recorder
+wraps `server._decode_ws_line` (not `on_message`) so it sees the exact raw
+line before anything mutates it, and calls `ws_handlers.dispatch` itself,
+synchronously, right there — giving deterministic ordering against the
+scripted action list instead of racing `connect_ws`'s own
+`vim.schedule`-deferred forwarding.
+
+Non-obvious things worth recording for whoever touches this next (T2, or a
+future re-record):
+- **`python_path` vs `marimo_cmd` are separate config knobs.** The recorder
+  must derive `marimo_cmd` from `NEO_MARIMO_TEST_PYTHON`'s own directory
+  (the sibling `marimo` binary) rather than trust `config.lua`'s default,
+  which points at the maintainer's personal pyenv env. Using mismatched
+  envs silently records a *different* marimo's output (caught this via a
+  version-mismatched "Update available" alert and 0.23-only ops appearing
+  in a "0.19" recording).
+- **marimo's own cell ids are already deterministic**, not just scrubbed
+  to be: `CellIdGenerator` (`_ast/cell_id.py`) seeds `random.Random(42)`, so
+  the same notebook structure mints the same ids every process run. The
+  `<cell-N>` substitution is still done (readability, and it's the one
+  place T1 and T0 deliberately share placeholder spelling), but it isn't
+  load-bearing for determinism the way it would be for a naively-random ID
+  scheme.
+- **`PYTHONHASHSEED` had to be pinned** (`vim.fn.setenv` before spawning,
+  inherited by the `--headless` subprocess). marimo's static analysis walks
+  `set`s of assigned/used names per cell; with the default randomized hash
+  seed, a cell binding several names (`rich_output.py`'s matplotlib cell)
+  broadcasts its `variables`/`variable-values` list in a different order
+  every run. This was the single largest source of non-reproducibility
+  found — worth checking first if a future scenario reintroduces flakiness.
+- **The `alert` op (CLI update-nag) is dropped, not scrubbed.** It hits a
+  real network endpoint and its content changes as new marimo versions
+  ship, independent of anything this repo controls — recording it would
+  make goldens flake on both network access and the passage of time.
+- **Object reprs can embed memory addresses** (`<Figure object at
+  0x...>` for anything without a custom `__repr__`) — scrubbed via a
+  generic `0x%x+` pattern; unrelated to the hash-seed fix above (ASLR, not
+  iteration order).
+- **JSON key order needed to be forced for the recorder's own `__action__`
+  markers** — `vim.json.encode` on a multi-key Lua table has no defined key
+  order, so the *same* action produced differently-ordered JSON across
+  runs. Built manually with `extra`'s keys sorted instead. (marimo's own
+  message JSON was never affected by this — Python dict/dataclass
+  serialization preserves insertion order regardless of hash seed; only
+  `set`-backed list *contents*, per the PYTHONHASHSEED point above, needed
+  a fix.)
+
+Recording ran three consecutive times against marimo 0.19.4
+(`MyMainTestingPython`); all five scenarios were byte-identical across all
+three runs.
+
 ---
 
 ## T2 — Replay spec layer (the payoff)
