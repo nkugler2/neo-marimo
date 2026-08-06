@@ -46,6 +46,17 @@ t.case("ws: unknown op returns false without error", function()
   t.eq(ws.dispatch("no-such-op", {}, {}), false)
 end)
 
+-- The explicit no-op registrations (see ws_handlers.lua for each op's
+-- rationale) must stay registered: if one is dropped, the T2 coverage guard
+-- only catches ops that appear in transcripts, and "reconnected" is only
+-- otherwise exercised by the gated E2E layer, which self-skips without a
+-- marimo-equipped python.
+t.case("ws: explicit no-op ops stay registered", function()
+  for _, op in ipairs({ "remove-ui-elements", "datasets", "reconnected" }) do
+    t.eq(ws.dispatch(op, {}, {}), true, op .. " must have a registered handler")
+  end
+end)
+
 -- marimo 0.23+ replaced update-cell-ids/update-cell-codes with a single
 -- payload-less "reload" op. The handler must unblock the run-gate
 -- (_last_cell_ids_at stamp) and re-sync from disk, except inside our own

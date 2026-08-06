@@ -363,6 +363,38 @@ match reality." Run before release or after touching `server.lua` /
   conditions, longer quiescence, or by cutting the scenario).
 - Without marimo: all five self-skip, suite green.
 
+**Deviation taken:** none from the build steps — `tests/spec/e2e_spec.lua`
+implements exactly the five scenarios listed, gated identically to
+`bridge_spec.lua`, teardown via a `with_notebook(scenario, fn)` helper
+(pcall + always-run cleanup) rather than a `t.with_server` wrapper, since the
+scenarios need a real notebook/buffer/tempdir torn down alongside the server,
+not just the server. `t.eventually` landed in `tests/helpers.lua` as
+specified; every E2E assertion goes through it, no bare sleeps.
+
+One genuine finding while writing the disconnect/reconnect case: the
+server.lua `resync_ws` doc comment ("marimo replays kernel-ready … re-emits
+every cell's output") describes the *kiosk self-heal after an id desync*
+path (`output.handle_cell_op`'s own resync trigger). A plain reconnect to a
+session marimo never dropped server-side — this case's actual scenario:
+kill `ws_client.py`, call `resync_ws` — does **not** replay `kernel-ready`.
+It sends a payload-less `"reconnected"` op instead, which `ws_handlers.lua`
+had no handler for (dispatch silently returned `false`, same as any
+unregistered op). Registered it as an explicit no-op in `ws_handlers.lua`
+with a rationale comment, following the exact precedent T2 set for
+`remove-ui-elements`/`datasets` — a real (if small) production-code
+completion this test phase surfaced, not scope creep: it closes the same
+"is this drop the future or a shrug" ambiguity flagged there. The E2E case
+itself asserts against the observed `"reconnected"` behavior rather than the
+comment's `kernel-ready` claim; the comment describes a different, real code
+path and was left alone.
+
+Recorded 3 consecutive `make test-e2e` runs against marimo 0.19.4
+(`MyMainTestingPython`, per the Makefile default) — all 5 scenarios green
+every time (15/15 case-runs). A run with `NEO_MARIMO_TEST_PYTHON` pointed at
+a marimo-less interpreter (`/opt/homebrew/bin/python3`) self-skipped all
+five (and `bridge_spec`/`server_spec`'s ws_client check alongside them),
+suite green. Full `make test` green both with and without marimo configured.
+
 ---
 
 ## T4 — One-command UX, repro harness, docs

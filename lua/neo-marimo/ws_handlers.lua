@@ -272,6 +272,20 @@ M.register("remove-ui-elements", function(_, _) end)
 -- replayed (docs/plan-testing.md).
 M.register("datasets", function(_, _) end)
 
+-- reconnected: sent (payload-less) when a WS reconnects to a session marimo
+-- still has open server-side — the plain "nothing actually changed, welcome
+-- back" case, as opposed to the kiosk self-heal in output.handle_cell_op
+-- (which reconnects specifically because our cell-id map desynced and needs
+-- kernel-ready's codes to re-key). No cell-id remap or output replay is
+-- needed here: the server never dropped our session state, so our existing
+-- nb.cell_by_id mapping and the outputs already rendered are still correct
+-- as-is. Explicit no-op for the same reason as remove-ui-elements/datasets
+-- above (T2) — found by T3's disconnect/reconnect E2E case
+-- (docs/plan-testing.md), which killed ws_client.py and reconnected via
+-- server.resync_ws expecting kernel-ready to replay per that function's own
+-- comment; it doesn't for this case, "reconnected" does instead.
+M.register("reconnected", function(_, _) end)
+
 M.register("neo_marimo_connected", function(_, _)
   utils.info("WebSocket connected.")
 end)

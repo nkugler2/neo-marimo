@@ -9,13 +9,23 @@ PYTHON ?= ~/.pyenv/versions/3.12.10/envs/MyMainTestingPython/bin/python
 # previous clone (preserved at $(PACK_DIR).pre-dev-link).
 PACK_DIR ?= $(HOME)/.local/share/nvim/site/pack/core/opt/neo-marimo
 
-.PHONY: test snapshots fixtures transcripts dev-link dev-unlink
+.PHONY: test test-e2e snapshots fixtures transcripts dev-link dev-unlink
 
-# NEO_MARIMO_TEST_PYTHON gates the python-dependent specs (bridge round-trip);
-# they self-skip when the interpreter is missing or has no marimo, so the rest
-# of the suite runs anywhere (including CI before marimo is installed).
+# NEO_MARIMO_TEST_PYTHON gates the python-dependent specs (bridge round-trip,
+# e2e); they self-skip when the interpreter is missing or has no marimo, so
+# the rest of the suite runs anywhere (including CI before marimo is
+# installed).
 test:
 	NEO_MARIMO_TEST_PYTHON=$(PYTHON) $(NVIM) -l tests/run.lua $(FILTER)
+
+# Just the gated E2E smoke tests (T3, tests/spec/e2e_spec.lua) against a real
+# marimo kernel — for iterating on them without re-running the whole suite.
+# Self-skips the same way `make test` does if PYTHON has no marimo. Filters
+# on the "e2e:" case-name prefix (run.lua's own FILTER is a case-name
+# substring match, not a file-name match) — every case in e2e_spec.lua uses
+# it and nothing else in the suite does.
+test-e2e:
+	NEO_MARIMO_TEST_PYTHON=$(PYTHON) $(NVIM) -l tests/run.lua "e2e:"
 
 # Regenerate snapshot goldens (tests/helpers.lua's t.snapshot, T0): same run
 # as `make test`, but a missing/mismatched golden under tests/snapshots/ gets

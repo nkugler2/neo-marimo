@@ -47,6 +47,35 @@ function H.no_match(s, pat, msg)
   end
 end
 
+-- Poll `fn()` on the real event loop until it returns truthy, or fail after
+-- `timeout_ms` (default 5000). Backs the E2E layer (T3, tests/spec/e2e_spec.lua):
+-- a real marimo kernel's timing varies with machine load and cell complexity,
+-- so a fixed `vim.uv.sleep`/`vim.wait(N)` is either flaky (too short) or
+-- wastes wall-clock on every case (too long, "just in case"). Every E2E
+-- assertion goes through this instead of a bare sleep.
+--
+-- `fn` is pcall'd on each poll: a predicate that reads not-yet-created state
+-- (an extmark id that doesn't exist until the first render, a table field a
+-- WS handler hasn't populated yet) is expected to error transiently while
+-- the kernel is still catching up, not to abort the whole wait.
+-- The last pcall error is kept and folded into the timeout failure: without
+-- it, a predicate that errors on *every* poll (a genuine bug — typo'd field,
+-- nil index — not transient not-ready state) is indistinguishable from a
+-- slow kernel, and the real error is silently discarded.
+function H.eventually(fn, timeout_ms, msg)
+  timeout_ms = timeout_ms or 5000
+  local last_err
+  local ok = vim.wait(timeout_ms, function()
+    local success, result = pcall(fn)
+    if not success then last_err = result end
+    return success and result and true or false
+  end, 50)
+  if not ok then
+    fail((msg or ("condition not met within " .. timeout_ms .. "ms"))
+      .. (last_err and ("\n  last predicate error: " .. tostring(last_err)) or ""))
+  end
+end
+
 -- ── fixtures ──────────────────────────────────────────────────────────────
 
 -- Newest fixture version directory under tests/fixtures (sorted descending,
