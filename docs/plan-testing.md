@@ -556,6 +556,90 @@ cosmetic intentional change is a one-command golden update. If stability
 can't be reached in reasonable effort, **cut this phase** and record that
 decision here — T0–T4 already deliver the core value.
 
+**Deviation taken:** shipped, not cut — stable across 5 consecutive runs (one
+creating the goldens, four re-verifying against them unchanged), well past
+the 3-run bar. `tests/screen/init.lua` (the `-u` init for the nested real
+nvim, modeled on `tests/demo_init.lua`) reaches the rendered state via
+`t.make_notebook` + `t.replay` exactly as instructed — no python, no kernel.
+`tests/screen/run.lua` owns the private-socket (`-L
+neo-marimo-screen-<pid>`) tmux lifecycle, polls `capture-pane -p` until two
+consecutive captures match (never a fixed sleep), and asserts through
+`t.snapshot` itself (not a reimplementation) so the golden format,
+`.actual.txt` dump, and `NEO_MARIMO_UPDATE_SNAPSHOTS=1` flow are exactly T0's
+— only the wrong auto-generated "make snapshots FILTER=..." hint in
+`t.snapshot`'s own failure message needed correcting (appended, not patched:
+`t.snapshot` is shared code other specs depend on, not worth forking over one
+string). Goldens live at `tests/snapshots/screen-*.txt`, same directory as
+T0's own goldens, disambiguated by prefix rather than a separate directory —
+one snapshot mechanism, one place to look.
+
+**Not folded into `make test`** — a private-socket tmux session driving a
+second real nvim process is a materially different risk profile than
+headless replay even at 5/5 clean runs on one machine, and the whole point
+of `make test` staying the one unconditionally-green command is not
+gambling that bar on a nested-terminal layer. `make test-screen` (Makefile,
+mirrors `make test-e2e`'s shape) runs it on demand; `docs/testing.md` has the
+one-paragraph rationale the acceptance criteria asks for.
+
+**Screen selection:** the 5 committed transcripts map onto the 5 named views,
+but not 1:1 in the order they're listed — `widgets`/`error_cell` are exact
+matches (widget glyph line; error styling), but `error_cell`'s traceback
+turns out to ALSO be the best "wrapped long output" exemplar (its HTML lines
+are genuinely hard-wrapped by `output.lua`'s `wrap_virt_line` pass — visible
+in the golden as lines splitting mid-`<span>` tag), which real marimo error
+output always looks like — forcing a 6th synthetic scenario just to see
+"wrapped" without "styled" would test a state a user never actually sees on
+its own. That freed a slot for a 5th screen with real, distinct regression
+value that isn't one of the 4 named categories: `edit_rerun`'s mid-replay
+state (`until_action = 2`, the same intermediate point T2's own
+`edit_rerun-mid` snapshot targets) — the buffer shows edited code while the
+output extmark still shows the stale value, a real visual bug class (stale
+output surviving an edit) that's cheap to show since the transcript's
+already committed. Final mapping: `basic_run` → cell box + output below,
+`widgets` → widget glyph line, `error_cell` → error styling + wrapped long
+output, `rich_output` → dataframe view (the image cell in the same scenario
+has no pixels to show without a real backend, per build step 4 — its box is
+just an empty `✓ ran` line, still useful coverage of a border straddling a
+large source cell), `edit_rerun` (mid) → stale output after an edit.
+
+**Genuine finding (Neovim, not neo-marimo):** the first attempt at each
+screen was missing the TOP border of whichever cell landed on the window's
+`topline` — not just the buffer's first cell; ANY cell, whenever a hard
+`topline` jump (`gg`, `zt`, or a buffer's very first paint after
+`nvim_win_set_buf`/`nvim_set_current_buf`) puts its `virt_lines_above` anchor
+row at the top of the window. Verified two ways: (1) a minimal 2-extmark
+repro isolating it from any neo-marimo code, and (2) independently, driving
+the REAL `M.attach` flow (real parser, real buffer, real border code, no
+test harness involved) against `basic_run.py` — a notebook's first cell's
+top border is invisible the instant ANY real user opens ANY notebook, every
+time, until something scrolls the window. It reliably reappears once the
+view scrolls THROUGH that row incrementally (confirmed: `G` then repeated
+Ctrl-Y — Neovim's incremental-scroll path recomputes `topfill`, the display
+space `virt_lines_above` needs, correctly; a hard topline jump doesn't).
+This is a Neovim/extmark rendering characteristic that predates and is
+independent of this plugin's border code — out of scope to patch inside a
+test-infrastructure phase, and risky to fix blind without its own review
+pass (interaction with `WinResized`/`BufWinEnter`/the debounced
+`redraw_outputs` path wasn't audited here). `tests/screen/init.lua`
+reproduces the same "scroll through once" settle (`G` + repeated Ctrl-Y) so
+the committed goldens show the fully-painted state a real user sees after
+their first scroll, not a misleading first-paint artifact that would
+otherwise mark every single screen "broken" at the exact thing this layer
+means to check (border correctness) for a reason that has nothing to do with
+border correctness. Flagged as a `TOCHANGE.md` Inbox item for the
+maintainer to triage a real fix (e.g. forcing a redraw pass after
+`buffer.render_all_borders`/`M.attach`) — not fixed here.
+
+**Verification:** self-skip confirmed two ways — `NEO_MARIMO_TMUX_BIN=
+/nonexistent/tmux make test-screen`-equivalent invocation exits 0 with a
+skip notice, and independently with `tmux` genuinely absent from `PATH` (a
+throwaway symlink-only directory containing just `nvim`), same clean exit 0.
+`make test` (300 cases) stayed green throughout, with `git status` clean of
+stray artifacts after every run (the screen layer's own goldens are the only
+new tracked files this phase adds). `make test-screen FILTER=error` narrows
+to one screen, confirming the same FILTER convention as the rest of the
+suite works here too.
+
 ---
 
 ## T6 — CI (can run in parallel with T3–T5)

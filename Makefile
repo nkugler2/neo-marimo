@@ -12,7 +12,7 @@ SCENARIO ?= basic_run
 # previous clone (preserved at $(PACK_DIR).pre-dev-link).
 PACK_DIR ?= $(HOME)/.local/share/nvim/site/pack/core/opt/neo-marimo
 
-.PHONY: test test-e2e snapshots fixtures transcripts corpus-add demo dev-link dev-unlink
+.PHONY: test test-e2e test-screen snapshots fixtures transcripts corpus-add demo dev-link dev-unlink
 
 # FILTER is the ergonomic, user-facing override (`make test FILTER=foo`).
 # It is deliberately NOT referenced as `$(FILTER)`/`"$(FILTER)"` inside any
@@ -70,6 +70,31 @@ test:
 # input), so passing it positionally here is fine.
 test-e2e:
 	NEO_MARIMO_TEST_PYTHON=$(PYTHON) $(NVIM) -l tests/run.lua "e2e:"
+
+# Optional, cuttable tmux visual screen snapshots (T5, docs/plan-testing.md):
+# a REAL (not headless) nvim inside a private-socket tmux session per screen,
+# reaching its rendered state via the T2 replay layer (no python/kernel
+# needed), captured with `tmux capture-pane -p` and asserted against goldens
+# under tests/snapshots/screen-*.txt using the same t.snapshot engine T0
+# specs use. Self-skips cleanly (exit 0) if tmux isn't on PATH.
+#
+# Deliberately NOT part of `make test`'s tests/spec/*_spec.lua glob — see
+# tests/screen/run.lua's own top-of-file comment for why a nested real
+# terminal is a fundamentally more timing-sensitive thing to fold into the
+# always-green suite than headless replay, even though this phase's own
+# 5-consecutive-clean-runs check (docs/plan-testing.md T5) found it stable
+# on the dev machine it was built on.
+#
+# FILTER narrows by screen name, same convention as `make test FILTER=`
+# (reaches this recipe via the same NEO_MARIMO_TEST_FILTER export as
+# above — not `$(FILTER)` spliced into recipe text, for the same reason).
+# NEO_MARIMO_UPDATE_SNAPSHOTS=1 make test-screen accepts new/changed goldens,
+# mirroring `make snapshots`. NEO_MARIMO_SCREEN_NVIM (defaulted to $(NVIM)
+# here, so `make test-screen NVIM=...` also controls the NESTED nvim tmux
+# launches, not just the outer runner process) lets tests/screen/run.lua spawn
+# a specific nvim binary inside each tmux pane.
+test-screen:
+	NEO_MARIMO_SCREEN_NVIM=$(NVIM) $(NVIM) -l tests/screen/run.lua
 
 # Regenerate snapshot goldens (tests/helpers.lua's t.snapshot, T0): same run
 # as `make test`, but a missing/mismatched golden under tests/snapshots/ gets

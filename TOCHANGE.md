@@ -63,6 +63,30 @@ plan doc (`docs/plan-release.md` for the current release push,
   content hasn't changed yet — which is exactly the window between a local
   edit and marimo's reactive rerun confirming new output. Needs a repro with
   `:MarimoWsDebug` logging on to confirm before fixing.
+- **A cell's top border is invisible the instant a notebook is first opened**
+  — repro: open ANY notebook fresh (`make demo`, or just `nvim
+  tests/scenarios/basic_run.py`) and look at the very first cell before
+  touching anything — its `╭─ py #1 ─...─╮` top border is missing; the
+  bottom border and output are fine. Scrolling the window at all (even one
+  line and back) makes it reappear correctly, permanently, for the rest of
+  the session. Root cause (confirmed via a minimal extmark repro, isolated
+  from all plugin code — see `docs/plan-testing.md`'s T5 section for the
+  full writeup): Neovim doesn't reserve display space for an extmark's
+  `virt_lines_above` when its anchor row becomes the window's `topline` via
+  a hard jump (`gg`/`zt`, or a buffer's first paint after
+  `nvim_win_set_buf`) — this affects ANY cell whose top border lands on
+  `topline`, not just the first cell, but the first cell hits it on literally
+  every attach since it's always the buffer's starting `topline`. Likely fix:
+  force an incremental-scroll settle (confirmed working: `normal! G` then
+  repeated Ctrl-Y, which uses Neovim's incremental-scroll path instead of a
+  hard jump and correctly recomputes `topfill`) somewhere in `M.attach`
+  after `buffer.render_all_borders`, or a lighter redraw trick if one exists
+  — needs its own review pass to make sure it doesn't fight
+  `WinResized`/`BufWinEnter`'s own re-render or the debounced
+  `redraw_outputs` path. Not fixed yet; `tests/screen/init.lua`
+  works around it locally (comment there has the same detail) so the T5
+  visual goldens show the real, steady-state render rather than this
+  first-paint artifact.
 - **Image never re-renders after being cleared, until server restart** — same
   repro as above, one step further: uncomment the `fig` line and rerun (cell
   or whole notebook) — the graph never comes back, and the run
