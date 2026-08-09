@@ -59,19 +59,33 @@ function M.plugin_root()
 	return vim.fn.fnamemodify(source, ":h:h:h")
 end
 
+-- Redraw before echoing a message. Several call sites (server.lua's
+-- attach -> start -> port-fallback chain, tests/demo_init.lua's
+-- attach -> start_server chain, ...) fire two or more of these in the same
+-- synchronous stretch of code, before nvim ever returns to its main loop for
+-- a screen draw. Without a redraw in between, Nvim can't tell the first
+-- message was ever shown/read, so the second one triggers the blocking
+-- "Press ENTER or type command to continue" hit-enter prompt instead of
+-- just displaying. A cheap `redraw` first flushes the pending message so
+-- each call gets its own line instead of stacking.
+local function echo(msg, level)
+	vim.cmd("redraw")
+	vim.notify("[neo-marimo] " .. msg, level)
+end
+
 -- Log a warning to :messages
 function M.warn(msg)
-	vim.notify("[neo-marimo] " .. msg, vim.log.levels.WARN)
+	echo(msg, vim.log.levels.WARN)
 end
 
 -- Log an error to :messages
 function M.error(msg)
-	vim.notify("[neo-marimo] " .. msg, vim.log.levels.ERROR)
+	echo(msg, vim.log.levels.ERROR)
 end
 
 -- Log info to :messages (unconditional; not gated by debug mode)
 function M.info(msg)
-	vim.notify("[neo-marimo] " .. msg, vim.log.levels.INFO)
+	echo(msg, vim.log.levels.INFO)
 end
 
 return M
