@@ -3,6 +3,7 @@ id: testing
 aliases: []
 tags: []
 ---
+
 # Testing neo-marimo
 
 Five layers, from fastest/broadest to slowest/narrowest. `make test` runs the
@@ -33,7 +34,7 @@ is the "how do I actually use it" summary.
    throwaway temp dir first, so nothing you do in a demo session touches the
    repo.
 5. **Screen** (`make test-screen`, `tests/screen/`) — optional, cuttable
-   (T5): a handful of golden *screens* — what a real terminal actually shows
+   (T5): a handful of golden _screens_ — what a real terminal actually shows
    for the highest-value views (cell box + output, a widget glyph line,
    error styling, a dataframe table, an edited-but-stale-output state) — for
    catching "the box border/column math is visibly wrong" specifically. A
@@ -45,15 +46,15 @@ is the "how do I actually use it" summary.
 
 ## Commands
 
-| Command | What it does |
-|---|---|
-| `make test` | Everything: unit + replay always, E2E/bridge round-trips gated (self-skip without `NEO_MARIMO_TEST_PYTHON`). **The one command.** `FILTER=<substr>` narrows by case name. |
-| `make test-e2e` | Just the E2E layer, for iterating on it without the full suite. |
-| `make test-screen` | The optional visual screen layer (#5 above), for iterating on it or checking it before a release. Self-skips without `tmux`. `FILTER=<substr>` narrows by screen name; `NEO_MARIMO_UPDATE_SNAPSHOTS=1 make test-screen` accepts new/changed goldens. |
-| `make snapshots` | Regenerate golden render-state snapshots (`tests/snapshots/*.txt`). Same run as `make test` with `NEO_MARIMO_UPDATE_SNAPSHOTS=1`. `FILTER=` scopes it to one case. Does **not** touch the screen layer's own goldens — use `make test-screen` with the same env var for those. |
-| `make transcripts` | Re-record WS session transcripts (`tests/transcripts/<version>/*.jsonl`) against a real kernel. Needs `NEO_MARIMO_TEST_PYTHON`; re-run after bumping supported marimo. |
-| `make fixtures` | Re-capture the `_repr_html_()` HTML fixture corpus (`tests/fixtures/`). Needs `NEO_MARIMO_TEST_PYTHON`. |
-| `make demo [SCENARIO=widgets]` | Open a real nvim on a scenario notebook, attached and kernel-running. Default scenario is `basic_run`; see `tests/scenarios/*.py` for the others. |
+| Command                        | What it does                                                                                                                                                                                                                                                                   |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `make test`                    | Everything: unit + replay always, E2E/bridge round-trips gated (self-skip without `NEO_MARIMO_TEST_PYTHON`). **The one command.** `FILTER=<substr>` narrows by case name.                                                                                                      |
+| `make test-e2e`                | Just the E2E layer, for iterating on it without the full suite.                                                                                                                                                                                                                |
+| `make test-screen`             | The optional visual screen layer (#5 above), for iterating on it or checking it before a release. Self-skips without `tmux`. `FILTER=<substr>` narrows by screen name; `NEO_MARIMO_UPDATE_SNAPSHOTS=1 make test-screen` accepts new/changed goldens.                           |
+| `make snapshots`               | Regenerate golden render-state snapshots (`tests/snapshots/*.txt`). Same run as `make test` with `NEO_MARIMO_UPDATE_SNAPSHOTS=1`. `FILTER=` scopes it to one case. Does **not** touch the screen layer's own goldens — use `make test-screen` with the same env var for those. |
+| `make transcripts`             | Re-record WS session transcripts (`tests/transcripts/<version>/*.jsonl`) against a real kernel. Needs `NEO_MARIMO_TEST_PYTHON`; re-run after bumping supported marimo.                                                                                                         |
+| `make fixtures`                | Re-capture the `_repr_html_()` HTML fixture corpus (`tests/fixtures/`). Needs `NEO_MARIMO_TEST_PYTHON`.                                                                                                                                                                        |
+| `make demo [SCENARIO=widgets]` | Open a real nvim on a scenario notebook, attached and kernel-running. Default scenario is `basic_run`; see `tests/scenarios/*.py` for the others.                                                                                                                              |
 
 ### Why the screen layer stays out of `make test`
 
